@@ -488,7 +488,7 @@
     keysdrawer:
       'For a drawer device: paste or scan the public file it made and, if you want one, the heir\u2019s public key. One fingerprint seals this phone\u2019s own keys. The tutorial button walks through making the drawer device.',
     sheet:
-      'One of your three safe sheets. Any two open your vault, so they must outlive this phone: paper, three places, never a photo. They are shown once.',
+      'One of your three safe sheets. Any two open your vault, so they must outlive this phone: paper, three places, never a photo. This phone keeps a copy, but adding a fingerprint clears it.',
     sheetcheck: 'A quick check that your paper copy is right. Tap the word that matches the number asked for.',
     offlinehow: 'How a drawer device is made and used, one step per page.',
     showsheets: 'Your three vault sheets, kept sealed on this phone. Any two open the vault. Paper, three places, never a photo.',
@@ -6026,6 +6026,9 @@
           row('watcher', 'The guard', D.isLocal() ? 'This phone watches your money' : 'This phone, and a second one') +
           (D.isLocal() ? '' : row('seconddevice', 'Second device')) +
           '</div>' +
+          (D.isLocal()
+            ? '<div class="sub" data-fpwarn>Adding a fingerprint to this phone clears your everyday keys. Write down at least two safe sheets first.</div>'
+            : '') +
           '<div class="label mt20">Help</div><div class="list mt0">' +
           row('howitworks', 'How it works') +
           row('glossary', 'Library: crypto and Kaspa') +
