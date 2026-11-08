@@ -546,19 +546,29 @@ fn sweep_cold_coins(ctx: &Ctx, mut coins: Vec<Coin>, to_spk: ScriptPublicKey) ->
     req.sized(ctx, total, true).map_err(|e| format!("the safe holds {:.5} KAS; {e}", kas(total)))
 }
 
+/// "Update now": the account's stop has not shown up in the safe yet (the page waits a moment and asks again).
+pub const STOP_NOT_IN_SAFE_YET: &str = "The account's money has not reached your safe yet. Trying again in a moment.";
+
 /// The phone's take-out (mainnet): spend from the safe on this device, with two of its three
 /// cold sheets held in `ctx.keys` (cold/cold2/cold3 at the slots the rule block's `cold_x` names; the caller
 /// matched them). Builds the request the way `cold-send --airgap` does (`cold_send_request`), signs and
 /// budgets it through the same `check` the offline device runs (two signatures in redeem-key order, then the
 /// redeem script), proves it in the engine and submits it. `amount` None = everything less the fee; returns
-/// (tx id, what reached `to` in sompi, `to`). Nothing is written to the airgap folder.
-pub async fn takeout(ctx: &Ctx, amount: Option<u64>, to: &str) -> Result<(String, u64, String), String> {
+/// (tx id, what reached `to` in sompi, `to`). Nothing is written to the airgap folder. `only_tx` limits the
+/// coins to the outputs of that one transaction (the account's own stop, for "Update now"): the rest of the safe stays.
+pub async fn takeout(ctx: &Ctx, amount: Option<u64>, to: &str, only_tx: Option<&str>) -> Result<(String, u64, String), String> {
     let present = ctx.keys.cold_keys();
     if present.len() != 2 {
         return Err(format!("a take-out needs exactly two cold sheets here; found {}", present.len()));
     }
     let to_spk = ctx.network.try_to_spk(to)?;
-    let coins = cold_coins(ctx).await?;
+    let mut coins = cold_coins(ctx).await?;
+    if let Some(tx) = only_tx {
+        coins.retain(|(o, _)| o.transaction_id.to_string() == tx);
+        if coins.is_empty() {
+            return Err(STOP_NOT_IN_SAFE_YET.into());
+        }
+    }
     let (req, _) = cold_send_request(ctx, coins, amount, to_spk)?;
     let mut c = sign_here(ctx, &req)?;
     ctx.verify(&c.tx, &c.entries)?;

@@ -225,7 +225,7 @@ final class Signer {
     static final String SIGNER_WRAPPED_KEY = "signer.wrapped_key";
     /** The three slots, as pref suffixes: signer.card, signer.stop, signer.funding. */
     static final Set<String> SIGNER_SLOTS = new HashSet<>(Arrays.asList("card", "stop", "funding", "cold", "cold2", "cold3"));
-    static final String SIGNER_ENROL_NOTICE = "Your phone's fingerprints changed, so the card key, the emergency stop key and the funding key kept on this phone were cleared. Nothing in the safe changed. Stop this account and open a new one to keep using this phone.";
+    static final String SIGNER_ENROL_NOTICE = "Your phone's fingerprints changed, so the card key, the emergency stop key and the funding key kept on this phone were cleared. The safe sheets kept on this phone are still there, and nothing in the safe changed. Stop this account and open a new one to keep using this phone.";
     /** The signer data key while open (null when shut), when the prompt opened it, and which slots may still be read this time. All under the bridge lock. */
     private byte[] signerDataKey = null;
     private long signerOpenedAt = 0;
@@ -246,6 +246,223 @@ final class Signer {
                 .setInvalidatedByBiometricEnrollment(true)
                 .setKeySize(256).build());
         return g.generateKey();
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // The safe store: the three safe keys (cold, cold2, cold3: "Show my sheets" and a paperless take-out) under their
+    // OWN Keystore key, kaspavault.safe.v1, with their own wrapped data key (safe.wrapped_key) and their own prefs
+    // (safe.cold, safe.cold2, safe.cold3), same "IV:ciphertext" form as sealBytes. Unlike the signer key it SURVIVES a
+    // new fingerprint enrolment (setInvalidatedByBiometricEnrollment(false)): a new finger clears only the everyday
+    // keys (card, stop, funding), never this phone's copy of the safe sheets. forgetSigner()/forgetSignerPrefs() never
+    // touch "safe."; only keys.burn (burnCold) and keys.reset (forgetSafe) do.
+    // Auth mode, chosen on purpose: a short validity window (SAFE_SECONDS = 15 s), not per-operation. A per-operation
+    // key needs its own CryptoObject, a BiometricPrompt carries ONE, and the page only calls confirmSigner without
+    // saying which method follows, so per-operation would cost a second prompt (or a page change) for takeout and
+    // keys.sheets. With the window, the one confirmSigner prompt (signer cipher, or a plain prompt when no signer cipher
+    // can be built) also authorises the safe key, and the key is only used right after that prompt: the safe methods
+    // are FRESH_PROMPT_METHODS (promptedRecently()), migrateCold() runs straight after the prompt, and keysNew falls
+    // back to the old store when its 15 s have passed. A use past the 15 s fails with UserNotAuthenticatedException and
+    // the page is asked for a fresh finger; nothing is lost. setUnlockedDeviceRequired: never usable while locked.
+    // Old phones kept these as signer.cold*: readers prefer safe.* and fall back to signer.*; migrateCold() moves them
+    // across (re-opened and compared before the old copy goes) at the first prompt where both keys open.
+    // ---------------------------------------------------------------------------------------------------------------
+    static final String SAFE_ALIAS = "kaspavault.safe.v1";
+    static final String SAFE_WRAPPED_KEY = "safe.wrapped_key";
+    static final int SAFE_SECONDS = 15;
+    static final String[] COLD_SLOTS = {"cold", "cold2", "cold3"};
+    /** When a plain prompt (no signer cipher could be built) said yes; 0 when none. Under the bridge lock. */
+    private long plainPromptAt = 0;
+
+    /** The safe wrapping key: usable for SAFE_SECONDS after an in-app prompt, survives a new fingerprint, never while locked. */
+    static SecretKey safeKey() throws Exception {
+        KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        KeyStore.Entry e = ks.getEntry(SAFE_ALIAS, null);
+        if (e instanceof KeyStore.SecretKeyEntry) return ((KeyStore.SecretKeyEntry) e).getSecretKey();
+        KeyGenerator g = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        g.init(new KeyGenParameterSpec.Builder(SAFE_ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setUserAuthenticationRequired(true)
+                .setUserAuthenticationParameters(SAFE_SECONDS, KeyProperties.AUTH_BIOMETRIC_STRONG | KeyProperties.AUTH_DEVICE_CREDENTIAL)
+                .setInvalidatedByBiometricEnrollment(false)
+                .setUnlockedDeviceRequired(true)
+                .setKeySize(256).build());
+        return g.generateKey();
+    }
+
+    /** True when any safe slot is sealed on this phone (safe.* or the old signer.*). */
+    boolean hasAnyCold() {
+        for (String n : COLD_SLOTS) if (hasSlot(n)) return true;
+        return false;
+    }
+
+    /**
+     * The safe data key out of safe.wrapped_key, or (create, and none stored yet) a fresh one wrapped and committed.
+     * Throws UserNotAuthenticatedException more than SAFE_SECONDS after the last prompt. The caller zero-fills it.
+     */
+    private byte[] safeDataKey(boolean create) throws Exception {
+        String w = act.prefs.getString(SAFE_WRAPPED_KEY, "");
+        int at = w.indexOf(':');
+        Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+        if (at > 0) {
+            c.init(Cipher.DECRYPT_MODE, safeKey(), new GCMParameterSpec(128, Base64.decode(w.substring(0, at), Base64.NO_WRAP)));
+            return c.doFinal(Base64.decode(w.substring(at + 1), Base64.NO_WRAP));
+        }
+        if (!create) throw new IllegalStateException("no safe data key");
+        c.init(Cipher.ENCRYPT_MODE, safeKey());
+        byte[] k = new byte[32];
+        new SecureRandom().nextBytes(k);
+        try {
+            byte[] ct = c.doFinal(k);
+            if (!act.prefs.edit().putString(SAFE_WRAPPED_KEY, Base64.encodeToString(c.getIV(), Base64.NO_WRAP) + ":" + Base64.encodeToString(ct, Base64.NO_WRAP)).commit())
+                throw new IllegalStateException("safe data key not stored");
+        } catch (Exception x) {
+            Arrays.fill(k, (byte) 0);
+            throw x;
+        }
+        return k;
+    }
+
+    /** "IV:ciphertext" of v under a data key (AES-GCM). */
+    static String sealWith(byte[] dk, byte[] v) throws Exception {
+        Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+        c.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(dk, "AES"));
+        byte[] ct = c.doFinal(v);
+        return Base64.encodeToString(c.getIV(), Base64.NO_WRAP) + ":" + Base64.encodeToString(ct, Base64.NO_WRAP);
+    }
+
+    /** The bytes of an "IV:ciphertext" under a data key; throws when it is not there or does not decrypt. */
+    static byte[] openWith(byte[] dk, String sealed) throws Exception {
+        int at = sealed.indexOf(':');
+        if (at <= 0) throw new IllegalStateException("not sealed");
+        Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+        c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(dk, "AES"), new GCMParameterSpec(128, Base64.decode(sealed.substring(0, at), Base64.NO_WRAP)));
+        return c.doFinal(Base64.decode(sealed.substring(at + 1), Base64.NO_WRAP));
+    }
+
+    /**
+     * keysNew: the safe keys sealed under the safe data key, in order, or null when the safe key cannot be used now
+     * (its SAFE_SECONDS since the prompt ran out): keysNew then seals them in the old signer store and migrateCold()
+     * moves them at the next prompt. The inputs are not zero-filled here (keysNew does that).
+     */
+    String[] sealSafe(byte[]... v) {
+        synchronized (act.bridge) {
+            byte[] dk = null;
+            try {
+                dk = safeDataKey(true);
+                String[] out = new String[v.length];
+                for (int i = 0; i < v.length; i++) out[i] = sealWith(dk, v[i]);
+                return out;
+            } catch (Exception e) {
+                android.util.Log.w("KaspaVault", "safe store not usable now: " + e.getClass().getSimpleName());
+                return null;
+            } finally {
+                if (dk != null) Arrays.fill(dk, (byte) 0);
+            }
+        }
+    }
+
+    /**
+     * vault(): the named safe slots' bytes, safe.* first, else the old signer.* (that needs the signer store open, once
+     * per slot per prompt, as openBytes). A null entry when a slot is missing or does not decrypt. Throws
+     * UserNotAuthenticatedException when the safe key's SAFE_SECONDS after the prompt are over (the page then asks for
+     * a fresh finger). The caller zero-fills every array.
+     */
+    byte[][] openCold(String... names) throws android.security.keystore.UserNotAuthenticatedException {
+        synchronized (act.bridge) {
+            byte[][] out = new byte[names.length][];
+            byte[] dk = null;
+            try {
+                for (int i = 0; i < names.length; i++) {
+                    String v = act.prefs.getString("safe." + names[i], "");
+                    if (v.indexOf(':') > 0) {
+                        try {
+                            if (dk == null) dk = safeDataKey(false);
+                            out[i] = openWith(dk, v);
+                        } catch (android.security.keystore.UserNotAuthenticatedException e) {
+                            for (byte[] o : out) if (o != null) Arrays.fill(o, (byte) 0);
+                            throw e;
+                        } catch (Exception e) {
+                            out[i] = null;
+                        }
+                    } else {
+                        out[i] = openBytes(names[i]);
+                    }
+                }
+                return out;
+            } finally {
+                if (dk != null) Arrays.fill(dk, (byte) 0);
+            }
+        }
+    }
+
+    /**
+     * Moves old signer.cold* into safe.cold*, never lossy. Runs straight after a signer prompt (both keys open: the
+     * signer data key in memory, the safe key inside its SAFE_SECONDS), only when some signer.cold* exist and no
+     * safe.cold* do. Each value is sealed under the safe data key, then the data key is unwrapped AGAIN from the stored
+     * safe.wrapped_key and every sealed value re-opened and compared byte for byte; only then are safe.* written and
+     * signer.cold* removed, in one commit. Any failure leaves signer.cold* untouched (the readers fall back to them).
+     */
+    void migrateCold() {
+        synchronized (act.bridge) {
+            if (signerDataKey == null) return;
+            boolean legacy = false;
+            for (String n : COLD_SLOTS) {
+                if (act.prefs.getString("safe." + n, "").indexOf(':') > 0) return;
+                if (act.prefs.getString("signer." + n, "").indexOf(':') > 0) legacy = true;
+            }
+            if (!legacy) return;
+            byte[] dk = null, dk2 = null;
+            byte[][] plain = new byte[COLD_SLOTS.length][];
+            String[] sealed = new String[COLD_SLOTS.length];
+            try {
+                for (int i = 0; i < COLD_SLOTS.length; i++) {
+                    String old = act.prefs.getString("signer." + COLD_SLOTS[i], "");
+                    if (old.indexOf(':') <= 0) continue;
+                    plain[i] = openWith(signerDataKey, old);
+                    if (dk == null) dk = safeDataKey(true);
+                    sealed[i] = sealWith(dk, plain[i]);
+                }
+                dk2 = safeDataKey(false); // from the stored blob, as every later reader will
+                SharedPreferences.Editor ed = act.prefs.edit();
+                for (int i = 0; i < COLD_SLOTS.length; i++) {
+                    if (sealed[i] == null) continue;
+                    byte[] back = openWith(dk2, sealed[i]);
+                    boolean same = java.security.MessageDigest.isEqual(back, plain[i]);
+                    Arrays.fill(back, (byte) 0);
+                    if (!same) throw new IllegalStateException("safe copy differs");
+                    ed.putString("safe." + COLD_SLOTS[i], sealed[i]).remove("signer." + COLD_SLOTS[i]);
+                }
+                if (!ed.commit()) throw new IllegalStateException("safe copy not stored");
+                android.util.Log.i("KaspaVault", "safe keys moved to the safe store");
+            } catch (Exception e) {
+                android.util.Log.w("KaspaVault", "safe keys stay in the old store: " + e.getClass().getSimpleName());
+            } finally {
+                for (byte[] p : plain) if (p != null) Arrays.fill(p, (byte) 0);
+                if (dk != null) Arrays.fill(dk, (byte) 0);
+                if (dk2 != null) Arrays.fill(dk2, (byte) 0);
+            }
+        }
+    }
+
+    /** keys.burn: only the sealed safe keys, in both stores (safe.cold*, old signer.cold*). */
+    void burnCold() {
+        SharedPreferences.Editor ed = act.prefs.edit();
+        for (String n : COLD_SLOTS) ed.remove("safe." + n).remove("signer." + n);
+        ed.commit();
+    }
+
+    /** keys.reset (engine ok): the old safe goes too, alias and every "safe." pref, so it never shadows the next set. */
+    void forgetSafe() {
+        try {
+            KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+            ks.load(null);
+            ks.deleteEntry(SAFE_ALIAS);
+        } catch (Exception ignored) { }
+        SharedPreferences.Editor ed = act.prefs.edit();
+        for (String k : act.prefs.getAll().keySet()) if (k.startsWith("safe.")) ed.remove(k);
+        ed.apply();
     }
 
     /** The cipher the next signer prompt is shown for: unwraps the signer data key, or wraps a fresh one when there is none yet (first keysNew). */
@@ -306,10 +523,11 @@ final class Signer {
         }
     }
 
-    /** True only within FRESH_PROMPT_MS of a real prompt (the window shortcut never moves signerOpenedAt). */
+    /** True only within FRESH_PROMPT_MS of a real prompt (the window shortcut never moves signerOpenedAt); a plain prompt (no signer cipher) counts too. */
     boolean promptedRecently() {
         synchronized (act.bridge) {
-            return signerDataKey != null && android.os.SystemClock.elapsedRealtime() - signerOpenedAt <= FRESH_PROMPT_MS;
+            long now = android.os.SystemClock.elapsedRealtime();
+            return (signerDataKey != null && now - signerOpenedAt <= FRESH_PROMPT_MS) || (plainPromptAt > 0 && now - plainPromptAt <= FRESH_PROMPT_MS);
         }
     }
 
@@ -319,6 +537,7 @@ final class Signer {
             if (signerDataKey != null) Arrays.fill(signerDataKey, (byte) 0);
             signerDataKey = null;
             signerReadable.clear();
+            plainPromptAt = 0;
         }
     }
 
@@ -362,12 +581,14 @@ final class Signer {
         }
     }
 
-    /** True when this phone has a sealed key under the slot (the engine has made keys here). */
-    boolean hasSlot(String name) { return act.prefs.getString("signer." + name, "").indexOf(':') > 0; }
+    /** True when this phone has a sealed key under the slot (the engine has made keys here); the safe slots count under safe.* or the old signer.*. */
+    boolean hasSlot(String name) { return act.prefs.getString("signer." + name, "").indexOf(':') > 0 || act.prefs.getString("safe." + name, "").indexOf(':') > 0; }
 
     /**
-     * The signer key was invalidated (fingerprints changed): drop that alias and the three sealed keys, nothing else.
-     * The pairing store (KEY_ALIAS, "secret." prefs, live_on) is not touched; forgetSecrets() never touches this one.
+     * The signer key was invalidated (fingerprints changed): drop that alias and the everyday sealed keys (card, stop,
+     * funding, plus any old signer.cold* that migrateCold had not moved yet: unreadable without that alias anyway),
+     * nothing else. The safe store (SAFE_ALIAS, "safe." prefs) survives a new fingerprint and is not touched; nor is the
+     * pairing store (KEY_ALIAS, "secret." prefs, live_on); forgetSecrets() never touches this one.
      */
     void forgetSigner() {
         try {
@@ -379,9 +600,10 @@ final class Signer {
     }
 
     /**
-     * Drops only the sealed keys (every "signer." pref: card, stop, funding, cold, cold2, cold3) and shuts the store; the
-     * signer alias stays, so the next confirmSigner needs no re-enrolment. keys.reset uses this once the engine has
-     * archived the old key files, so the old sealed keys never shadow the next set. Nothing outside "signer." is touched.
+     * Drops only the sealed keys (every "signer." pref: card, stop, funding, and old cold, cold2, cold3) and shuts the
+     * store; the signer alias stays, so the next confirmSigner needs no re-enrolment. keys.reset uses this (with
+     * forgetSafe) once the engine has archived the old key files, so the old sealed keys never shadow the next set.
+     * Nothing outside "signer." is touched: the "safe." prefs stay.
      */
     void forgetSignerPrefs() {
         SharedPreferences.Editor ed = act.prefs.edit();
@@ -484,26 +706,43 @@ final class Signer {
                     act.call(callbackName, "\"unavailable\"");
                     return;
                 }
-                Cipher cipher; // the one operation this prompt authorises: it opens the signer data key, and nothing else can
+                // The one operation this prompt authorises: it opens the signer data key, and nothing else can. The same
+                // prompt also starts the safe key's SAFE_SECONDS, so the safe store never depends on this cipher: when a new
+                // fingerprint killed the signer key, the dead alias goes (forgetSigner, everyday keys only), a fresh signer
+                // key is made for the prompt, and if even that cannot be built while safe keys are kept here, a plain prompt
+                // (no CryptoObject) still lets "Show my sheets" and a paperless take-out through. One prompt either way.
+                Cipher cipher;
                 try {
                     cipher = signerCipher();
                 } catch (KeyPermanentlyInvalidatedException e) {
                     forgetSigner(); act.notice = SIGNER_ENROL_NOTICE; act.pushNotice();
-                    act.call(callbackName, "\"refused\"");
-                    return;
+                    try { cipher = signerCipher(); } catch (Exception e2) { cipher = null; }
                 } catch (Exception e) {
+                    cipher = null;
+                }
+                if (cipher == null && !hasAnyCold()) {
                     act.call(callbackName, "\"refused\"");
                     return;
                 }
+                final Cipher shown = cipher;
                 BiometricPrompt prompt = new BiometricPrompt.Builder(act)
                         .setTitle("KaspaVault").setSubtitle(subtitle)
                         .setConfirmationRequired(false)
                         .setAllowedAuthenticators(AUTHENTICATORS).build();
-                prompt.authenticate(new BiometricPrompt.CryptoObject(cipher), new CancellationSignal(), act.getMainExecutor(), new BiometricPrompt.AuthenticationCallback() {
+                BiometricPrompt.AuthenticationCallback answer = new BiometricPrompt.AuthenticationCallback() {
                     @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult r) {
                         try {
+                            if (shown == null) { // plain prompt: only the safe store (FRESH_PROMPT_METHODS) may follow
+                                synchronized (act.bridge) {
+                                    shutSigner();
+                                    plainPromptAt = android.os.SystemClock.elapsedRealtime();
+                                }
+                                act.call(callbackName, "\"ok\"");
+                                return;
+                            }
                             BiometricPrompt.CryptoObject co = r.getCryptoObject();
-                            openSignerWith(co != null && co.getCipher() != null ? co.getCipher() : cipher);
+                            openSignerWith(co != null && co.getCipher() != null ? co.getCipher() : shown);
+                            migrateCold(); // both keys open right now: move old signer.cold* into the safe store (verified, never lossy)
                             act.call(callbackName, "\"ok\"");
                         } catch (KeyPermanentlyInvalidatedException e) {
                             forgetSigner(); act.notice = SIGNER_ENROL_NOTICE; act.pushNotice();
@@ -517,7 +756,9 @@ final class Signer {
                                 || code == BiometricPrompt.BIOMETRIC_ERROR_TIMEOUT;
                         act.call(callbackName, userLeft ? "\"cancel\"" : code == BiometricPrompt.BIOMETRIC_ERROR_CANCELED ? "\"away\"" : "\"refused\"");
                     }
-                });
+                };
+                if (shown != null) prompt.authenticate(new BiometricPrompt.CryptoObject(shown), new CancellationSignal(), act.getMainExecutor(), answer);
+                else prompt.authenticate(new CancellationSignal(), act.getMainExecutor(), answer);
             });
         }
 }

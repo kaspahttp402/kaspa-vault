@@ -26,7 +26,7 @@ function load(opts) {
     document: { hidden: false, addEventListener() {} },
     localStorage: { getItem() { return null; }, setItem() {} },
     setInterval() { return 0; }, clearInterval() {},   // the page's 1 s tick and 5 s poll never fire: tests drive poll themselves
-    setTimeout(f) { pending.push(f); return 0; }, clearTimeout() {},
+    setTimeout(f) { deliver(f); return 0; }, clearTimeout() {},   // a wait ends at once (the engine's "trying again" retries)
     fetch() { return Promise.reject(new Error('no network in tests')); },
   };
   ctx.window = ctx;

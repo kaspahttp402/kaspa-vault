@@ -121,6 +121,27 @@ const STEP_PAY_NOTICE: &str = "Pay the account's money to your purse. It waits t
 const STEP_FINISH: &str = "When the wait is over, finish the payment.";
 const STEP_KEEP: &str = "Close the old account: the small amount it must always keep goes to your safe.";
 const STEP_OPEN: &str = "Open the account again under the new rules, from your purse.";
+const STEP_NOW_STOP: &str = "Stop the account: its money goes to your safe at once.";
+const STEP_NOW_TAKEOUT: &str = "Take that money back out of the safe with your fingerprint.";
+const STEP_NOW_OPEN: &str = "Open the account again under the new rules.";
+const NOW_NO_SAFE_KEYS: &str = "Your safe keys are not kept on this phone, so the instant update is not offered. Use the update with notice.";
+const NOW_NOT_STOPPED: &str = "Stop the account first.";
+/// What "Update now" leaves for the reopening's fee: change under the floor folds into the deposit.
+const NOW_OPEN_MARGIN: u64 = 1_000_000;
+
+/// The "Update now" choice of `rules.change` on an open account: stop to the safe, take that coin out with the
+/// phone's sealed safe keys, reopen. Offered only while the safe keys are sealed on this phone. Fees: the stop
+/// (exact now), the take-out and the reopening (about the same each).
+fn now_option(ctx: &Ctx, stop_fee: u64) -> Value {
+    let on_phone = ctx.dir.join(SHEETS_ON_PHONE_FILE).exists();
+    json!({
+        "ok": on_phone,
+        "why": if on_phone { Value::Null } else { json!(NOW_NO_SAFE_KEYS) },
+        "steps": [STEP_NOW_STOP, STEP_NOW_TAKEOUT, STEP_NOW_OPEN],
+        "fee_kas": kas(stop_fee),
+        "fee_kas_about": kas(stop_fee * 3),
+    })
+}
 const HEIR_NOT_A_PERSON: &str = "An heir must be a person's own address (the plain kind), not a safe or a contract address.";
 
 /// The service minus the transport: what the https routes and the phone's `call` both drive.
@@ -998,7 +1019,20 @@ impl Core {
                 Err(_) => return fail(NO_KEYS),
             },
         };
-        let amount = if args["kas"].is_null() {
+        // `from_stop` ("Update now"): only the coin this account's own stop put in the safe, all of it less the fee.
+        let only_tx = if args["from_stop"].as_bool() == Some(true) {
+            match self.ctx.try_load_vault() {
+                Ok(Some(v)) if is_stopped(&v) => match v.history.last().and_then(|h| tx_of(h)) {
+                    Some(tx) => Some(tx.to_string()),
+                    None => return fail(NOW_NOT_STOPPED),
+                },
+                Ok(_) => return fail(NOW_NOT_STOPPED),
+                Err(e) => return fail(&e),
+            }
+        } else {
+            None
+        };
+        let amount = if args["kas"].is_null() || only_tx.is_some() {
             None
         } else {
             match parse_kas(&args["kas"]) {
@@ -1007,10 +1041,11 @@ impl Core {
             }
         };
         let Ok(_money) = self.money.try_lock() else { return fail(BUSY) };
-        let out = crate::airgap::takeout(&self.ctx, amount, &to).await;
+        let out = crate::airgap::takeout(&self.ctx, amount, &to, only_tx.as_deref()).await;
         guard(&self.cache).clear();
         match out {
-            Ok((tx, paid, to)) => json!({"ok": true, "tx": tx, "kas": kas(paid), "to": to, "error": null}),
+            // open_kas: what the reopening can lock from this take-out (a margin for its fee; the rest folds in).
+            Ok((tx, paid, to)) => json!({"ok": true, "tx": tx, "kas": kas(paid), "open_kas": kas(paid.saturating_sub(NOW_OPEN_MARGIN)), "to": to, "error": null}),
             Err(e) => fail(&e),
         }
     }
@@ -1326,7 +1361,7 @@ impl Core {
     /// never-opened account the route is just "open". Answers {ok, route, steps, fee_kas, fee_kas_about, dials,
     /// words, error}.
     async fn rules_change(&self, args: &Value) -> Value {
-        let fail = |e: &str| json!({"ok": false, "route": null, "steps": [], "fee_kas": null, "fee_kas_about": null, "move_kas": null, "to": null, "kind": null, "dials": null, "words": [], "error": plain(e)});
+        let fail = |e: &str| json!({"ok": false, "route": null, "steps": [], "fee_kas": null, "fee_kas_about": null, "move_kas": null, "to": null, "kind": null, "now": null, "dials": null, "words": [], "error": plain(e)});
         let dials = match self.ctx.dials().and_then(|base| base.turned(args)) {
             Ok(d) => d,
             Err(e) => return fail(&e),
@@ -1344,6 +1379,7 @@ impl Core {
         // the kept minimum then goes to the safe with an ordinary stop. Fees: the payment (plus its finish when it
         // waits), the stop and the reopening.
         let mut plan = (Value::Null, Value::Null, Value::Null);
+        let mut now = Value::Null;
         let (route, steps, fee) = if open {
             let moved = match self.move_plan().await {
                 Ok(m) => m,
@@ -1358,7 +1394,10 @@ impl Core {
             }
             steps.extend([STEP_KEEP, STEP_OPEN]);
             match self.quote_stop().await {
-                Ok((stop_fee, _, _)) => ("move", steps, Some(kas(pay_fee + stop_fee))),
+                Ok((stop_fee, _, _)) => {
+                    now = now_option(&self.ctx, stop_fee);
+                    ("move", steps, Some(kas(pay_fee + stop_fee)))
+                }
                 Err(e) => return fail(&e),
             }
         } else {
@@ -1369,7 +1408,7 @@ impl Core {
         }
         guard(&self.cache).clear();
         // fee_kas = what is priced exactly now (the payment and the stop); about = with the finish and the reopening.
-        json!({"ok": true, "route": route, "steps": steps, "fee_kas": fee, "fee_kas_about": fee.map(|f| f * 2.0), "move_kas": plan.0, "to": plan.1, "kind": plan.2, "dials": dials, "words": dials.describe(self.ctx.network.daa_per_sec, has_heir), "error": null})
+        json!({"ok": true, "route": route, "steps": steps, "fee_kas": fee, "fee_kas_about": fee.map(|f| f * 2.0), "move_kas": plan.0, "to": plan.1, "kind": plan.2, "now": now, "dials": dials, "words": dials.describe(self.ctx.network.daa_per_sec, has_heir), "error": null})
     }
 
     /// The payment a rule change starts with: (sompi to send, the purse address, "now" or "notice", its fee in sompi).
@@ -1852,6 +1891,22 @@ mod tests {
         for w in [NETWORK_REFUSED, NETWORK_DOWN, RECORDS_UNREADABLE, CARD_EXPIRED] {
             assert!(!w.contains(':') && !w.contains('/'), "{w} carries no path or address");
         }
+    }
+
+    #[test]
+    fn update_now_is_offered_only_with_the_safe_keys_on_the_phone() {
+        let dir = std::env::temp_dir().join(format!("kv-now-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = Ctx { dir: dir.clone(), keys: Keys::default(), rpc: None, force: false, network: Network::testnet(), dials: Dials::testnet(), account: 1 };
+        let off = now_option(&ctx, 200_000);
+        assert_eq!((off["ok"].clone(), off["why"].as_str().is_some()), (json!(false), true), "{off}");
+        std::fs::write(dir.join(SHEETS_ON_PHONE_FILE), b"").unwrap();
+        let on = now_option(&ctx, 200_000);
+        assert_eq!((on["ok"].clone(), on["why"].clone(), on["steps"].as_array().unwrap().len()), (json!(true), Value::Null, 3), "{on}");
+        assert_eq!(on["fee_kas_about"], json!(kas(600_000)));
+        // The take-out of the stop's own coin reads the stop from this account's record: open or missing refuses.
+        assert_eq!(tx_of("cancel (stop key 1): everything to cold, fee 0.00200 KAS, tx abc123"), Some("abc123"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

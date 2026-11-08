@@ -57,8 +57,8 @@ Kaspa nodes and to one price feed for the KAS chart.
 KaspaVault keeps no copy of anything. There is no company, server or support desk that can see a balance, reverse a
 payment, reset a key or restore a lost sheet. If the keys on the phone are lost, the money in the account is reached
 through another stop key and the safe; if two of the three safe sheets are lost, the money in the safe cannot be
-recovered by anyone. Adding a fingerprint to the phone clears every key the app keeps on it, by design, including the phone's copy
-of the safe sheets. Write down at least two safe sheets before you rely on the app.
+recovered by anyone. Adding a fingerprint to the phone clears the everyday keys the app keeps on it, by design; the phone's copy of
+the safe sheets stays. Still keep at least two safe sheets on paper: the phone can be lost.
 
 ## Repository layout
 

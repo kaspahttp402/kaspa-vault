@@ -76,6 +76,7 @@
      90 days, daily for a year; the phone caps an answer at 4000 points. On the phone it goes through Bridge.price, which reaches that
      one host only and sends nothing of ours. */
   var priceLive = {},
+    priceRest = 0 /* no price asks before this time, after a refused one */,
     PRICE_DAYS = {
       day: 1,
       week: 7,
@@ -88,6 +89,7 @@
     var days = PRICE_DAYS[range] || 30,
       had = priceLive[range];
     if (had && Date.now() - had.at < 600000) return Promise.resolve(had.values);
+    if (Date.now() < priceRest) return Promise.resolve(had ? had.values : null); /* the feed said no (429 = too many asks): rest, keep the last numbers */
     var url = 'https://api.coingecko.com/api/v3/coins/kaspa/market_chart?vs_currency=usd&days=' + days;
     return new Promise(function (resolve) {
       function got(status, text) {
@@ -95,6 +97,7 @@
         try {
           j = JSON.parse(text);
         } catch (e) {}
+        if (status !== 200) priceRest = Date.now() + 120000;
         resolve(status === 200 ? j : null);
       }
       if (bridge && bridge.price) {
@@ -532,6 +535,31 @@
       return !r.ok && r.error === FRESH_FINGER ? once() : r;
     }); /* one more fingerprint and one more call; a second refusal stands as it is */
   }
+  /* the engine's own "wait" answer ends in AGAIN (a coin it has not seen yet): try every 3 s for up to a minute, showing
+     its words; any other answer, a refused fingerprint included, stands at once */
+  var AGAIN = 'Trying again in a moment.';
+  function retrying(f, say) {
+    var until = Date.now() + 60000;
+    function once() {
+      return f().then(function (r) {
+        var e = (r && r.ok === false && r.error) || '';
+        if (e.slice(-AGAIN.length) !== AGAIN || Date.now() > until) return r;
+        say('wait', e);
+        return wait(3000).then(once);
+      });
+    }
+    return once();
+  }
+  /* the rule change in flight on this account (setting rules_move), or null */
+  function moveMarker() {
+    var m = null;
+    try {
+      m = JSON.parse(getSetting('rules_move') || 'null');
+    } catch (e) {
+      m = null;
+    }
+    return m && m.account === account ? m : null;
+  }
 
   /* ---- one clock for countdowns; Sample runs its own half of it in demo.js ---- */
   function tick() {
@@ -719,7 +747,7 @@
       return demo ? demo.finish() : notHere();
     },
 
-    /* "Let it go through": the money keeps its course, only the reminder goes away */
+    /* "That was me": the money keeps its course; only the red bell and banner go quiet (Alerts still lists it, with Decline) */
     dismissPending: function () {
       if (state.pending) state.pending.dismissed = true;
       emit();
@@ -752,14 +780,9 @@
     rulesReady: function () {
       if (!isLocal() || !state.rulesNext) return false;
       var p = this.rulesPending(),
-        m = null;
+        m = moveMarker();
       if (p) return !(p.secondsLeft > 0);
-      try {
-        m = JSON.parse(getSetting('rules_move') || 'null');
-      } catch (e) {
-        m = null;
-      }
-      return !!(m && m.account === account && (state.purse || 0) >= m.kas * 0.9);
+      return !!(m && (m.now || (state.purse || 0) >= m.kas * 0.9));
     },
     /* the payment to the purse that carries a rule change, while it waits; null when there is none */
     rulesPending: function () {
@@ -771,6 +794,7 @@
     finishRules: function (onStep) {
       var api = this,
         say = onStep || function () {};
+      if ((moveMarker() || {}).now) return this.updateNow(onStep); /* an instant update the app left half done */
       function next(r, f) {
         return r && r.ok === false ? r : f();
       }
@@ -805,6 +829,62 @@
               });
             });
           });
+        });
+    },
+    /* "Update now" (rules.change answered now.ok): stop, take this account's own stop coin out of the safe to the purse,
+       open the same account from it under the stored rules. The marker records each step, so a refusal or a closed app
+       picks up where it stopped (a second take-out would wait for a coin already taken). onStep as in finishRules. */
+    updateNow: function (onStep) {
+      var api = this,
+        say = onStep || function () {},
+        m = moveMarker();
+      if (!m || !m.now) m = { account: account, kas: 0, now: true };
+      function mark(k, v) {
+        if (k) m[k] = v;
+        setSetting('rules_move', JSON.stringify(m));
+      }
+      function stopStep() {
+        if (state.stopped || m.out) return Promise.resolve({ ok: true });
+        say('stop');
+        return api.stop();
+      }
+      function outStep() {
+        if (m.out) return Promise.resolve({ ok: true });
+        say('takeout');
+        var take = function () {
+          return moneyAction('Update your rules now', '/api/takeout', { from_stop: true });
+        };
+        return retrying(take, say).then(function (x) {
+          if (x && x.ok) {
+            mark('open', +x.open_kas || 0);
+            mark('out', true);
+          }
+          return x;
+        });
+      }
+      function openStep() {
+        if (!state.rulesNext) return Promise.resolve({ ok: true, done: true });
+        if (!(m.open > 0))
+          return api.funding().then(function (f) {
+            mark('open', Math.floor(((+(f && f.kas) || 0) - 0.05) * 10000) / 10000); /* the take-out's answer was lost: the purse less a fee margin */
+            return m.open > 0 ? openStep() : { ok: false, error: 'Your purse could not be read. Try again.' };
+          });
+        say('fund');
+        var open = function () {
+          return api.fund(m.open, null, account);
+        };
+        return retrying(open, say).then(function (x) {
+          if (x && x.ok) setSetting('rules_move', '');
+          return x;
+        });
+      }
+      mark();
+      return stopStep()
+        .then(function (r) {
+          return r && r.ok === false ? r : outStep();
+        })
+        .then(function (r) {
+          return r && r.ok === false ? r : openStep();
         });
     },
 

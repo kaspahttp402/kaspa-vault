@@ -250,6 +250,49 @@ test('a refusal at the stop ends the rule change there, and the next try skips w
   assert.equal(h.callsOf('finish').length, 1);
 });
 
+const NOT_YET = "The account's money has not reached your safe yet. Trying again in a moment.";
+function nowEngine(over) {
+  const st = { stopped: false, tries: 0 };
+  return (method, args) => {
+    if (over && over[method]) {
+      const x = over[method](args, st);
+      if (x) return x;
+    }
+    if (method === 'status')
+      return status({ account: args.account || 1, rules_next: { words: ['Daily limit: 50 KAS'] }, pending: null, stopped: st.stopped });
+    if (method === 'stop') st.stopped = true;
+    if (method === 'takeout') return ++st.tries === 1 ? { ok: false, error: NOT_YET } : { ok: true, kas: 100, open_kas: 99.9 };
+    return { ok: true };
+  };
+}
+
+test('update now runs stop, take-out (waiting while the safe has not seen the stop), then reopens with what came out', async () => {
+  const h = load({ engine: nowEngine() });
+  await h.open();
+  const steps = [];
+  const r = await h.D.updateNow((s, w) => steps.push(w || s));
+  assert.equal(r.ok, true);
+  assert.deepEqual(h.calls.map(c => c.method).filter(m => m !== 'status'), ['stop', 'takeout', 'takeout', 'fund']);
+  assert.equal(h.callsOf('takeout')[0].args.from_stop, true);
+  assert.deepEqual(h.callsOf('fund')[0].args, { kas: 99.9, account: 1 });
+  assert.deepEqual(steps, ['stop', 'takeout', NOT_YET, 'fund']);
+});
+
+test('an update now refused at the reopen resumes there from Home: no second stop or take-out', async () => {
+  let refuse = true;
+  const h = load({ engine: nowEngine({ fund: () => (refuse ? { ok: false, error: 'The network is busy. Try again in a minute.' } : null) }) });
+  await h.open();
+  const r = await h.D.updateNow();
+  assert.equal(r.ok, false);
+  assert.equal(h.D.rulesReady(), true);
+  refuse = false;
+  const r2 = await h.D.finishRules();
+  assert.equal(r2.ok, true);
+  assert.equal(h.callsOf('stop').length, 1);
+  assert.equal(h.callsOf('takeout').length, 2);
+  assert.deepEqual(h.callsOf('fund').map(c => c.args.kas), [99.9, 99.9]);
+});
+
 test('a rule change whose payment was stopped just waits: no finish offered', async () => {
   const h = load({ engine: okEngine({ rules_next: { words: [] }, pending: null }) });
   await h.open();

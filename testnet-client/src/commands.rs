@@ -265,6 +265,7 @@ impl Ctx {
             }
             None => Vec::new(),
         };
+        let reopen = !carried.is_empty();
         let amount = sompi(amount_kas);
         let has_heir = !self.keys.public().heir_x.is_empty();
         self.dials.check(has_heir, self.network.is_mainnet())?;
@@ -293,6 +294,9 @@ impl Ctx {
         let vault_spk = self.try_vault_spk(&state)?;
         let (tx, _) = self.try_with_fee(&entries, None, &|fee| {
             if total < amount + fee {
+                if reopen && total < amount + fee {
+                    return Err(format!("Your purse shows {:.5} of the {:.5} KAS yet. Trying again in a moment.", kas(total), kas(amount + fee)));
+                }
                 return Err(format!("funding has {total} sompi, need {}", amount + fee));
             }
             // Change too small to keep as a coin goes into the deposit instead of exploding the mass.

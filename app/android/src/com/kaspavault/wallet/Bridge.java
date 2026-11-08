@@ -225,9 +225,9 @@ final class Bridge {
         /**
          * The signer store's own prompt: confirmWithBiometric with signerKey()/signerCipher() in place of the
          * pairing key, opening the signer data key for ONE vault() money call or ONE keysNew. Same answers: "ok",
-         * "cancel", "away", "refused" (lockout, nothing enrolled, sensor error, or the fingerprints changed: then the
-         * three keys on this phone are cleared and the page gets SIGNER_ENROL_NOTICE) or "unavailable" (no sensor and no
-         * PIN at all). Money needs the real key, so Sample mode gets no plain-confirm pass here.
+         * "cancel", "away", "refused" (lockout, nothing enrolled, sensor error) or "unavailable" (no sensor and no PIN at
+         * all). When the fingerprints changed, only the everyday keys on this phone (card, stop, funding) are cleared and
+         * the page gets SIGNER_ENROL_NOTICE; the safe sheets stay (own key, Signer.SAFE_ALIAS) and the prompt goes on. Money needs the real key, so Sample mode gets no plain-confirm pass here.
          */
         @JavascriptInterface public void confirmSigner(String callbackName, String subtitle) {
             act.signer.confirmSigner(callbackName, subtitle);
@@ -341,7 +341,7 @@ final class Bridge {
          * were burned (the engine answers in its own words); keys.sheets -> cold + cold2 + cold3 (96 bytes), answered here
          * as burned when the prefs are gone. keys.burn {confirm:true} wipes ONLY the three sealed cold prefs, then runs the
          * engine's keyless keys.burned so its marker goes too. keys.reset is keyless; when the engine answers ok, the sealed
-         * keys here are dropped (forgetSignerPrefs) so they never shadow the next set. Every method that reads the store or
+         * keys here are dropped (forgetSignerPrefs + forgetSafe) so they never shadow the next set. Every method that reads the store or
          * burns needs a confirmSigner prompt first (else LOCKED, "Unlock first"); each slot is read once and the store shuts
          * here, before the engine runs, so one fingerprint is one signature. Sheet words are never logged.
          */
@@ -386,7 +386,9 @@ final class Bridge {
                 String missing = null;
                 byte[] a = null, b = null, c = null;
                 synchronized (act.bridge) {
-                    if (!act.signer.signerOpen()) {
+                    // The safe methods passed the fresh-prompt gate above; they may run on a plain prompt too (no signer key,
+                    // e.g. right after a new fingerprint cleared it), since the safe store has its own key.
+                    if (!act.signer.signerOpen() && !((takeout || sheets || burn) && act.signer.promptedRecently())) {
                         if (typed != null) Arrays.fill(typed, (byte) 0);
                         act.call(callbackName, String.valueOf(id), String.valueOf(LOCKED), JSONObject.quote(""));
                         return;
@@ -411,9 +413,15 @@ final class Bridge {
                             if (typed != null) {
                                 a = typed;
                             } else if (act.signer.hasSlot("cold") && act.signer.hasSlot("cold2")) {
-                                a = act.signer.openBytes("cold");
-                                b = act.signer.openBytes("cold2");
-                                if (a == null || b == null) missing = NO_SAFE_KEYS;
+                                try {
+                                    byte[][] o = act.signer.openCold("cold", "cold2");
+                                    a = o[0];
+                                    b = o[1];
+                                    if (a == null || b == null) missing = NO_SAFE_KEYS;
+                                } catch (android.security.keystore.UserNotAuthenticatedException e) {
+                                    act.signer.shutSigner(); // the safe key's seconds after the prompt ran out
+                                    missing = FRESH_FINGER;
+                                }
                             } else {
                                 a = new byte[0]; // burned (or never kept): the engine says so in its words
                             }
@@ -421,16 +429,21 @@ final class Bridge {
                             if (!act.signer.hasSlot("cold") || !act.signer.hasSlot("cold2") || !act.signer.hasSlot("cold3")) {
                                 missing = SHEETS_BURNED;
                             } else {
-                                a = act.signer.openBytes("cold");
-                                b = act.signer.openBytes("cold2");
-                                c = act.signer.openBytes("cold3");
-                                if (a == null || b == null || c == null) missing = NO_SAFE_KEYS;
+                                try {
+                                    byte[][] o = act.signer.openCold("cold", "cold2", "cold3");
+                                    a = o[0];
+                                    b = o[1];
+                                    c = o[2];
+                                    if (a == null || b == null || c == null) missing = NO_SAFE_KEYS;
+                                } catch (android.security.keystore.UserNotAuthenticatedException e) {
+                                    missing = FRESH_FINGER; // the safe key's seconds after the prompt ran out
+                                }
                             }
                         } else {
                             boolean confirmed;
                             try { confirmed = new JSONObject(args).optBoolean("confirm", false); } catch (org.json.JSONException e) { confirmed = false; }
                             if (!confirmed) missing = BURN_UNCONFIRMED;
-                            else act.prefs.edit().remove("signer.cold").remove("signer.cold2").remove("signer.cold3").apply();
+                            else act.signer.burnCold(); // safe.cold* and any old signer.cold*
                         }
                     } finally {
                         if (sheets || burn) act.signer.shutSigner(); else act.signer.signerUsed();
@@ -466,7 +479,7 @@ final class Bridge {
                 // One line per engine call for logcat: method and outcome, never a body (a refusal's plain words only).
                 android.util.Log.i("KaspaVault", "engine " + m + " -> " + status + ((status == 200 && (bodyOk(text) || errorOf(text).isEmpty())) ? " ok" : " " + errorOf(text)));
                 // The old key files are archived: the sealed keys of that set go too, before the page hears it.
-                if ("keys.reset".equals(m) && status == 200 && bodyOk(text)) act.signer.forgetSignerPrefs();
+                if ("keys.reset".equals(m) && status == 200 && bodyOk(text)) { act.signer.forgetSignerPrefs(); act.signer.forgetSafe(); }
                 act.call(callbackName, String.valueOf(id), String.valueOf(status), JSONObject.quote(text));
             });
         }
@@ -479,8 +492,10 @@ final class Bridge {
          * phone could not seal them; -3 when no confirmSigner prompt opened the store first (wrapping is an authorised
          * operation too); -4 without the engine. The key bytes never reach the page.
          * Mode "phone" (everything made on this phone, no drawer device): the engine's answer is 192 bytes, the three safe
-         * keys [cold 32][cold2 32][cold3 32] after the first 96 (sealed here as signer.cold / signer.cold2 / signer.cold3 in
-         * the same commit, so "Show my sheets" and a paperless take-out work until keys.burn), then UTF-8 JSON
+         * keys [cold 32][cold2 32][cold3 32] after the first 96 (sealed here under the safe key as safe.cold / safe.cold2 /
+         * safe.cold3 in the same commit, so "Show my sheets" and a paperless take-out work until keys.burn, even after a
+         * new fingerprint; if the safe key's seconds after the prompt ran out they go to signer.cold* and migrateCold
+         * moves them at the next prompt), then UTF-8 JSON
          * {"sheets":[[24 words],[24 words],[24 words]]}, the same keys as words. The words go to the page exactly once, as
          * the body {"ok":true,"sheets":[...]}, for paper; they are never logged, and the whole array is zero-filled afterwards.
          * (An engine from before the 192-byte block, 96 bytes then JSON, is still read: no safe keys are sealed then.)
@@ -503,6 +518,7 @@ final class Bridge {
                         text = KEYS_NOT_MADE;
                     } else {
                         String card, stop, funding, cold = null, cold2 = null, cold3 = null;
+                        boolean coldSafe = false;
                         // 96 bytes: a drawer set (or an old engine's phone set with the words right after). 192 or more: the safe keys too.
                         final int tail = (k.length > 96 && k[96] == '{') ? 96 : (k.length >= 192 ? 192 : 96);
                         byte[] c = Arrays.copyOfRange(k, 0, 32), st = Arrays.copyOfRange(k, 32, 64), f = Arrays.copyOfRange(k, 64, 96);
@@ -515,9 +531,17 @@ final class Bridge {
                                 stop = act.signer.sealBytes("stop", st);
                                 funding = act.signer.sealBytes("funding", f);
                                 if (k1 != null) {
-                                    cold = act.signer.sealBytes("cold", k1);
-                                    cold2 = act.signer.sealBytes("cold2", k2);
-                                    cold3 = act.signer.sealBytes("cold3", k3);
+                                    String[] sc = act.signer.sealSafe(k1, k2, k3); // the safe key: survives a new fingerprint
+                                    coldSafe = sc != null;
+                                    if (coldSafe) {
+                                        cold = sc[0];
+                                        cold2 = sc[1];
+                                        cold3 = sc[2];
+                                    } else { // safe key's seconds ran out: the old store for now, migrateCold moves them at the next prompt
+                                        cold = act.signer.sealBytes("cold", k1);
+                                        cold2 = act.signer.sealBytes("cold2", k2);
+                                        cold3 = act.signer.sealBytes("cold3", k3);
+                                    }
                                 }
                             } finally {
                                 Signer.joinSecrets(c, st, f, k1, k2, k3); // zero-fills every part
@@ -527,7 +551,11 @@ final class Bridge {
                         boolean safeKept = k1 == null || (cold != null && cold2 != null && cold3 != null);
                         if (card != null && stop != null && funding != null && safeKept) {
                             SharedPreferences.Editor ed = act.prefs.edit().putString("signer.card", card).putString("signer.stop", stop).putString("signer.funding", funding);
-                            if (k1 != null) ed.putString("signer.cold", cold).putString("signer.cold2", cold2).putString("signer.cold3", cold3);
+                            if (k1 != null) {
+                                String p = coldSafe ? "safe." : "signer.", q = coldSafe ? "signer." : "safe.";
+                                ed.putString(p + "cold", cold).putString(p + "cold2", cold2).putString(p + "cold3", cold3)
+                                        .remove(q + "cold").remove(q + "cold2").remove(q + "cold3"); // the other store's old set never shadows this one
+                            }
                             ed.apply();
                             if (k.length > tail) {
                                 // the safe sheets follow the secrets: into the answer once, nowhere else

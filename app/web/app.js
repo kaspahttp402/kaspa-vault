@@ -488,7 +488,7 @@
     keysdrawer:
       'For a drawer device: paste or scan the public file it made and, if you want one, the heir\u2019s public key. One fingerprint seals this phone\u2019s own keys. The tutorial button walks through making the drawer device.',
     sheet:
-      'One of your three safe sheets. Any two open your vault, so they must outlive this phone: paper, three places, never a photo. This phone keeps a copy, but adding a fingerprint clears it.',
+      'One of your three safe sheets. Any two open your vault, so they must outlive this phone: paper, three places, never a photo. This phone keeps a copy, and adding a fingerprint leaves it in place.',
     sheetcheck: 'A quick check that your paper copy is right. Tap the word that matches the number asked for.',
     offlinehow: 'How a drawer device is made and used, one step per page.',
     showsheets: 'Your three vault sheets, kept sealed on this phone. Any two open the vault. Paper, three places, never a photo.',
@@ -514,7 +514,7 @@
     send: 'Payments under today’s limit go right away. Large ones become a pending withdrawal that waits for the notice period, so you can stop them.',
     sent: 'Your payment is on its way, or waiting as a pending withdrawal. A pending one can still be stopped until it lands.',
     receive: 'Share this address, or let someone scan the code, to get paid. Money that arrives goes into this account.',
-    pending: 'A large payment waiting out its notice period. Let it go through, or stop everything if you did not ask for it.',
+    pending: 'A large payment waiting out its notice period. Decline it if you did not ask for it. "That was me" only quiets the alert: it still waits, and you can decline it from Alerts until it leaves.',
     stop: 'The emergency stop moves all your money, pending withdrawals included, into your vault at once. Nobody can pay out of the vault from a phone: not you, not a thief, not us. Only your vault seed, kept on paper somewhere else, takes it out again.',
     stopdone: 'Everything is in your vault now. It stays there until you open the vault with your vault seed.',
     safe: 'Your vault holds money the emergency stop moved out of reach. Taking it out needs your vault seed, which never lives on this phone.',
@@ -1421,6 +1421,18 @@
         st.onclick = function () {
           rulesSlide(st, r);
         };
+      var nw = sheet.querySelector('[data-now]');
+      if (nw)
+        nw.onclick = function () {
+          nowSlide(nw);
+        };
+    });
+  }
+  /* the instant route: one slide, then "Updating your rules..." runs stop, take-out and reopen (D.updateNow) */
+  function nowSlide(btn) {
+    armSlide(btn, 'Update now', 'Your money stays yours, on the same keys.', false, 'Slide to update', 'send', function () {
+      ui.closeSheet();
+      go('waiting', { job: 'rules', now: true }, { replace: true });
     });
   }
   /* the slide on the review sheet: 'move' pays the purse, then 'now' finishes at once and 'notice' waits on Home; 'open' finishes straight away */
@@ -1441,6 +1453,18 @@
         else go('home', {}, { root: true });
       });
     });
+  }
+  /* the step line under "Updating your rules...": plain words per step, or the engine's own words while it waits */
+  var RULE_STEPS = {
+    finish: 'Finishing the payment to your purse.',
+    stop: 'Your money is going to your safe.',
+    takeout: 'Bringing it back to your purse.',
+    fund: 'Opening your account under your new rules.',
+  };
+  function rulesStep(el) {
+    return function (step, words) {
+      setText(el, '[data-rstep]', step === 'wait' ? words : RULE_STEPS[step] || '');
+    };
   }
   /* Home's one button while a rule change is ready to finish */
   function rulesFinishSlide(btn) {
@@ -1471,18 +1495,34 @@
         esc(r.error || 'The rules could not be changed. Nothing has moved.') +
         '</div><button class="ghost" data-no>Close</button>'
       );
-    var when =
-      r.route === 'open' || r.kind === 'now'
-        ? 'Takes effect now.'
-        : 'Takes effect in ' + dur(D.state.noticeSeconds) + '. You can stop it until then.';
+    var now = r.now && r.now.ok && r.route !== 'open' && r.kind !== 'now' ? r.now : null;
+    function fee(x) {
+      return '<div class="sub">' + (x == null ? 'No fee.' : 'About ' + (+x).toFixed(4) + ' KAS in fees.') + '</div>';
+    }
+    var later = 'Takes effect in ' + dur(D.state.noticeSeconds) + '. You can stop it until then.';
+    var when = r.route === 'open' || r.kind === 'now' ? 'Takes effect now.' : later;
+    var face = now
+      ? '<div class="line">Update now: takes effect now.</div>' +
+        fee(now.fee_kas_about) +
+        '<div class="line">Update with notice: ' +
+        later.charAt(0).toLowerCase() +
+        later.slice(1) +
+        '</div>' +
+        fee(r.fee_kas_about) +
+        '<div class="err" data-serr></div><button class="pill" data-now>Update now</button><button class="pill" data-start>Update with notice</button>'
+      : '<div class="line">' +
+        when +
+        '</div>' +
+        fee(r.fee_kas_about) +
+        '<div class="err" data-serr></div><button class="pill" data-start>Update my rules</button>';
     return (
       head +
-      '<div class="line">' +
-      when +
-      '</div><div class="sub">' +
-      (r.fee_kas_about == null ? 'No fee.' : 'About ' + (+r.fee_kas_about).toFixed(4) + ' KAS in fees.') +
-      '</div><div class="err" data-serr></div><button class="pill" data-start>Update my rules</button><button class="ghost" data-no>Not now</button>' +
+      face +
+      '<button class="ghost" data-no>Not now</button>' +
       fold(
+        (now
+          ? '<div class="sub">Update now stops your account: your money goes to your safe, comes straight back to your purse and opens again under the new rules.</div>'
+          : '') +
         '<div class="sub">The network holds your rules with your money, so your money passes through your purse and comes back under the new rules, on the same keys.</div>' +
           '<div class="sub">1 KAS always stays in your safe; you can take it out any time.</div>' +
           (r.fee_kas == null ? '' : '<div class="sub">The payment and the safe step cost ' + (+r.fee_kas).toFixed(4) + ' KAS.</div>')
@@ -2335,12 +2375,6 @@
     if (ui.acct !== 'main') pct = 100;
     return { left: pct, mode: 'home', k: 0 };
   }
-  /* share of the notice period already run: 0 just asked, 1 ready to land (the Notice shape fills that far) */
-  function dueShare() {
-    var q = D.state.pending;
-    if (!q || !q.total) return 1;
-    return Math.max(0, Math.min(1, 1 - (q.secondsLeft || 0) / q.total));
-  }
   function applyScene() {
     var def = ui.cur && SCR[ui.cur.name],
       o = baseScene();
@@ -2539,7 +2573,7 @@
         go: '',
       });
     var pq = s.pending; /* a withdrawal only the guard saw has no amount, address or time */
-    if (pq && !pq.dismissed)
+    if (pq)
       rows.push({
         text:
           pq.amount == null
@@ -2552,7 +2586,7 @@
       });
     s.history.forEach(function (h) {
       if (rows.length >= n) return;
-      if (h.kind === 'outgoing' || (h.kind === 'pending' && s.pending && !s.pending.dismissed)) return;
+      if (h.kind === 'outgoing' || (h.kind === 'pending' && s.pending)) return; /* the waiting row above stands for it, quieted or not */
       rows.push({
         text: h.text,
         sub: h.when || (h.tx ? 'Reference ' + String(h.tx).slice(0, 10) + '\u2026' : ''),
@@ -3570,7 +3604,7 @@
       who = name.length > 22 ? name.slice(0, 20) + '…' : name;
     var self = btn,
       st0 = D.state,
-      qd = st0.pending && !st0.pending.dismissed ? st0.pending : null,
+      qd = st0.pending || null, /* a quieted payment still waits, so the warning still counts it */
       og = st0.outgoing;
     /* a warning before a second payment. A large payment while one is waiting goes in line behind it; a payment while the last one is still in its minute lets that one go now. */
     var warn = sendWarn(waits, qd, og, st0);
@@ -4537,7 +4571,7 @@
       },
       html: function (p) {
         if (p.job === 'rules')
-          return '<div class="push"></div><div class="breath"></div><h1 class="head">Updating your rules\u2026</h1><div data-rout></div>';
+          return '<div class="push"></div><div class="breath"></div><h1 class="head">Updating your rules\u2026</h1><p class="sub" data-rstep></p><div data-rout></div>';
         var title =
           p.job === 'stop'
             ? 'Moving everything to your vault'
@@ -4554,7 +4588,7 @@
       },
       after: function (el, p) {
         if (p.job === 'rules')
-          return D.finishRules().then(function (r) {
+          return (p.now ? D.updateNow(rulesStep(el)) : D.finishRules(rulesStep(el))).then(function (r) {
             if (r.ok) {
               haptic();
               return go('home', {}, { root: true });
@@ -4594,7 +4628,7 @@
       money: true,
       locked: false,
       scene: function (p) {
-        return p.kind === 'pending' || p.kind === 'queued' ? { mode: 'notice', due: dueShare() } : {};
+        return {}; /* a waiting payment shows the glowing lines, not the fuse */
       },
       html: function (p) {
         var pending = p.kind === 'pending' || p.kind === 'queued',
@@ -4722,12 +4756,7 @@
       money: true,
       lockHold: 1600 /* ms the locked shape stays once the withdrawal has landed (the fuse locks when the time is up) */,
       scene: function () {
-        var me = SCR.pending;
-        return D.state.pending && !D.state.stopped
-          ? { mode: 'notice', due: dueShare() }
-          : me.lockAt && Date.now() - me.lockAt < me.lockHold
-            ? { mode: 'notice', due: 1 }
-            : {};
+        return {}; /* the glowing lines while it waits and when it lands; the fuse is gone from countdowns */
       },
       html: function (p) {
         return (
@@ -4778,7 +4807,7 @@
               : '');
           acts =
             (q.secondsLeft > 0 || seen || !D.isLive() ? '' : '<button class="pill" data-finish>Finish</button>') +
-            '<div class="twobtn"><button class="pill" data-decline>Decline it</button><button class="pill" data-let>Let it go through</button></div>' +
+            '<div class="twobtn"><button class="pill" data-decline>Decline it</button><button class="pill" data-let>That was me</button></div>' +
             '<button class="pill danger" data-stop>Stop everything</button>' /* the stop itself, not a way to the stop screen; its own row so the slide has room */ +
             '<div class="sub">Stop everything moves all of this account into your vault, this withdrawal included. Only your vault seed takes it out.</div>' +
             (D.isLive() ? '' : '<button class="ghost" data-skip>Skip ahead</button>');
@@ -4812,9 +4841,8 @@
     heirclock: {
       money: true,
       scene: function () {
-        var sh = heirShare();
-        return sh == null ? {} : { mode: 'notice', due: sh };
-      } /* the same fuse; it locks at 1, when the account is the heir's */,
+        return {};
+      } /* the glowing lines, as on every countdown */,
       html: function () {
         return (
           topbar(D.isLive() ? '' : tag()) +
@@ -6027,7 +6055,7 @@
           (D.isLocal() ? '' : row('seconddevice', 'Second device')) +
           '</div>' +
           (D.isLocal()
-            ? '<div class="sub" data-fpwarn>Adding a fingerprint to this phone clears your everyday keys. Write down at least two safe sheets first.</div>'
+            ? '<div class="sub" data-fpwarn>Adding a fingerprint to this phone clears your everyday keys; your safe sheets stay.</div>'
             : '') +
           '<div class="label mt20">Help</div><div class="list mt0">' +
           row('howitworks', 'How it works') +
