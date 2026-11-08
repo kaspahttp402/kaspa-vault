@@ -77,6 +77,9 @@
      one host only and sends nothing of ours. */
   var priceLive = {},
     priceRest = 0 /* no price asks before this time, after a refused one */,
+    priceLoaded = false,
+    PRICE_LIVE_MS = 3600000 /* prices younger than this count as current (the dollar view uses them) */,
+    PRICE_SAVE_POINTS = 240 /* points per period kept across restarts in setting price_saved */,
     PRICE_DAYS = {
       day: 1,
       week: 7,
@@ -85,7 +88,64 @@
       year: 365,
       all: 'max',
     }; /* all = CoinGecko days=max, daily since the start */
+  function priceKeep(range, raw, at) {
+    /* -> the scene's calm 72 averages; keeps the chart's points and the averages for the period, or null when too few */
+    var points = raw
+      .filter(function (p) {
+        return p && typeof p[0] === 'number' && typeof p[1] === 'number' && p[1] > 0;
+      })
+      .map(function (p) {
+        return [p[0], p[1]];
+      });
+    var pts = points.map(function (p) {
+      return p[1];
+    });
+    if (pts.length < 10) return null;
+    var n = 72,
+      out = [],
+      stepN = pts.length / n;
+    for (var i = 0; i < n; i++) {
+      var a = Math.floor(i * stepN),
+        b = Math.max(a + 1, Math.floor((i + 1) * stepN)),
+        sum = 0;
+      for (var k = a; k < b; k++) sum += pts[k];
+      out.push(sum / (b - a));
+    }
+    out[n - 1] = pts[pts.length - 1];
+    priceLive[range] = { at: at, values: out, points: points };
+    return out;
+  }
+  function priceSave() {
+    /* every period's last good prices, thinned, into setting price_saved */
+    var o = {};
+    Object.keys(priceLive).forEach(function (r) {
+      var p = priceLive[r].points,
+        step = Math.max(1, Math.ceil(p.length / PRICE_SAVE_POINTS)),
+        keep = [];
+      for (var i = 0; i < p.length; i += step) keep.push([p[i][0], +p[i][1].toPrecision(5)]);
+      var end = p[p.length - 1];
+      if (keep[keep.length - 1][0] !== end[0]) keep.push([end[0], +end[1].toPrecision(5)]);
+      o[r] = { at: priceLive[r].at, p: keep };
+    });
+    setSetting('price_saved', JSON.stringify(o));
+  }
+  function priceLoad() {
+    /* once: the saved prices come back after a restart, so a busy price feed never leaves the chart empty */
+    if (priceLoaded) return;
+    priceLoaded = true;
+    var saved = {};
+    try {
+      saved = JSON.parse(getSetting('price_saved') || '{}') || {};
+    } catch (e) {}
+    Object.keys(saved).forEach(function (r) {
+      var e = saved[r];
+      if (PRICE_DAYS[r] && !priceLive[r] && e && Array.isArray(e.p) && typeof e.at === 'number') priceKeep(r, e.p, e.at);
+    });
+    var d = priceLive.day;
+    if (d && Date.now() - d.at < PRICE_LIVE_MS) state.rate = d.values[d.values.length - 1];
+  }
   function fetchPrices(range) {
+    priceLoad();
     var days = PRICE_DAYS[range] || 30,
       had = priceLive[range];
     if (had && Date.now() - had.at < 600000) return Promise.resolve(had.values);
@@ -117,30 +177,10 @@
         });
     })
       .then(function (j) {
-        var points = ((j && j.prices) || [])
-          .filter(function (p) {
-            return p && typeof p[0] === 'number' && typeof p[1] === 'number' && p[1] > 0;
-          })
-          .map(function (p) {
-            return [p[0], p[1]];
-          });
-        var pts = points.map(function (p) {
-          return p[1];
-        });
-        if (pts.length < 10) return null;
-        var n = 72,
-          out = [],
-          stepN = pts.length / n;
-        for (var i = 0; i < n; i++) {
-          var a = Math.floor(i * stepN),
-            b = Math.max(a + 1, Math.floor((i + 1) * stepN)),
-            sum = 0;
-          for (var k = a; k < b; k++) sum += pts[k];
-          out.push(sum / (b - a));
-        }
-        out[n - 1] = pts[pts.length - 1];
-        priceLive[range] = { at: Date.now(), values: out, points: points };
-        state.rate = out[n - 1];
+        var out = priceKeep(range, (j && j.prices) || [], Date.now());
+        if (!out) return had ? had.values : null; /* a refused or empty answer keeps the last numbers */
+        state.rate = out[out.length - 1];
+        priceSave();
         emit();
         return out;
       })
@@ -596,17 +636,26 @@
     },
     /* the sample walk is for the demo only; the phone shows nothing until real prices arrive */
     priceSeries: function (range) {
+      priceLoad();
       var l = priceLive[range];
       return l ? l.values : state.source === 'live' || isLocal() || !demo ? null : demo.samplePrices(range).values;
     },
     pricePoints: function (range) {
+      priceLoad();
       var l = priceLive[range];
       return l ? l.points : state.source === 'live' || isLocal() || !demo ? null : demo.samplePrices(range).points;
     } /* every [time, price] of the range, for the chart */,
     fetchPrices: fetchPrices,
     priceIsLive: function (range) {
-      return !!priceLive[range];
-    },
+      priceLoad();
+      var l = priceLive[range];
+      return !!l && Date.now() - l.at < PRICE_LIVE_MS;
+    } /* current prices for the period (younger than PRICE_LIVE_MS) */,
+    priceAt: function (range) {
+      priceLoad();
+      var l = priceLive[range];
+      return l ? l.at : 0;
+    } /* when the prices shown for the period were fetched; 0 = none, saved or new */,
     getSetting: getSetting,
     setSetting: setSetting,
     plain: plain,
@@ -747,7 +796,7 @@
       return demo ? demo.finish() : notHere();
     },
 
-    /* "That was me": the money keeps its course; only the red bell and banner go quiet (Alerts still lists it, with Decline) */
+    /* "Approve": the money keeps its course; only the red bell and banner go quiet (Alerts still lists it, with Decline) */
     dismissPending: function () {
       if (state.pending) state.pending.dismissed = true;
       emit();

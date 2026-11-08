@@ -71,7 +71,8 @@ public class MainActivity extends Activity {
     static final Set<String> SETTINGS = new HashSet<>(Arrays.asList(
             "live_base", "live_on", "welcomed", "screenshots", "currency", "alert_push", "alert_email", "balance_money",
             "only_trusted", "watch_only", "clip_check", "panic_pin", "alert_second", "watch_phone", "send_grace", "colors",
-            "live_network", "live_local", "guard_nodes", "auto_heir", "guard_on", "signer_window", "lock_after", "last_balances", "toured", "alert_ack_at", "rules_move"));
+            "live_network", "live_local", "guard_nodes", "auto_heir", "guard_on", "signer_window", "lock_after", "last_balances", "toured", "alert_ack_at", "rules_move",
+            "chart_ma20", "chart_ma50", "chart_fib", "price_saved"));
     /** Screens that show words or move money: in Live mode they are always FLAG_SECURE, whatever Preferences says. */
     private static final Set<String> SENSITIVE = new HashSet<>(Arrays.asList(
             "words", "wordcheck", "restore", "movein", "send", "waiting", "sent", "pending", "stop", "stopdone", "safe", "takeout",

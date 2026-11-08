@@ -59,11 +59,11 @@
     amber: 0.75,
     red: 0.9,
   }; /* share of the heir silence run before the clock warns; Live takes red from the engine (heir_warn_share) */
-  /* the KAS chart (price, Fibonacci levels and moving averages): sizes in SVG units (one unit = one CSS pixel), colours live in style.css */
+  /* the KAS chart (price, high/low marks and moving averages): sizes in SVG units (one unit = one CSS pixel), colours live in style.css */
   var CHART = {
-    h: 190,
-    top: 10,
-    bottom: 20,
+    h: 204,
+    top: 20,
+    bottom: 32,
     left: 0,
     right: 46 /* drawing height and the margins: price labels sit in the right margin, time labels in the bottom one */,
     grid: 4,
@@ -73,10 +73,6 @@
       { key: 'chart_ma20', n: 20, cls: 'ma20', label: 'MA 20' },
       { key: 'chart_ma50', n: 50, cls: 'ma50', label: 'MA 50' },
     ] /* simple moving averages: setting key, window in points, class, chip text */,
-    fib: {
-      key: 'chart_fib',
-      levels: [0, 23.6, 38.2, 50, 61.8, 78.6, 100],
-    } /* Fibonacci retracement, in percent from the range high (0) to its low (100) */,
     ranges: [
       ['day', '1D'],
       ['week', '1W'],
@@ -85,6 +81,8 @@
       ['year', '1Y'],
       ['all', 'All'],
     ],
+    retries: 3,
+    retryMs: 125000 /* when the price feed is busy and nothing is saved: ask again this many times, this far apart */,
   };
 
   /* the People tree (a circle of woven tendrils, like a tree of life): sizes in SVG units, colours in style.css */
@@ -514,7 +512,7 @@
     send: 'Payments under today’s limit go right away. Large ones become a pending withdrawal that waits for the notice period, so you can stop them.',
     sent: 'Your payment is on its way, or waiting as a pending withdrawal. A pending one can still be stopped until it lands.',
     receive: 'Share this address, or let someone scan the code, to get paid. Money that arrives goes into this account.',
-    pending: 'A large payment waiting out its notice period. Decline it if you did not ask for it. "That was me" only quiets the alert: it still waits, and you can decline it from Alerts until it leaves.',
+    pending: 'A large payment waiting out its notice period. Decline it if you did not ask for it. Approve only quiets the alert: it still waits its notice period, and you can decline it from Alerts until it leaves.',
     stop: 'The emergency stop moves all your money, pending withdrawals included, into your vault at once. Nobody can pay out of the vault from a phone: not you, not a thief, not us. Only your vault seed, kept on paper somewhere else, takes it out again.',
     stopdone: 'Everything is in your vault now. It stays there until you open the vault with your vault seed.',
     safe: 'Your vault holds money the emergency stop moved out of reach. Taking it out needs your vault seed, which never lives on this phone.',
@@ -2716,7 +2714,7 @@
     });
   }
 
-  /* ---- KAS price: the chart (line coloured by direction, grid, scrub, MA and Fib tools) over the scene's calm glowing line ---- */
+  /* ---- KAS price: the chart (line coloured by direction, grid, high/low marks, MA tools) over the scene's calm glowing line ---- */
   var chartRange = 'week';
   function chartMoney(v) {
     return '$' + v.toFixed(v < 1 ? 3 : 2);
@@ -2797,33 +2795,28 @@
     }
     return s;
   }
-  function chartFib(C, lo, hi, x0, x1, Y) {
-    var s = '';
-    C.fib.levels.forEach(function (p) {
-      /* retracement from the range high down to its low */
-      var fv = hi - ((hi - lo) * p) / 100,
-        fy = Y(fv);
-      s +=
-        '<line class="fib" x1="' +
-        x0 +
-        '" x2="' +
-        x1 +
-        '" y1="' +
-        fy +
-        '" y2="' +
-        fy +
-        '"/><text class="fibl" x="' +
-        (x0 + 4) +
-        '" y="' +
-        fy +
-        '" dy="-2.5">' +
-        p +
-        '% ' +
-        chartMoney(fv) +
-        '</text>';
+  function chartHiLo(vals, X, Y, x0, x1) {
+    /* the period's high and low, marked where they happen on the line */
+    var hiI = 0,
+      loI = 0;
+    vals.forEach(function (v, i) {
+      if (v > vals[hiI]) hiI = i;
+      if (v < vals[loI]) loI = i;
     });
-    return s;
+    function mark(i, word, dy) {
+      var x = +X(i),
+        anchor = x < x0 + 40 ? 'start' : x > x1 - 40 ? 'end' : 'middle';
+      return (
+        '<circle class="hl" cx="' + X(i) + '" cy="' + Y(vals[i]) + '" r="2"/><text class="hll" x="' + X(i) + '" y="' + Y(vals[i]) +
+        '" dy="' + dy + '" text-anchor="' + anchor + '">' + word + ' ' + chartMoney(vals[i]) + '</text>'
+      );
+    }
+    return mark(hiI, 'High', -7) + mark(loI, 'Low', 14);
   }
+  function chartDelta(d) {
+    var a = Math.abs(d);
+    return (d < 0 ? '\u2212' : '+') + '$' + a.toFixed(a < 0.01 ? 4 : a < 1 ? 3 : 2);
+  } /* the period's change in dollars, one more decimal than prices under a cent */
   function chartSvg(points, range, tools, W) {
     /* -> SVG markup; W = drawing width in CSS pixels */
     var C = CHART,
@@ -2871,7 +2864,6 @@
         '<linearGradient id="kvAreaDown" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e07070" stop-opacity=".22"/><stop offset="1" stop-color="#e07070" stop-opacity="0"/></linearGradient></defs>';
     s += chartGrid(C, lo, hi, x0, x1, Y);
     s += chartTimes(C, points, range, n, H, X);
-    if (tools.fib) s += chartFib(C, lo, hi, x0, x1, Y);
     s += '<path class="' + (rising ? 'area-up' : 'area-down') + '" d="' + area + '"/>';
     if (up) s += '<path class="ln-up" d="' + up + '"/>';
     if (dn) s += '<path class="ln-down" d="' + dn + '"/>';
@@ -2882,6 +2874,7 @@
       for (var i = 0; i < n; i++) d += (i ? 'L' : 'M') + X(i) + ' ' + Y(av[i]);
       s += '<path class="ma ' + m.cls + '" d="' + d + '"/>';
     });
+    s += chartHiLo(vals, X, Y, x0, x1);
     s +=
       '<circle class="dot" cx="' +
       X(n - 1) +
@@ -2889,61 +2882,31 @@
       Y(vals[n - 1]) +
       '" r="' +
       C.dot +
-      '"/>' +
-      '<line class="cursor" data-cursor x1="0" x2="0" y1="' +
-      y0 +
-      '" y2="' +
-      (y0 + ph) +
-      '" visibility="hidden"/></svg>';
+      '"/></svg>';
     return s;
   }
-  function chartScrub(box, points, range, restore) {
-    /* a finger across the chart reads the price and time at that point in the header; let go: back to the last price */
-    var svg = box.querySelector('svg'),
-      cur = svg && svg.querySelector('[data-cursor]'),
-      k = box.querySelector('.k'),
-      when = box.querySelector('[data-when]');
-    if (!svg || !cur) return;
-    var n = points.length;
-    function at(e) {
-      var r = svg.getBoundingClientRect(),
-        W = +svg.getAttribute('viewBox').split(' ')[2],
-        x = ((e.clientX - r.left) / r.width) * W;
-      var pw = W - CHART.right - CHART.left,
-        i = Math.max(0, Math.min(n - 1, Math.round(((x - CHART.left) / pw) * (n - 1))));
-      var px = (CHART.left + (n > 1 ? (i / (n - 1)) * pw : pw / 2)).toFixed(1);
-      cur.setAttribute('x1', px);
-      cur.setAttribute('x2', px);
-      cur.setAttribute('visibility', 'visible');
-      k.textContent = 'KAS ' + chartMoney(points[i][1]);
-      when.textContent = chartWhen(points[i][0], range);
-    }
-    function off() {
-      cur.setAttribute('visibility', 'hidden');
-      when.textContent = '';
-      restore();
-    }
-    svg.onpointerdown = function (e) {
-      svg.setPointerCapture && svg.setPointerCapture(e.pointerId);
-      at(e);
-    };
-    svg.onpointermove = function (e) {
-      if (e.pressure > 0 || e.buttons) at(e);
-    };
-    svg.onpointerup = svg.onpointercancel = off;
-  }
+  function chartBox() {
+    return ui.el && ui.cur && ui.cur.name === 'price' ? ui.el.querySelector('[data-chart]') : null;
+  } /* the chart's box while the price screen is up */
   function chartAskPrices() {
     ui.priceAsked = ui.priceAsked || {};
-    if (D.fetchPrices && !D.priceIsLive(chartRange) && !(ui.priceAsked[chartRange] > Date.now() - 600000)) {
+    if (D.fetchPrices && !(ui.priceAsked[chartRange] > Date.now() - 600000)) {
       /* real prices arrive and redraw; a miss is asked again next time */
       ui.priceAsked[chartRange] = Date.now();
       D.fetchPrices(chartRange).then(function (v) {
         if (!v) {
           delete ui.priceAsked[chartRange];
-          var b3 = ui.el && ui.cur && ui.cur.name === 'price' && !D.priceIsLive(chartRange) ? ui.el.querySelector('[data-chart]') : null;
-          if (b3) b3.innerHTML = '<div class="sub">The price service did not answer. Come back in a moment.</div>';
+          var b3 = !D.priceAt(chartRange) && chartBox();
+          if (b3) {
+            b3.innerHTML = '<div class="sub">CoinGecko is busy right now. Trying again in a moment.</div>';
+            ui.priceRetries = (ui.priceRetries || 0) + 1;
+            if (ui.priceRetries <= CHART.retries) setTimeout(function () {
+              chartInto(chartBox());
+            }, CHART.retryMs); /* the feed rests 2 min after a refusal */
+          }
           return;
         }
+        ui.priceRetries = 0;
         var b2 = ui.el && ui.cur && ui.cur.name === 'price' ? ui.el.querySelector('[data-chart]') : null;
         if (b2) chartInto(b2);
       });
@@ -2964,11 +2927,7 @@
           return '<button data-tool="' + m.key + '"' + (tools[m.key] ? ' class="on"' : '') + '>' + m.label + '</button>';
         })
         .join('') +
-      '<button data-tool="' +
-      CHART.fib.key +
-      '"' +
-      (tools.fib ? ' class="on"' : '') +
-      '>Fib</button></div>'
+      '</div>'
     );
   }
   function wireChartButtons(box) {
@@ -2986,6 +2945,11 @@
       };
     });
   }
+  function chartSource(range) {
+    var at = D.priceAt ? D.priceAt(range) : 0;
+    if (!at) return 'Sample prices until the real ones arrive';
+    return 'Prices from CoinGecko' + (Date.now() - at > 600000 ? ', as of ' + chartWhen(at, 'week') : '');
+  } /* older than 10 minutes: the saved prices say when they are from */
   function chartInto(box) {
     if (!box) return;
     var series = D.priceSeries(chartRange);
@@ -3010,14 +2974,12 @@
       }); /* the chart draws every point; the scene keeps its calm 72 */
     var pv = points.map(function (p) {
         return p[1];
-      }),
-      plo = Math.min.apply(null, pv),
-      phi = Math.max.apply(null, pv);
+      });
     var first = pv[0],
       last = pv[pv.length - 1],
       ch = ((last - first) / first) * 100,
       up = ch >= 0;
-    var tools = { fib: D.getSetting(CHART.fib.key) === 'on' };
+    var tools = {};
     CHART.ma.forEach(function (m) {
       tools[m.key] = D.getSetting(m.key) === 'on';
     });
@@ -3037,23 +2999,19 @@
       '</span><span class="' +
       (up ? 'up' : 'down') +
       '">' +
-      (up ? '+' : '') +
-      ch.toFixed(1) +
-      '%</span><span class="when" data-when></span>' +
+      chartDelta(last - first) +
+      ' (' +
+      (up ? '+' : '\u2212') +
+      Math.abs(ch).toFixed(1) +
+      '%)</span>' +
       legend +
       '</div>' +
       chartSvg(points, chartRange, tools, W) +
       chartControls(tools) +
-      '<div class="sub">Low ' +
-      chartMoney(plo) +
-      ', high ' +
-      chartMoney(phi) +
-      (D.priceIsLive(chartRange) ? ', from CoinGecko' : ', sample prices until the real ones arrive') +
+      '<div class="sub">' +
+      chartSource(chartRange) +
       '</div>';
     wireChartButtons(box);
-    chartScrub(box, points, chartRange, function () {
-      box.querySelector('.k').textContent = priceHead();
-    });
     applyScene();
   }
 
@@ -3153,11 +3111,12 @@
     });
   }
 
-  /* ---- fingerprint, then slide: every money action. The button asks for the fingerprint; on yes it becomes a slide
-     control. The slide charges the background; when it completes, one pulse runs through the scene and the action runs.
-     A refused fingerprint changes nothing. ---- */
+  /* ---- slide, then fingerprint: every money action. Live: the button becomes the slide at once, and the action's own
+     signer prompt (D's moneyAction) is the one fingerprint; a plain prompt here opened no key and only doubled it
+     (finger, slide, finger again). It stays after the slide: the safe key lives 15 s from that prompt.
+     Sample: the plain confirm first. The slide charges the background; when it completes, one pulse runs. ---- */
   function armSlide(btn, title, text, danger, label, kind, action) {
-    confirmAction(title, text, danger).then(function (yes) {
+    (D.isLive() ? Promise.resolve(true) : confirmAction(title, text, danger)).then(function (yes) {
       if (!yes || !btn.parentNode) return;
       var s = document.createElement('div');
       s.className = 'slide' + (danger ? '' : ' go');
@@ -4151,11 +4110,13 @@
         /* the pips come from the engine's status (stop_keys, heir, sheets); until it has answered they stay dim */
         setHtml(el, '[data-guards]', guardsHtml(homeGuardState(s, main, other)));
         var p = s.pending,
-          banner = !!(p && !p.dismissed);
+          banner = !!(p && !p.dismissed); /* not yet acknowledged: the bell's dot is red */
         setHtml(el, '[data-log]', logHtml(3));
         setText(el, '[data-notice]', ui.notice || ''); /* the phone's one-time notice; empty hides the row */
         setText(el, '[data-e]', s.error);
-        el.querySelector('.bell').classList.toggle('has', banner || !!s.outgoing);
+        var bell = el.querySelector('.bell');
+        bell.classList.toggle('has', !!p || !!s.outgoing); /* lit while anything waits, acknowledged or not */
+        bell.classList.toggle('loud', banner);
         /* the watcher's word: red for a withdrawal or lineage break not yet owned up to, amber when the guard is silent.
            The stop button opens the usual stop screen (slide, then fingerprint); "I did this" hides this one alert only. */
         homeAlarm(el, s, main);
@@ -4807,7 +4768,7 @@
               : '');
           acts =
             (q.secondsLeft > 0 || seen || !D.isLive() ? '' : '<button class="pill" data-finish>Finish</button>') +
-            '<div class="twobtn"><button class="pill" data-decline>Decline it</button><button class="pill" data-let>That was me</button></div>' +
+            '<div class="twobtn"><button class="pill" data-decline>Decline it</button><button class="pill" data-let>Approve</button></div>' +
             '<button class="pill danger" data-stop>Stop everything</button>' /* the stop itself, not a way to the stop screen; its own row so the slide has room */ +
             '<div class="sub">Stop everything moves all of this account into your vault, this withdrawal included. Only your vault seed takes it out.</div>' +
             (D.isLive() ? '' : '<button class="ghost" data-skip>Skip ahead</button>');
