@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the app icon: three shortcuts straight into one screen. Explicit intents only (no intent-filter, so no other app can deep-link in). -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="send" android:enabled="true" android:icon="@drawable/ic_send"
+        android:shortcutShortLabel="@string/sc_send" android:shortcutLongLabel="@string/sc_send_long">
+        <intent android:action="android.intent.action.VIEW" android:data="kaspavault://send"
+            android:targetPackage="com.kaspavault.wallet" android:targetClass="com.kaspavault.wallet.MainActivity"/>
+    </shortcut>
+    <shortcut android:shortcutId="receive" android:enabled="true" android:icon="@drawable/ic_receive"
+        android:shortcutShortLabel="@string/sc_receive" android:shortcutLongLabel="@string/sc_receive_long">
+        <intent android:action="android.intent.action.VIEW" android:data="kaspavault://receive"
+            android:targetPackage="com.kaspavault.wallet" android:targetClass="com.kaspavault.wallet.MainActivity"/>
+    </shortcut>
+    <shortcut android:shortcutId="stop" android:enabled="true" android:icon="@drawable/ic_stop"
+        android:shortcutShortLabel="@string/sc_stop" android:shortcutLongLabel="@string/sc_stop_long">
+        <intent android:action="android.intent.action.VIEW" android:data="kaspavault://stop"
+            android:targetPackage="com.kaspavault.wallet" android:targetClass="com.kaspavault.wallet.MainActivity"/>
+    </shortcut>
+</shortcuts>

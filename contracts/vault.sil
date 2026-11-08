@@ -1,0 +1,325 @@
+pragma silverscript ^0.1.0;
+
+// Three-key delayed-withdrawal vault. Engine-tested and run on testnet-10 (docs/TESTING.md).
+// v3: inherit from Pending pays
+// the committed destination first; request refuses dust amounts and odd destination
+// lengths; every exit output is at least minRemainder; finish zeroes destHash.
+// v4 (review 9, L1): a single-output finish ends the lineage.
+// v5: decline (a stop key sends a Pending withdrawal back to Locked, nothing
+// leaves) and inheritOpen (keyless inheritance once the silence has passed, only when the
+// autoHeir dial is 1, so a watcher or anyone else may send it for the heir).
+// v6: hardLimit dial. 1 makes request fail outright, so no withdrawal above
+// the card limit can ever start; money above the limit then leaves only through a stop
+// key (cancel to the safe) or the heir. 20 constructor arguments.
+//
+// spendPk   may spend up to capPerWindow, request a larger withdrawal, or top the vault up.
+// cancelPk, cancelPk2, cancelPk3  three stop keys; any one of them may send funds to the
+//           fixed cold script, or decline a waiting withdrawal. Unused slots repeat cancelPk.
+// coldSpkHash  blake2b of the serialized cold scriptPubKey (offline multisig).
+// heirPk    may take everything to the heir script once the coin has sat untouched for
+//           inheritDelay. Every spend, request, finish, decline or topup renews the coin, so
+//           the silence clock restarts. No heir: heirPk = cancelPk, heirSpkHash = coldSpkHash,
+//           inheritDelay = 4000000000 (it must stay below 2^32, the CSV domain), autoHeir = 0.
+// autoHeir  1 lets anyone (the watcher) move the coin to the heir script after inheritDelay
+//           without a signature; 0 keeps inheritance to the heir's own key.
+// hardLimit 1 switches request off for good: the card limit is the only way out for the
+//           spend key, nothing can override it; 0 keeps the request/finish path.
+//
+// Amounts are in sompi. delay, inheritDelay and windowSize are in DAA score units (10 per second).
+// The vault input is always input 0, which stops two vault coins from being
+// satisfied by the same output, even across different covenant IDs.
+// Coins sent straight to the vault address (no covenant lineage) can only leave
+// through cancel, inherit or inheritOpen; use topup to add funds to a running vault.
+// minRemainder keeps every continuation output large enough to be mined and
+// relayed (Kaspa storage mass punishes small outputs), so no path gets stuck.
+contract Vault(
+    pubkey spendPk,
+    pubkey cancelPk,
+    pubkey cancelPk2,
+    pubkey cancelPk3,
+    byte[32] coldSpkHash,
+    pubkey heirPk,
+    byte[32] heirSpkHash,
+    int inheritDelay,
+    int autoHeir,
+    int hardLimit,
+    int delay,
+    int capPerWindow,
+    int windowSize,
+    int maxFee,
+    int minRemainder,
+    int initStage,
+    byte[32] initDestHash,
+    int initAmount,
+    int initWindowStart,
+    int initSpent
+) {
+    int stage = initStage;              // 0 = Locked, 1 = Pending
+    byte[32] destHash = initDestHash;   // blake2b of the destination scriptPubKey
+    int amount = initAmount;
+    int windowStart = initWindowStart;
+    int spentInWindow = initSpent;
+
+    function soloVaultInput() {
+        require(this.activeInputIndex == 0);
+        require(tx.inputs.length == 1);
+        // A coin sent straight to the address has no covenant id (all zeros)
+        // and so counts zero covenant inputs.
+        require(OpCovInputCount(OpInputCovenantId(0)) == 1);
+    }
+
+    // Only SIGHASH_ALL signatures, so no unsigned part of the transaction
+    // (arguments, outputs) can be changed by someone watching the network.
+    function requireSigAll(sig s) {
+        byte[] raw = byte[](s);
+        require(raw.length == 65);
+        (byte[] body, byte[] hashType) = raw.split(64);
+        require(hashType == byte[](0x01));
+    }
+
+    function soloContinuation(int outputIndex) {
+        byte[32] covId = OpInputCovenantId(0);
+        require(OpCovInputCount(covId) == 1);
+        require(OpCovOutputCount(covId) == 1);
+        require(OpCovOutputIdx(covId, 0) == outputIndex);
+    }
+
+    // `which` picks the stop key (0, 1, 2); the key is chosen first and the
+    // signature is then required against it (never rely on checkSig being false).
+    function requireStopSig(sig s, int which) {
+        pubkey stopKey = cancelPk;
+        if (which == 1) {
+            stopKey = cancelPk2;
+        } else if (which == 2) {
+            stopKey = cancelPk3;
+        } else {
+            require(which == 0);
+        }
+        requireSigAll(s);
+        require(checkSig(s, stopKey));
+    }
+
+    // Everything the heir is owed, from any stage. From Pending the owner's
+    // last signed instruction is honoured first: output 0 pays `amount` to the
+    // committed destination and the heir output is output 1 (review 4, M1).
+    // Ends the lineage: no output may carry this vault's covenant id, so a
+    // watcher never mistakes a leftover for a living vault (review 2, F1).
+    function payHeirAll() {
+        require(this.activeInputIndex == 0);
+        require(OpCovOutputCount(OpInputCovenantId(0)) == 0);
+        require(this.ageDaa >= inheritDelay);
+        int heirAt = 0;
+        int owed = tx.inputs[0].value;
+        if (stage == 1) {
+            require(blake2b(tx.outputs[0].scriptPubKey) == destHash);
+            require(tx.outputs[0].value == amount);
+            heirAt = 1;
+            owed = owed - amount;
+        } else {
+            require(stage == 0);
+        }
+        require(blake2b(tx.outputs[heirAt].scriptPubKey) == heirSpkHash);
+        require(tx.outputs[heirAt].value >= owed - maxFee);
+        require(tx.outputs[heirAt].value >= minRemainder);
+    }
+
+    // Small instant spend, limited by a rolling cap. The fee counts toward the cap.
+    entry spend(sig s) {
+        requireSigAll(s);
+        require(checkSig(s, spendPk));
+        require(stage == 0);
+        // A deployer-set counter outside [0, cap] must not widen the cap.
+        require(spentInWindow >= 0);
+        require(spentInWindow <= capPerWindow);
+        soloVaultInput();
+        require(tx.outputs.length == 2);
+        soloContinuation(1);
+
+        // Sequence 0 makes consensus enforce the locktime. The upper bound keeps
+        // it in the DAA domain: a timestamp locktime is a far larger number and
+        // would pass the reset test below far too often.
+        byte[8] sequence = OpTxInputSeq(0);
+        require(sequence == byte[8](0x0000000000000000));
+        int lockTime = OpTxLockTime();
+        require(lockTime < 500000000000);
+
+        int inputValue = tx.inputs[0].value;
+        int outflow = inputValue - tx.outputs[1].value;
+        require(outflow >= 0);
+
+        int nextWindowStart = windowStart;
+        int nextSpent = spentInWindow + outflow;
+        int inputDaa = OpTxInputDaaScore(0);
+        // inputDaa is the DAA score of the coin being spent. A topup renews the
+        // coin, so after a topup the reset waits a full window from the topup.
+        if (lockTime >= windowStart + windowSize && lockTime >= inputDaa + windowSize) {
+            nextWindowStart = lockTime;
+            nextSpent = outflow;
+        }
+        require(nextSpent <= capPerWindow);
+        require(tx.outputs[1].value >= minRemainder);
+
+        validateOutputState(1, State {
+            stage: 0,
+            destHash: destHash,
+            amount: 0,
+            windowStart: nextWindowStart,
+            spentInWindow: nextSpent
+        });
+    }
+
+    // First half of a large withdrawal. No money reaches the destination here.
+    // The destination is passed as its full scriptPubKey (not just a hash) so a
+    // watcher reading the chain can show the owner where the money is headed.
+    entry request(sig s, byte[] newDestSpk, int newAmount) {
+        // v6: with the hardLimit dial on, no large withdrawal can start, whoever
+        // signs. Same shape as inheritOpen's autoHeir gate.
+        require(hardLimit == 0);
+        byte[32] newDestHash = blake2b(newDestSpk);
+        requireSigAll(s);
+        require(checkSig(s, spendPk));
+        require(stage == 0);
+        soloVaultInput();
+        require(tx.outputs.length == 1);
+        soloContinuation(0);
+
+        // The destination output finish must create has to be minable itself.
+        require(newAmount >= minRemainder);
+        // Serialized scriptPubKey = 2-byte version + script: 36 bytes for P2PK
+        // (schnorr), 37 for P2SH or ECDSA P2PK. Anything else is unspendable.
+        require(newDestSpk.length == 36 || newDestSpk.length == 37);
+        require(tx.outputs[0].value >= tx.inputs[0].value - maxFee);
+        require(newAmount + maxFee <= tx.outputs[0].value);
+        // What finish leaves behind must be either nothing (fee only) or a
+        // continuation big enough to be mined; nothing in between.
+        int leftover = tx.outputs[0].value - newAmount;
+        require(leftover <= maxFee || leftover - maxFee >= minRemainder);
+
+        validateOutputState(0, State {
+            stage: 1,
+            destHash: newDestHash,
+            amount: newAmount,
+            windowStart: windowStart,
+            spentInWindow: spentInWindow
+        });
+    }
+
+    // Anyone may finish after the delay, but only to the recorded destination.
+    entry finish() {
+        require(stage == 1);
+        soloVaultInput();
+        require(this.ageDaa >= delay);
+        require(blake2b(tx.outputs[0].scriptPubKey) == destHash);
+        require(tx.outputs[0].value == amount);
+
+        int remainder = tx.inputs[0].value - amount;
+        if (tx.outputs.length == 1) {
+            // v4: single-output finish ends the lineage (review 9, L1)
+            require(OpCovOutputCount(OpInputCovenantId(0)) == 0);
+            require(remainder <= maxFee);
+        } else {
+            require(tx.outputs.length == 2);
+            soloContinuation(1);
+            require(tx.outputs[1].value >= remainder - maxFee);
+            require(tx.outputs[1].value >= minRemainder);
+            // Locked carries no destination: the past payee must not shape
+            // the vault's address (review 4, L5).
+            validateOutputState(1, State {
+                stage: 0,
+                destHash: byte[32](0x0000000000000000000000000000000000000000000000000000000000000000),
+                amount: 0,
+                windowStart: windowStart,
+                spentInWindow: spentInWindow
+            });
+        }
+    }
+
+    // v5: a stop key takes a waiting withdrawal back to Locked. Nothing leaves:
+    // the one continuation output keeps the whole coin but the fee, and the
+    // window counters are unchanged, so a declined request neither widens nor
+    // resets the card limit. A stop key, not the spend key, because the spend
+    // key may be the thief's. Replaying it on a Locked coin fails the stage check.
+    entry decline(sig s, int which) {
+        requireStopSig(s, which);
+        require(stage == 1);
+        soloVaultInput();
+        require(tx.outputs.length == 1);
+        soloContinuation(0);
+        require(tx.outputs[0].value >= tx.inputs[0].value - maxFee);
+        require(tx.outputs[0].value >= minRemainder);
+
+        validateOutputState(0, State {
+            stage: 0,
+            destHash: byte[32](0x0000000000000000000000000000000000000000000000000000000000000000),
+            amount: 0,
+            windowStart: windowStart,
+            spentInWindow: spentInWindow
+        });
+    }
+
+    // Add funds to a running vault: the single continuation output holds at
+    // least the old balance and no money leaves. Extra plain inputs pay the
+    // top-up and the fee. The state is unchanged. Note that the renewed coin
+    // restarts spend's `inputDaa + windowSize` reset test, so the window reset
+    // after a top-up waits a full window from the top-up.
+    entry topup(sig s) {
+        requireSigAll(s);
+        require(checkSig(s, spendPk));
+        require(stage == 0);
+        require(this.activeInputIndex == 0);
+        require(OpCovInputCount(OpInputCovenantId(0)) == 1);
+        require(tx.outputs.length == 1);
+        soloContinuation(0);
+        require(tx.outputs[0].value >= tx.inputs[0].value);
+
+        validateOutputState(0, State {
+            stage: 0,
+            destHash: destHash,
+            amount: 0,
+            windowStart: windowStart,
+            spentInWindow: spentInWindow
+        });
+    }
+
+    // Works from any stage and pays only the cold script. Extra inputs and
+    // outputs are allowed so a fee spike can be paid from outside the vault.
+    entry cancel(sig s, int which) {
+        requireStopSig(s, which);
+        require(this.activeInputIndex == 0);
+        // Ends the lineage: no output may carry this vault's covenant id, so a
+        // watcher never mistakes a leftover for a living vault (review 2, F1).
+        require(OpCovOutputCount(OpInputCovenantId(0)) == 0);
+        require(blake2b(tx.outputs[0].scriptPubKey) == coldSpkHash);
+        require(tx.outputs[0].value >= tx.inputs[0].value - maxFee);
+        // A coin smaller than maxFee may not vanish as fee; outside inputs
+        // may lift the cold output instead (review 4, L6).
+        require(tx.outputs[0].value >= minRemainder);
+    }
+
+    // Inheritance by the heir's own key: once the coin has sat untouched for
+    // inheritDelay, the heir may take the vault to the heir script. Any other
+    // entry renews the coin and so restarts the clock.
+    entry inherit(sig s) {
+        requireSigAll(s);
+        require(checkSig(s, heirPk));
+        payHeirAll();
+    }
+
+    // v5: the same inheritance without a signature, so a watcher (or anyone)
+    // can send it the moment the silence has passed. Only when the owner set
+    // the autoHeir dial to 1; otherwise this entry fails outright and the heir
+    // still claims with inherit. The outputs are fixed by payHeirAll, so a
+    // stranger submitting it can only pay the fee, never redirect the money.
+    entry inheritOpen() {
+        require(autoHeir == 1);
+        // No signer stands behind this entry, so its shape is pinned: whoever
+        // submits it may pay the fee or lift the heir output from an outside
+        // coin, never take a cut (review v5, finding 1).
+        if (stage == 1) {
+            require(tx.outputs.length == 2);
+        } else {
+            require(tx.outputs.length == 1);
+        }
+        payHeirAll();
+    }
+}

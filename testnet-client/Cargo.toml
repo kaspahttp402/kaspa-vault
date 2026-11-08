@@ -1,0 +1,62 @@
+[package]
+name = "vault-testnet-client"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "vault_core"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "vault-testnet-client"
+path = "src/main.rs"
+required-features = ["laptop"]
+
+[dependencies]
+silverscript-lang = { path = "../vendor/silverscript/silverscript-lang", default-features = false }
+silverscript-abi = { path = "../vendor/silverscript/silverscript-abi" }
+kaspa-consensus-core = "2.1.0"
+kaspa-txscript = "2.1.0"
+kaspa-addresses = "2.1.0"
+kaspa-rpc-core = "2.1.0"
+kaspa-wrpc-client = "2.1.0"
+kaspa-hashes = "2.1.0"
+blake2b_simd = "1.0.2"
+secp256k1 = { version = "0.29.0", features = ["global-context", "rand-std"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util", "sync"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+faster-hex = "0.10"
+clap = { version = "4.5", features = ["derive"] }
+borsh = { version = "1.5", features = ["derive"] }
+qrcode = { version = "0.14", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"], optional = true }
+sha2 = "0.10"
+futures = "0.3"
+zeroize = "1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[features]
+default = ["zk", "laptop"]
+# The laptop's https service and the CLI; off in the phone library (build-native.sh: --no-default-features), so the
+# phone carries no server, no TLS stack and no certificate maker (smaller attack surface).
+laptop = ["dep:rustls", "dep:rcgen"]
+# zk keeps the laptop build as it was (SilverScript's r0.g16.verify builtin). The phone library is built with
+# --no-default-features: the vault contract has no zero-knowledge ops and the risc0 crates would bloat the .so.
+zk = ["silverscript-lang/zk"]
+
+# The phone library (app/android/build-native.sh): smallest code, one unit, symbols stripped. Panics stay unwinding:
+# android.rs catches them at the JNI edge and answers a fault in words instead of killing the app.
+[profile.phone]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+
+[patch.crates-io]
+kaspa-hashes = { path = "../vendor/kaspa-hashes-patched" }

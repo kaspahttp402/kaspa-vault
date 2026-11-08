@@ -1,0 +1,10 @@
+target/
+vendor/silverscript/
+app/android/build/
+app/android/jniLibs/
+app/android/*.keystore
+testnet-client/run*/
+testnet-client/bin/
+*.log
+.env
+*.key

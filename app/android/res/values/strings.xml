@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="sc_send">Send</string>
+    <string name="sc_send_long">Send KAS</string>
+    <string name="sc_receive">Receive</string>
+    <string name="sc_receive_long">Show my address</string>
+    <string name="sc_stop">Stop everything</string>
+    <string name="sc_stop_long">Emergency stop</string>
+</resources>

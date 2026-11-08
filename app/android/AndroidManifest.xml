@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- android:versionCode is bumped by build.sh on every build (the value here is the last one built). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.kaspavault.wallet"
+    android:versionCode="49" android:versionName="1.0">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+    <application android:label="KaspaVault" android:icon="@mipmap/icon" android:roundIcon="@mipmap/icon"
+        android:theme="@style/Wave" android:hardwareAccelerated="true"
+        android:usesCleartextTraffic="false" android:enableOnBackInvokedCallback="true"
+        android:allowBackup="false">
+        <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="portrait" android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|uiMode|density|fontScale">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts"/>
+        </activity>
+        <!-- The guard: a foreground service of the specialUse type, because the dataSync type is stopped after six hours a day on Android 15 and a guard must run all day. -->
+        <service android:name=".GuardService" android:exported="false" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="watches the owner's savings account and alarms on a withdrawal"/>
+        </service>
+    </application>
+</manifest>

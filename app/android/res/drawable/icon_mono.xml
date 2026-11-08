@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon (monochrome) layer: the same vault mark in single-colour white, thicker strokes. Launchers tint it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.9" android:strokeLineJoin="round" android:pathData="M54,28 L76.52,41 L76.52,67 L54,80 L31.48,67 L31.48,41 Z"/>
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="1.6" android:strokeLineJoin="round" android:pathData="M54,34.5 L70.89,44.25 L70.89,63.75 L54,73.5 L37.11,63.75 L37.11,44.25 Z"/>
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="2.0" android:strokeLineCap="round" android:pathData="M54,45 L54,63"/>
+</vector>

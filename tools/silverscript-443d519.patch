@@ -1,0 +1,91 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 5f9587b..0fc9b08 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2183,8 +2183,6 @@ dependencies = [
+ [[package]]
+ name = "kaspa-hashes"
+ version = "2.1.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ad607d2d41c3ba426b5ecb48e3070d2783d71249ebda6132404b338e19f9025c"
+ dependencies = [
+  "blake2b_simd",
+  "blake3",
+@@ -3897,6 +3895,7 @@ dependencies = [
+  "kaspa-addresses",
+  "kaspa-consensus",
+  "kaspa-consensus-core",
++ "kaspa-hashes",
+  "kaspa-muhash",
+  "kaspa-txscript",
+  "kaspa-txscript-errors",
+diff --git a/Cargo.toml b/Cargo.toml
+index 3ff8cc5..f03608f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -22,7 +22,7 @@ rust-version = "1.94.0"
+ kaspa-consensus-core = "2.1.0"
+ kaspa-consensus = "2.1.0"
+ kaspa-addresses = "2.1.0"
+-kaspa-hashes = "2.1.0"
++kaspa-hashes = { version = "2.1.0", features = ["no-asm"] }
+ kaspa-muhash = "2.1.0"
+ kaspa-txscript = "2.1.0"
+ kaspa-txscript-zk-sdk = "2.1.0"
+@@ -46,3 +46,6 @@ silverscript-abi = { version = "1.0.1", path = "silverscript-abi" }
+ silverscript-debug-artifact = { version = "1.0.1", path = "silverscript-debug-artifact" }
+ silverscript-debugger-session = { version = "1.0.1", path = "debugger/session" }
+ thiserror = "1.0.61"
++
++[patch.crates-io]
++kaspa-hashes = { path = "../kaspa-hashes-patched" }
+diff --git a/silverscript-lang/Cargo.toml b/silverscript-lang/Cargo.toml
+index ace7ec5..bc555f2 100644
+--- a/silverscript-lang/Cargo.toml
++++ b/silverscript-lang/Cargo.toml
+@@ -12,10 +12,17 @@ rust-version.workspace = true
+ name = "silverscript_lang"
+ path = "src/lib.rs"
+ 
++[features]
++default = ["zk"]
++# zk: the r0.g16.verify builtin, which pulls kaspa-txscript-zk-sdk and the risc0 crates. KaspaVault turns it off for the
++# phone library (no zero-knowledge ops in the vault contract; risc0 would make the .so large and slow to build).
++zk = ["dep:kaspa-txscript-zk-sdk"]
++
+ [dependencies]
+ kaspa-consensus-core.workspace = true
++kaspa-hashes.workspace = true
+ kaspa-txscript.workspace = true
+-kaspa-txscript-zk-sdk.workspace = true
++kaspa-txscript-zk-sdk = { workspace = true, optional = true }
+ kaspa-txscript-errors.workspace = true
+ blake2b_simd.workspace = true
+ blake3.workspace = true
+diff --git a/silverscript-lang/src/compiler/compile/expression/builtin.rs b/silverscript-lang/src/compiler/compile/expression/builtin.rs
+index 81efd3d..3a356c0 100644
+--- a/silverscript-lang/src/compiler/compile/expression/builtin.rs
++++ b/silverscript-lang/src/compiler/compile/expression/builtin.rs
+@@ -1,6 +1,7 @@
+ use super::*;
+ use crate::compiler::builtin_types::{builtin_parameters, g16_verify_parameter_types};
+ use kaspa_txscript::zk_precompiles::tags::ZkTag;
++#[cfg(feature = "zk")]
+ use kaspa_txscript_zk_sdk::append_r0_groth16_verifier_dynamic_image_id;
+ 
+ pub(super) fn compile_call_expr<'i>(
+@@ -301,6 +302,14 @@ fn compile_g16_verify_call<'i>(ctx: &mut CompileExprContext<'_, '_, 'i>, args: &
+     Ok(())
+ }
+ 
++#[cfg(not(feature = "zk"))]
++fn compile_r0_groth16_verify_call<'i>(_ctx: &mut CompileExprContext<'_, '_, 'i>, _args: &[Expr<'i>]) -> Result<(), CompilerError> {
++    Err(CompilerError::Unsupported(
++        "r0.g16.verify() is not available in this build (compiled without the zk feature)".to_string(),
++    ))
++}
++
++#[cfg(feature = "zk")]
+ fn compile_r0_groth16_verify_call<'i>(ctx: &mut CompileExprContext<'_, '_, 'i>, args: &[Expr<'i>]) -> Result<(), CompilerError> {
+     compile_typed_builtin_args(ctx, "r0.g16.verify", args)?;
+     let (builder, stack_depth) = ctx.emitter.parts();
