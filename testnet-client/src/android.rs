@@ -34,14 +34,14 @@ static CORE: Mutex<Option<Arc<Core>>> = Mutex::new(None);
 static CONNECTING: AtomicBool = AtomicBool::new(false);
 static LAST_ERR: Mutex<Option<String>> = Mutex::new(None);
 
-const NOT_CONNECTED: &str = "The wallet engine is not connected yet.";
+const NOT_CONNECTED: &str = "The app is not connected yet.";
 /// The wRPC url of the last node that answered, in the wallet folder: tried first at the next start (the public
 /// resolver took ~20 s on the phone), forgotten when it fails. Not a key file: `keys.reset` leaves it.
 const NODE_FILE: &str = "node.txt";
 /// How long the remembered node may take before the resolver is asked instead.
 const REMEMBERED_NODE_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
-const NOT_OPENED: &str = "Open the wallet first.";
-const FAULT: &str = "The wallet engine hit a fault.";
+const NOT_OPENED: &str = "Open the account first.";
+const FAULT: &str = "The app hit a fault.";
 const NO_SECRET_METHOD: &str = "That move takes no key.";
 
 /// The envelope every native answers with.
@@ -97,7 +97,7 @@ fn init_inner(dir: &Path, network: &str) -> (u16, Value) {
 }
 
 fn prepare(dir: &Path, network: &str) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|_| "The wallet's folder on this phone could not be made.".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|_| "The account's folder on this phone could not be made.".to_string())?;
     let net = Network::from_flag(network)?;
     let _ = HOME.set((dir.to_path_buf(), net.clone()));
     tx::use_fee_floor(&net);
@@ -170,7 +170,7 @@ fn load_keys(dir: &Path, net: &Network) -> Result<Keys, String> {
     if !keys_path.exists() {
         return Ok(Keys::default());
     }
-    let keys = Keys::load_public(&keys_path).map_err(|_| "The wallet's key file on this phone could not be read.".to_string())?;
+    let keys = Keys::load_public(&keys_path).map_err(|_| "This phone's account records could not be read.".to_string())?;
     // A folder made for one network never runs under the other.
     net.check_recorded(&keys.public().network, "keys.json")?;
     Ok(keys)
@@ -180,7 +180,7 @@ fn load_keys(dir: &Path, net: &Network) -> Result<Keys, String> {
 fn stale_status(account: u32) -> Option<Value> {
     let (dir, _) = HOME.get()?;
     let text = std::fs::read_to_string(dir.join(crate::core::status_cache_name(account))).ok()?;
-    serde_json::from_str(&text).ok().filter(Value::is_object)
+    serde_json::from_str(&text).ok().filter(Value::is_object).map(crate::core::without_daa_now)
 }
 
 fn parse_args(args: &str) -> Result<Value, (u16, Value)> {
@@ -191,6 +191,10 @@ fn parse_args(args: &str) -> Result<Value, (u16, Value)> {
 fn call_inner(method: &str, args: &str) -> (u16, Value) {
     let Some(core) = core() else {
         start_connect(); // a failed connect is retried on the next call
+        // The helper's link needs no node and no Core: answered from the folder at once.
+        if let Some(answer) = link_without_core(method, args) {
+            return answer;
+        }
         let connecting = CONNECTING.load(Ordering::SeqCst);
         // The last run's balances, marked stale, beat a blank Home while the connect runs.
         if method == "status" {
@@ -213,26 +217,66 @@ fn call_inner(method: &str, args: &str) -> (u16, Value) {
     let Some(rt) = RT.get() else {
         return (503, json!({"error": NOT_CONNECTED}));
     };
-    let answer = rt.block_on(core.call(method, &args));
+    let mut answer = rt.block_on(core.call(method, &args));
     // keys.reset moved the key files away: serve empty keys on the same connection, so the page's next keysNew
     // finds a Core to reopen (keys_new_inner) and nothing of the old block is answered meanwhile.
-    // heir.set rewrote the public block: the Core reopens on the keys.json now on disk.
-    if (method == "keys.reset" || method == "heir.set") && answer.1["ok"] == json!(true) {
+    if method == "keys.reset" && answer.1["ok"] == json!(true) {
         let mut ctx = core.ctx.clone();
-        ctx.keys = if method == "heir.set" {
-            match load_keys(&ctx.dir, &ctx.network) {
-                Ok(k) => k,
-                Err(e) => return (500, json!({"error": e})),
-            }
-        } else {
-            Keys::default()
-        };
+        ctx.keys = Keys::default();
         match Core::open(ctx) {
             Ok(fresh) => *guard(&CORE) = Some(Arc::new(fresh)),
             Err(e) => return (500, json!({"error": e})),
         }
     }
+    if let Err(refused) = reopen_if_block_changed(&core, method, &mut answer.1) {
+        return refused;
+    }
     answer
+}
+
+/// heir.set, guardian.set and a `fund` that applied a waiting guardian/heir (`rules_block_changed`) rewrote the
+/// public block: the shared Core reopens on the keys.json now on disk. A fund's answer is never lost to a failed
+/// reopen (its money moved): the failure rides along as `reopen_error`; the others answer 500 as before.
+fn reopen_if_block_changed(core: &Core, method: &str, answer: &mut Value) -> Result<(), (u16, Value)> {
+    let changed = ((method == "heir.set" || method == "guardian.set") && answer["ok"] == json!(true)) || (method == "fund" && answer["rules_block_changed"] == json!(true));
+    if !changed {
+        return Ok(());
+    }
+    let mut ctx = core.ctx.clone();
+    let reopened = load_keys(&ctx.dir, &ctx.network).and_then(|k| {
+        ctx.keys = k;
+        Core::open(ctx)
+    });
+    match reopened {
+        Ok(fresh) => {
+            *guard(&CORE) = Some(Arc::new(fresh));
+            Ok(())
+        }
+        Err(e) if method == "fund" => {
+            answer["reopen_error"] = json!(e);
+            Ok(())
+        }
+        Err(e) => Err((500, json!({"error": e}))),
+    }
+}
+
+/// `link.code` / `link.read` before the Core exists (no node needed): from the opened folder, with this wallet's
+/// rule block (keys.json, when there is one) as `own` for link.read. None for any other method or before `open`.
+fn link_without_core(method: &str, args: &str) -> Option<(u16, Value)> {
+    if method != "link.code" && method != "link.read" {
+        return None;
+    }
+    let (dir, net) = HOME.get()?;
+    let args = match parse_args(args) {
+        Ok(v) => v,
+        Err(refused) => return Some(refused),
+    };
+    let answer = if method == "link.code" {
+        crate::link::link_code(dir, net)
+    } else {
+        load_keys(dir, net).and_then(|keys| crate::link::read_link(net, args["text"].as_str().unwrap_or(""), keys.public.as_ref()).map(|l| l.answer()))
+    };
+    Some((200, answer.unwrap_or_else(|e| crate::core::refusal(&e))))
 }
 
 /// The body of `callWithSecret` (D3): the slot follows the method (send: the card; stop and decline: stop
@@ -253,13 +297,21 @@ fn call_with_secret_inner(method: &str, args: &str, block: Zeroizing<Vec<u8>>) -
     let Some(rt) = RT.get() else {
         return (503, json!({"error": NOT_CONNECTED}));
     };
-    rt.block_on(core.call_with_secret(method, &args, slot, block))
+    let mut answer = rt.block_on(core.call_with_secret(method, &args, slot, block));
+    if let Err(refused) = reopen_if_block_changed(&core, method, &mut answer.1) {
+        return refused;
+    }
+    answer
 }
+
+/// The drawer-device setup stays in the code (laptop CLI) but the phone refuses it: one way to start on a phone.
+const DRAWER_ON_PHONE: bool = false;
+const NO_DRAWER: &str = "This phone makes its own vault seeds; setting up from a second device is not offered here.";
 
 /// The body of `keysNew` (D4): the phone-born secrets for Java to seal, with the public-only keys.json and
 /// vault-public.json written in the wallet's folder. Args: `{mode, offline_public: <offline-public.json text>,
-/// heir_x, auto_heir, hard_limit}`. `mode` absent or "drawer": stop keys 2 and 3 and the safe come from the
-/// drawer device's file; the block is [spend 32][stop 32][funding 32], 96 bytes. "phone": everything is made on
+/// heir_x, auto_heir, hard_limit}`. `mode` "drawer" (refused on the phone, DRAWER_ON_PHONE): stop keys 2 and 3 and the safe come from the
+/// drawer device's file; the block is [spend 32][stop 32][funding 32], 96 bytes. "phone" (also when absent): everything is made on
 /// this phone (`Keys::fresh_phone_all`, no file, heir_x may be empty); the block is 192 bytes, [spend 32][stop 32]
 /// [funding 32][cold 32][cold2 32][cold3 32] (the phone keeps the safe's keys sealed too), followed by
 /// the three safe sheets as UTF-8 JSON `{"sheets":[[24 words],[24 words],[24 words]]}`; the marker file
@@ -271,19 +323,21 @@ fn keys_new_inner(args: &str) -> Result<Zeroizing<Vec<u8>>, String> {
     let heir_x = a["heir_x"].as_str().unwrap_or("").trim();
     let (auto_heir, hard_limit) = (a["auto_heir"].as_bool().unwrap_or(false), a["hard_limit"].as_bool().unwrap_or(false));
     let keys_path = dir.join("keys.json");
-    let mode = a["mode"].as_str().unwrap_or("drawer");
+    // The phone always makes its own vault seeds; the drawer-device setup is laptop-only now.
+    let mode = a["mode"].as_str().unwrap_or("phone");
     let (keys, secrets, sheets) = match mode {
         "phone" => {
-            refuse_existing(&keys_path).map_err(|_| "This phone already has keys. Start a new wallet folder first.".to_string())?;
+            refuse_existing(&keys_path).map_err(|_| "This phone already has an account set up.".to_string())?;
             let (keys, mut secrets, sheets) = Keys::fresh_phone_all(net, heir_x, auto_heir, hard_limit)?;
             let block = Zeroizing::new(secrets.to_vec());
             secrets.zeroize();
             (keys, block, Some(sheets))
         }
+        "drawer" if !DRAWER_ON_PHONE => return Err(NO_DRAWER.into()),
         "drawer" => {
             let export_text = a["offline_public"].as_str().ok_or("The drawer device's file is missing from the request.")?;
             let export: OfflineExport = serde_json::from_str(export_text).map_err(|_| "That is not the file the drawer device writes (offline-public.json).".to_string())?;
-            refuse_existing(&keys_path).map_err(|_| "This phone already has keys. Start a new wallet folder first.".to_string())?;
+            refuse_existing(&keys_path).map_err(|_| "This phone already has an account set up.".to_string())?;
             let (keys, mut secrets) = Keys::fresh_phone(net, &export, heir_x, auto_heir, hard_limit)?;
             let block = Zeroizing::new(secrets.to_vec());
             secrets.zeroize();
@@ -294,7 +348,10 @@ fn keys_new_inner(args: &str) -> Result<Zeroizing<Vec<u8>>, String> {
     // [96 or 192 secret bytes][sheets JSON when this phone made the safe]; the words are secrets too and are zeroed here.
     let mut block = secrets;
     if let Some(mut sheets) = sheets {
-        std::fs::write(dir.join(crate::core::SHEETS_ON_PHONE_FILE), b"").map_err(|_| "The wallet's folder on this phone could not be written.".to_string())?;
+        std::fs::write(dir.join(crate::core::SHEETS_ON_PHONE_FILE), b"").map_err(|_| "The account's folder on this phone could not be written.".to_string())?;
+        // This phone made stop slots 2 and 3 itself and wiped their secrets: nobody holds them.
+        let p = keys.public();
+        crate::core::record_unheld(dir, &[p.cancel2_x.clone(), p.cancel3_x.clone()], true)?;
         let mut text = Zeroizing::new(serde_json::to_string(&json!({"sheets": sheets})).map_err(|_| "Bad request".to_string())?);
         block.extend_from_slice(text.as_bytes());
         text.zeroize();
@@ -372,6 +429,41 @@ pub extern "system" fn Java_com_kaspavault_wallet_VaultLib_keysNew<'l>(mut env: 
         }
         Err(_) => {
             eprintln!("keysNew: {FAULT}");
+            Zeroizing::new(vec![])
+        }
+    };
+    match catch_unwind(AssertUnwindSafe(|| env.byte_array_from_slice(&bytes))) {
+        Ok(Ok(arr)) => arr.into_raw(),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// The body of `linkMake` (docs/LINK_DESIGN.md): `{name}` -> `<dir>/link.json` written (public only) and the block
+/// `[guardian 32][heir 32]` then UTF-8 JSON `{"heir_words":[24 words]}` for Java to seal and show once. Refused
+/// when this phone already made its link.
+fn link_make_inner(args: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+    let (dir, net) = HOME.get().ok_or(NOT_OPENED)?;
+    let a: Value = serde_json::from_str(args).map_err(|_| "Bad request".to_string())?;
+    let (block, _public) = crate::link::make_link(dir, net, a["name"].as_str().unwrap_or(""))?;
+    Ok(block)
+}
+
+/// The guardian and heir secrets (then the heir words) for Java to seal, never a String; an empty byte[] and one
+/// plain-words log line on a refusal (the bytes are never logged). The block is zeroed when it drops here.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_kaspavault_wallet_VaultLib_linkMake<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, args: JString<'l>) -> jbyteArray {
+    let out = catch_unwind(AssertUnwindSafe(|| {
+        let args = read_java_string(&mut env, &args)?;
+        link_make_inner(&args)
+    }));
+    let bytes: Zeroizing<Vec<u8>> = match out {
+        Ok(Ok(block)) => block,
+        Ok(Err(words)) => {
+            eprintln!("linkMake: {words}");
+            Zeroizing::new(vec![])
+        }
+        Err(_) => {
+            eprintln!("linkMake: {FAULT}");
             Zeroizing::new(vec![])
         }
     };

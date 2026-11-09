@@ -9,6 +9,14 @@ use crate::tx::{CHANGE_FLOOR, Ctx, FeeError};
 /// Closed account records live here, one file per closing (`Ctx::close_record`).
 pub const CLOSED_DIR: &str = "closed";
 pub const ACCOUNT_OPEN: &str = "This account is already open.";
+/// The line a record gets when the chain shows it ended without this phone's own stop (a helper's stop key, the heir).
+pub const ENDED_ELSEWHERE: &str = "Stopped from another phone or passed on (seen on the network): everything left this account.";
+
+/// The pure decision behind `Ctx::record_ended`: the history says stopped, or the record is older than
+/// STATE_SETTLE_SECONDS (age in seconds, None when unknown) and holds no coin of its covenant (`held`, sompi).
+pub fn record_is_ended(stopped: bool, age_secs: Option<u64>, held: u64) -> bool {
+    stopped || (age_secs.is_some_and(|a| a > crate::core::STATE_SETTLE_SECONDS) && held == 0)
+}
 use kaspa_addresses::Address;
 use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
 use kaspa_consensus_core::tx::{Transaction, TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry};
@@ -26,6 +34,29 @@ fn floor_check(d: &Dials, have: u64, adding: u64) -> Result<(), String> {
     if have + adding < d.floor() {
         let held = if have > 0 { format!(", on top of the {:.5} KAS it holds", kas(have)) } else { String::new() };
         return Err(format!("a vault needs at least {} KAS so it can always be stopped or passed on ({:.5} KAS asked{held}).", kas(d.floor()), kas(adding)));
+    }
+    Ok(())
+}
+
+/// request (vault.sil `request`): what stays after the amount (`after`, finish's view) must cover finish's fee
+/// allowance (`newAmount + maxFee <= outputs[0].value`), then be exactly that allowance (it burns as finish's fee) or
+/// leave a coin of at least minRemainder. Run 4 row H: 2.49 of 2.5 on testnet dials left 0.007, under maxFee 0.05, and
+/// the node refused it; refuse it here in plain words instead.
+pub(crate) fn request_leftover_check(d: &Dials, after: u64) -> Result<(), String> {
+    let max_fee = d.max_fee as u64;
+    if after < max_fee {
+        return Err(format!(
+            "after this withdrawal the account would keep {:.5} KAS, less than the {} KAS that finishing it may cost. Withdraw a different amount.",
+            kas(after),
+            kas(max_fee)
+        ));
+    }
+    if after > max_fee && after < d.floor() {
+        return Err(format!(
+            "after this withdrawal the account would keep {:.5} KAS, too little to finish or to keep (it must keep at least {} KAS, or nothing). Withdraw a different amount.",
+            kas(after),
+            kas(d.floor())
+        ));
     }
     Ok(())
 }
@@ -78,6 +109,59 @@ pub fn do_keys(dir: &Path, o: KeysOpts, net: &Network) -> Result<(), String> {
     }
 }
 
+/// `set-cold-to <address>` (public challenge): before `fund`, the safe becomes an outside
+/// address the owner chose (his own wallet): every emergency stop and the challenge's final
+/// sweep pay it. Refused once this folder holds a vault record: the safe is part of the
+/// account's rules from `fund` on (RULE_BLOCK_CHANGED).
+pub fn do_set_cold_to(dir: &Path, address: &str, net: &Network) -> Result<(), String> {
+    if let Some(n) = crate::tx::accounts_in(dir).first() {
+        let (dir, file) = (dir.display(), crate::tx::state_file_name(*n));
+        return Err(format!(
+            "{dir} holds an open account ({file}); its safe address is part of its rules and cannot change. Set the address before `fund`."
+        ));
+    }
+    if let Some(file) = vault_records(dir).first() {
+        let dir = dir.display();
+        return Err(format!(
+            "{dir} holds a record of an account ({file}): this folder has funded a vault, and its safe address cannot change. Use a new folder."
+        ));
+    }
+    let keys_path = dir.join("keys.json");
+    let plain = !Keys::is_locked(&keys_path);
+    let mut keys = Keys::load(&keys_path)?;
+    net.check_recorded(&keys.public().network, "keys.json")?;
+    let addr = keys.set_cold_external(address)?;
+    keys.save(&keys_path, plain)?;
+    let (path, lock) = (keys_path.display(), lock_note(plain));
+    println!("wrote {path} ({lock}): the safe is now {addr}; the cold sheets were removed");
+    println!("Every emergency stop and the end of the challenge send the whole account here.");
+    println!("Check it letter by letter against your wallet app before you fund.");
+    print_block(&keys);
+    Ok(())
+}
+
+/// Files in `dir` that only exist once an account was funded there (state and its history
+/// times, carried history, the auto-stop ledger and racer, the challenge's rounds and proof),
+/// sorted by name.
+pub fn vault_records(dir: &Path) -> Vec<String> {
+    let numbered = |name: &str, head: &str, tail: &str| {
+        name.strip_prefix(head).and_then(|r| r.strip_suffix(tail)).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let fixed = [crate::autostop::LEDGER_FILE, crate::autostop::RACE_FILE, crate::autostop::ROUNDS_FILE, crate::autostop::PROOF_FILE];
+    let is_record = |name: &str| {
+        fixed.contains(&name)
+            || name == "state.json"
+            || name == "state.times.json"
+            || numbered(name, "state-", ".json")
+            || numbered(name, "state-", ".times.json")
+            || numbered(name, "carry-", ".json")
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
+    let mut found: Vec<String> = entries.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| is_record(n)).collect();
+    found.sort();
+    found
+}
+
 pub fn refuse_existing(keys_path: &Path) -> Result<(), String> {
     if keys_path.exists() {
         return Err(format!("{} already exists; refusing to overwrite. Move it away first if that vault is finished.", keys_path.display()));
@@ -88,7 +172,9 @@ pub fn refuse_existing(keys_path: &Path) -> Result<(), String> {
 fn print_block(keys: &Keys) {
     let p = keys.public();
     println!("network:         {}", p.network().name);
-    println!("cold address:    {} (2-of-3 safe: cold sheets 1, 2, 3)", p.cold_address);
+    let outside = "an outside address you chose, no cold sheets";
+    let safe = if p.cold_external { outside } else { "2-of-3 safe: cold sheets 1, 2, 3" };
+    println!("cold address:    {} ({safe})", p.cold_address);
     println!("rule block code: {} (the code of the public block; fund and the offline device must show the same)", p.sha256());
     println!("heir address:    {} (may take over after the silence set by the heir delay dial at fund)", p.heir_address);
     for r in p.rules() {
@@ -259,11 +345,15 @@ impl Ctx {
     pub async fn do_fund(&self, amount_kas: f64) -> Result<String, String> {
         // A rule change keeps the same account: the retired record's lines carry over, then "Rules updated".
         let carried = match self.try_load_vault()? {
+            // Written at once: an opening that fails after this point (floor, fee, network) keeps the lines.
             Some(v) => {
-                self.close_record(&v).await?;
-                v.history
+                let h = self.close_record(&v).await?;
+                write_carry(&self.dir, self.account, &h)?;
+                h
             }
-            None => Vec::new(),
+            // A guardian or heir change closed the record just before this opening (core.rs apply_people_next):
+            // its lines wait in carry-N.json, so a retried opening still keeps them.
+            None => read_carry(&self.dir, self.account),
         };
         let reopen = !carried.is_empty();
         let amount = sompi(amount_kas);
@@ -271,6 +361,8 @@ impl Ctx {
         self.dials.check(has_heir, self.network.is_mainnet())?;
         floor_check(&self.dials, 0, amount)?;
         // Item 18: an older or incomplete rule block never locks money; the rules are said out loud first.
+        // The block must also be the one this folder's secrets make (an edited safe is refused).
+        self.keys.check_self()?;
         let rules = self.keys.public().check_complete()?;
         println!("Rules this vault will lock money under:");
         for r in &rules {
@@ -317,6 +409,7 @@ impl Ctx {
         let note = if folded > 0 { format!(" (+{:.5} KAS of small change)", kas(folded)) } else { String::new() };
         let v = Vault { covenant_id, state, pending_to: None, history: carry_history(carried, format!("fund {amount_kas} KAS{note} tx {id}")), contract_sha256: Some(contract_sha256), network: self.network.name.into(), dials: self.dials.clone() };
         self.save_anchored(&v)?;
+        let _ = std::fs::remove_file(self.dir.join(carry_file_name(self.account)));
         println!("vault opened at {} with covenant id {covenant_id}; rules pinned in {}", self.try_vault_address(&v.state)?, self.dir.join(contract::SOURCE_FILE).display());
         println!("rule block code {} recorded in state.json; the offline device's keys.json must show the same", self.keys.public().sha256());
         Ok(id)
@@ -327,8 +420,12 @@ impl Ctx {
     /// account opens fresh under the new dials. An account still open refuses. A record this program cannot
     /// compile (rules from a version it does not carry) is closed without the chain check: this program could
     /// not move that coin anyway, and the record is kept for the version that can.
-    pub async fn close_record(&self, v: &Vault) -> Result<(), String> {
-        if !contract::is_stopped(v) {
+    ///
+    /// A record whose last line is still its own (a helper's stop key or the heir moved the coin from another
+    /// phone) counts as ended once it has settled and the chain shows no coin of it left (`record_is_ended`); its
+    /// history then gets `ENDED_ELSEWHERE` before it moves. Answers the closed record's history.
+    pub async fn close_record(&self, v: &Vault) -> Result<Vec<String>, String> {
+        if !self.record_ended(v).await? {
             return Err(ACCOUNT_OPEN.into());
         }
         if let Ok(address) = self.try_vault_address(&v.state) {
@@ -341,8 +438,32 @@ impl Ctx {
         std::fs::create_dir_all(&closed).map_err(|e| format!("{}: {e}", closed.display()))?;
         let from = self.state_path();
         let file = from.file_name().and_then(|s| s.to_str()).unwrap_or("state.json").to_string();
+        let mut history = v.history.clone();
+        if !contract::is_stopped(v) {
+            history.push(ENDED_ELSEWHERE.into());
+            let ended = Vault { history: history.clone(), ..v.clone() };
+            match contract::recorded_public_sha256(&from)? {
+                Some(code) => contract::save_vault_anchored(&from, &ended, &code)?,
+                None => self.try_save_vault(&ended)?,
+            }
+        }
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        std::fs::rename(&from, closed.join(format!("{secs}-{file}"))).map_err(|e| format!("{file}: {e}"))
+        std::fs::rename(&from, closed.join(format!("{secs}-{file}"))).map_err(|e| format!("{file}: {e}"))?;
+        Ok(history)
+    }
+
+    /// Whether this account's record has ended: its history says stopped, or (moved from another phone) the record
+    /// has settled and no coin of its covenant is left at its address. A recent record asks nothing of the network;
+    /// a record whose rules this program cannot compile is not ended by the chain (it cannot look).
+    pub async fn record_ended(&self, v: &Vault) -> Result<bool, String> {
+        let stopped = contract::is_stopped(v);
+        let age = std::fs::metadata(self.state_path()).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map(|a| a.as_secs());
+        if stopped || !record_is_ended(false, age, 0) {
+            return Ok(stopped);
+        }
+        let Ok(address) = self.try_vault_address(&v.state) else { return Ok(false) };
+        let held: u64 = self.try_utxos(&address).await?.into_iter().filter(|(_, u)| u.covenant_id == Some(v.covenant_id)).map(|(_, u)| u.amount).sum();
+        Ok(record_is_ended(false, age, held))
     }
 
     /// `pay`: plain payment from the funding key to any address (used to fund a cold safe).
@@ -469,13 +590,7 @@ impl Ctx {
             // What finish will meet: after the amount leaves, the rest stays as a coin of at least
             // minRemainder (finish's own fee is at most maxFee) or burns as fee when it is at most maxFee.
             let after = left.checked_sub(amount).ok_or("the vault does not hold that much")?;
-            if after > v.dials.max_fee as u64 && after < v.dials.floor() {
-                return Err(format!(
-                    "after this withdrawal the vault would keep {:.5} KAS, too little to finish or to keep (it must keep at least {} KAS, or nothing). Withdraw a different amount.",
-                    kas(after),
-                    kas(v.dials.floor())
-                ));
-            }
+            request_leftover_check(&v.dials, after)?;
             let outputs = vec![self.continuation(left, &next, &v)];
             self.vault_tx(&v, &coin, "request", Some(&spend_key), &args, outputs, 0, 0)
         })
@@ -834,6 +949,19 @@ impl Ctx {
     }
 }
 
+/// Where an account's history lines wait between a guardian/heir rewrite (which closes the record) and the opening
+/// that follows; `do_fund` reads it when there is no record and removes it once the account is open again.
+pub fn carry_file_name(account: u32) -> String {
+    format!("carry-{account}.json")
+}
+pub fn write_carry(dir: &std::path::Path, account: u32, history: &[String]) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(history).map_err(|e| format!("{}: {e}", carry_file_name(account)))?;
+    std::fs::write(dir.join(carry_file_name(account)), text).map_err(|e| format!("{}: {e}", carry_file_name(account)))
+}
+pub fn read_carry(dir: &std::path::Path, account: u32) -> Vec<String> {
+    std::fs::read_to_string(dir.join(carry_file_name(account))).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
 /// The new record's history after a re-open: the closed record's lines (oldest first), a marker, then the fund line.
 /// The fund line stays last because readers take the newest line from the end.
 pub fn carry_history(old: Vec<String>, fund_line: String) -> Vec<String> {
@@ -848,6 +976,68 @@ pub fn carry_history(old: Vec<String>, fund_line: String) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_record_ends_when_stopped_or_settled_with_no_coin() {
+        use super::record_is_ended;
+        let settled = Some(crate::core::STATE_SETTLE_SECONDS + 1);
+        assert!(!record_is_ended(false, settled, 5), "open with its coin");
+        assert!(!record_is_ended(false, Some(1), 0), "recent record without its coin: not ended yet");
+        assert!(!record_is_ended(false, None, 0), "age unknown: not ended");
+        assert!(record_is_ended(false, settled, 0), "settled without its coin");
+        assert!(record_is_ended(crate::contract::is_stopped(&crate::contract::Vault { history: vec!["cancel 2 tx abc".into()], ..test_vault() }), Some(1), 5), "cancel line");
+    }
+
+    #[test]
+    fn set_cold_to_refuses_a_folder_with_any_account_record() {
+        let net = crate::network::Network::testnet();
+        let outside = net.p2pk(&crate::keys::xonly(&crate::keys::keypair(&[42u8; 32]))).to_string();
+        let records = ["auto-stop.json", "auto-stop-race.json", "challenge-rounds.jsonl", "challenge-proof.md", "carry-1.json", "carry-2.json", "state.times.json", "state-3.times.json"];
+        for (i, name) in records.iter().enumerate() {
+            let dir = std::env::temp_dir().join(format!("kv-coldto-{i}-{}", std::process::id()));
+            std::fs::remove_dir_all(&dir).ok();
+            std::fs::create_dir_all(&dir).unwrap();
+            let keys = crate::keys::Keys::fresh(&net);
+            let keys_path = dir.join("keys.json");
+            let before = serde_json::to_string_pretty(&keys).unwrap();
+            std::fs::write(&keys_path, &before).unwrap();
+            std::fs::write(dir.join("node.txt"), "x").unwrap();
+            assert_eq!(super::vault_records(&dir), Vec::<String>::new(), "keys.json and node.txt are not records");
+            std::fs::write(dir.join(name), "[]").unwrap();
+            assert_eq!(super::vault_records(&dir), vec![name.to_string()]);
+            let err = super::do_set_cold_to(&dir, &outside, &net).unwrap_err();
+            assert!(err.contains("record of an account") && err.contains(name), "{name}: {err}");
+            assert_eq!(std::fs::read_to_string(&keys_path).unwrap(), before, "{name}: keys.json untouched");
+            std::fs::remove_file(dir.join(name)).unwrap();
+            super::do_set_cold_to(&dir, &outside, &net).unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+        }
+        // look-alikes are not records
+        let dir = std::env::temp_dir().join(format!("kv-coldto-x-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["carry-.json", "carry-x.json", "state-.json", "auto-stop.json.bak"] {
+            std::fs::write(dir.join(n), "").unwrap();
+        }
+        assert!(super::vault_records(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn test_vault() -> crate::contract::Vault {
+        crate::contract::Vault { covenant_id: kaspa_consensus_core::Hash::from_bytes([1u8; 32]), state: crate::contract::locked(), pending_to: None, history: vec![], contract_sha256: None, network: String::new(), dials: crate::contract::Dials::testnet() }
+    }
+
+    #[test]
+    fn carried_lines_wait_per_account_until_the_opening() {
+        let dir = std::env::temp_dir().join(format!("kv-carry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(super::read_carry(&dir, 1).is_empty(), "nothing waiting");
+        let lines = vec!["fund 10 KAS tx a".to_string(), "cancel (stop key 1): everything to cold, tx b".to_string()];
+        super::write_carry(&dir, 2, &lines).unwrap();
+        assert_eq!(super::read_carry(&dir, 2), lines);
+        assert!(super::read_carry(&dir, 1).is_empty(), "another account's lines never carry");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_reopened_account_keeps_its_past() {
         let old = vec!["fund 10 KAS tx a".to_string(), "cancel (stop key 1): everything to the safe, tx b".to_string()];
@@ -878,13 +1068,13 @@ mod tests {
         assert!(std::fs::read_to_string(&export).unwrap().contains("\"network\": \"testnet\""));
         // the online device started for mainnet refuses the testnet export in words that say what to do
         let err = do_keys(&on, opts(Some(export.clone())), &Network::mainnet()).unwrap_err();
-        assert!(err.contains("made for the testnet network") && err.contains("--network testnet"), "{err}");
+        assert!(err.contains("made for the testnet network") && err.contains("Open it on testnet"), "{err}");
         assert!(!on.join("keys.json").exists());
         // the right network takes it and records itself in the rule block
         do_keys(&on, opts(Some(export)), &Network::testnet()).unwrap();
         let online = Keys::load(&on.join("keys.json")).unwrap();
         assert_eq!(online.public().network, "testnet");
-        assert!(Network::mainnet().check_recorded(&online.public().network, "keys.json").unwrap_err().contains("--network testnet"));
+        assert!(Network::mainnet().check_recorded(&online.public().network, "keys.json").unwrap_err().contains("Open it on testnet"));
         // carrying the block back to an offline folder started for mainnet is refused the same way
         let carry = on.join(PUBLIC_EXPORT_FILE);
         let err = do_keys(&off, opts(Some(carry)), &Network::mainnet()).unwrap_err();
@@ -902,6 +1092,24 @@ mod tests {
         let err = floor_check(&Dials::testnet(), sompi(0.5), sompi(0.3)).unwrap_err();
         assert!(err.contains("on top of the 0.50000 KAS it holds"), "{err}");
         assert_eq!(floor_check(&Dials::testnet(), sompi(0.9), sompi(0.15)), Ok(()));
+    }
+
+    #[test]
+    fn request_refuses_a_rest_finish_cannot_take() {
+        let d = Dials::testnet(); // maxFee 0.05, minRemainder 1, floor 1.05
+        // Run 4 row H: 2.49 of a 2.5 coin after a 0.003 fee leaves 0.007, under maxFee
+        let err = request_leftover_check(&d, sompi(2.497) - sompi(2.49)).unwrap_err();
+        assert!(err.starts_with("after this withdrawal the account would keep 0.00700 KAS, less than the 0.05 KAS that finishing it may cost."), "{err}");
+        assert!(request_leftover_check(&d, 0).is_err());
+        assert!(request_leftover_check(&d, d.max_fee as u64 - 1).is_err());
+        // exactly maxFee burns as finish's fee; maxFee + minRemainder keeps a coin
+        assert_eq!(request_leftover_check(&d, d.max_fee as u64), Ok(()));
+        assert_eq!(request_leftover_check(&d, d.floor()), Ok(()));
+        // the gap between them stays refused in its own words
+        let err = request_leftover_check(&d, d.floor() - 1).unwrap_err();
+        assert!(err.contains("it must keep at least 1.05 KAS, or nothing"), "{err}");
+        // 1.0 of 2.5 is a normal request
+        assert_eq!(request_leftover_check(&d, sompi(2.497) - sompi(1.0)), Ok(()));
     }
 
     #[test]

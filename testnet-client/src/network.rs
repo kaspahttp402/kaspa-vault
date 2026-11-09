@@ -46,7 +46,7 @@ impl Network {
         match s.trim().to_ascii_lowercase().as_str() {
             TESTNET | "testnet-10" | "tn10" => Ok(Network::testnet()),
             MAINNET => Ok(Network::mainnet()),
-            other => Err(format!("`{other}` is not a network this program knows. Use --network testnet or --network mainnet.")),
+            other => Err(format!("`{other}` is not a network this account knows: testnet or mainnet.")),
         }
     }
     /// The network a file was made for, from the word it recorded. Files from before the word was
@@ -71,11 +71,15 @@ impl Network {
         }
         if recorded.is_empty() {
             if self.is_mainnet() {
-                return Err(format!("{what} does not say which network it was made for, and mainnet needs that. Make the vault again with --network mainnet, or run this folder with --network testnet."));
+                return Err(format!("{what} does not say which network it was made for, and mainnet needs that. Make it again for mainnet, or open it on testnet."));
             }
             return Ok(());
         }
-        Err(format!("{what} was made for the {recorded} network; this program was started for {}. Run it with --network {recorded}, or use the folder made for {}.", self.name, self.name))
+        let (r, ours) = (quoted(recorded), self.name);
+        Err(format!(
+            "{what} was made for the {r} network; this account is on the {ours} network. \
+             Open it on {r}, or use the one made for {ours}."
+        ))
     }
     /// The node must be on this network; one that says otherwise is lying or misconfigured.
     pub fn check_node(&self, reported: &NetworkId, node: &str) -> Result<(), String> {
@@ -112,6 +116,13 @@ impl Network {
     }
 }
 
+/// Another device's network text as it may be shown back: at most 32 of its letters, digits, '-',
+/// '_' and '.', nothing else (no markup, no control, never unbounded).
+pub fn quoted(text: &str) -> String {
+    let shown = |c: &char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
+    text.chars().filter(shown).take(32).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,7 +133,7 @@ mod tests {
         let m = Network::from_flag("MainNet").unwrap();
         assert_eq!((t.name, t.prefix, t.id.to_string().as_str()), ("testnet", Prefix::Testnet, "testnet-10"));
         assert_eq!((m.name, m.prefix, m.id.to_string().as_str()), ("mainnet", Prefix::Mainnet, "mainnet"));
-        assert!(Network::from_flag("devnet").unwrap_err().contains("--network testnet or --network mainnet"));
+        assert!(Network::from_flag("devnet").unwrap_err().contains("testnet or mainnet"));
         assert_eq!(Network::of_record(""), t);
         assert_eq!(Network::of_record("mainnet"), m);
         assert!(t.check_node(&m.id, "ws://x").unwrap_err().contains("lying"));
@@ -158,7 +169,7 @@ mod tests {
         let e = m.check_recorded("", "keys.json").unwrap_err();
         assert!(e.contains("does not say which network"), "{e}");
         let e = t.check_recorded("mainnet", "state.json").unwrap_err();
-        assert!(e.contains("made for the mainnet network") && e.contains("--network mainnet"), "{e}");
-        assert!(m.check_recorded("testnet", "keys.json").unwrap_err().contains("--network testnet"));
+        assert!(e.contains("made for the mainnet network") && e.contains("Open it on mainnet"), "{e}");
+        assert!(m.check_recorded("testnet", "keys.json").unwrap_err().contains("Open it on testnet"));
     }
 }

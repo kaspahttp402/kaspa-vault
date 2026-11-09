@@ -1,17 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- KaspaVault launcher mark: a hexagon vault door, a thin inner hexagon, one vertical slot. Safe zone: all inside the centre 66dp circle (max radius 26 from centre). -->
+<!-- KaspaVault launcher mark: our own stencil K (faces backwards like Kaspa's, no circle, so it is not Kaspa's logo) with a
+     bright key slot down its stem. Safe zone: all inside radius 26 of 54,54. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <!-- glow: two wide faint outlines of the outer hexagon (vector drawables cannot blur, so two rings fake the falloff) -->
-    <path android:strokeColor="#8EE8DA" android:strokeWidth="6.5" android:strokeAlpha="0.05" android:strokeLineJoin="round" android:pathData="M54,28 L76.52,41 L76.52,67 L54,80 L31.48,67 L31.48,41 Z"/>
-    <path android:strokeColor="#8EE8DA" android:strokeWidth="3.2" android:strokeAlpha="0.11" android:strokeLineJoin="round" android:pathData="M54,28 L76.52,41 L76.52,67 L54,80 L31.48,67 L31.48,41 Z"/>
-    <!-- glow: the slot -->
-    <path android:strokeColor="#CDF4EC" android:strokeWidth="5" android:strokeAlpha="0.06" android:strokeLineCap="round" android:pathData="M54,45 L54,63"/>
-    <path android:strokeColor="#CDF4EC" android:strokeWidth="2.8" android:strokeAlpha="0.13" android:strokeLineCap="round" android:pathData="M54,45 L54,63"/>
-    <!-- outer hexagon -->
-    <path android:strokeColor="#8EE8DA" android:strokeWidth="1.1" android:strokeAlpha="0.95" android:strokeLineJoin="round" android:pathData="M54,28 L76.52,41 L76.52,67 L54,80 L31.48,67 L31.48,41 Z"/>
-    <!-- thin inner hexagon -->
-    <path android:strokeColor="#8EE8DA" android:strokeWidth="0.7" android:strokeAlpha="0.55" android:strokeLineJoin="round" android:pathData="M54,34.5 L70.89,44.25 L70.89,63.75 L54,73.5 L37.11,63.75 L37.11,44.25 Z"/>
-    <!-- the slot: one brighter vertical stroke -->
-    <path android:strokeColor="#CDF4EC" android:strokeWidth="1.4" android:strokeAlpha="1" android:strokeLineCap="round" android:pathData="M54,45 L54,63"/>
+    <!-- glow: two wide faint copies of each stroke (vector drawables cannot blur, so two rings fake the falloff) -->
+    <path android:strokeColor="#8EE8DA" android:strokeWidth="6.5" android:strokeAlpha="0.05" android:strokeLineJoin="miter" android:pathData="M67,36 L60,36 L60,51 L46,36 L37,36 L55,54 L37,72 L46,72 L60,57 L60,72 L67,72 Z"/>
+    <path android:strokeColor="#8EE8DA" android:strokeWidth="3.2" android:strokeAlpha="0.11" android:strokeLineJoin="miter" android:pathData="M67,36 L60,36 L60,51 L46,36 L37,36 L55,54 L37,72 L46,72 L60,57 L60,72 L67,72 Z"/>
+    <path android:strokeColor="#CDF4EC" android:strokeWidth="6.5" android:strokeAlpha="0.05" android:strokeLineCap="round" android:pathData="M63.5,43 L63.5,65"/>
+    <path android:strokeColor="#CDF4EC" android:strokeWidth="3.2" android:strokeAlpha="0.11" android:strokeLineCap="round" android:pathData="M63.5,43 L63.5,65"/>
+    <!-- the K outline -->
+    <path android:strokeColor="#8EE8DA" android:strokeWidth="1.1" android:strokeAlpha="0.95" android:strokeLineJoin="miter" android:pathData="M67,36 L60,36 L60,51 L46,36 L37,36 L55,54 L37,72 L46,72 L60,57 L60,72 L67,72 Z"/>
+    <!-- the key slot: one brighter vertical stroke -->
+    <path android:strokeColor="#CDF4EC" android:strokeWidth="1.4" android:strokeAlpha="1" android:strokeLineCap="round" android:pathData="M63.5,43 L63.5,65"/>
 </vector>

@@ -60,7 +60,7 @@ rm -f build/assets/web/demo.js build/assets/web/demo.html build/assets/web/READM
 (cd build/assets/web && find . -type f | LC_ALL=C sort | xargs sha256sum) > build/assets.sha256
 "$BT/aapt2.exe" compile --dir res -o build/res.zip
 "$BT/aapt2.exe" link $LINK_DEBUG -I "$AJ" --manifest AndroidManifest.xml -o build/base.apk build/res.zip \
-  --java build/gen --min-sdk-version 33 --target-sdk-version 35
+  --java build/gen --min-sdk-version 33 --target-sdk-version 36
 javac -encoding UTF-8 -nowarn --release 11 -classpath "$AJ" -d build/classes $(find src build/gen -name "*.java" | LC_ALL=C sort)
 "$BT/d8.bat" --min-api 33 --lib "$AJ" --output build/dex $(find build/classes -name '*.class' | LC_ALL=C sort)
 cp build/base.apk build/unsigned.apk

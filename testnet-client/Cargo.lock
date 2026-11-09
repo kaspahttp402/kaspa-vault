@@ -4939,6 +4939,7 @@ dependencies = [
  "kaspa-wrpc-client",
  "qrcode",
  "rcgen",
+ "reqwest",
  "rustls",
  "secp256k1",
  "serde",

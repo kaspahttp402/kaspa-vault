@@ -84,7 +84,7 @@ impl Dials {
         match name.trim().to_ascii_lowercase().as_str() {
             DIALS_TESTNET => Ok(Dials::testnet()),
             DIALS_MAINNET => Ok(Dials::mainnet(daa_per_sec)),
-            other => Err(format!("`{other}` is not a set of dials this program knows. Use --dials testnet (minutes, for proofs) or --dials mainnet (days, for real money).")),
+            other => Err(format!("`{other}` is not a set of rules this account knows: testnet (minutes, for proofs) or mainnet (days, for real money).")),
         }
     }
     /// The least a vault may hold and still pay its way out: the exit output plus the fee allowance.
@@ -139,28 +139,25 @@ impl Dials {
         let proof_dials = !mainnet && *self == Dials::testnet();
         if has_heir && !proof_dials && self.heir_delay < self.delay.saturating_mul(HEIR_DELAY_RATIO) {
             return Err(format!(
-                "the heir delay ({} DAA) must be at least {HEIR_DELAY_RATIO} times the withdrawal delay ({} DAA), so a withdrawal that is ready to leave can never be inherited at the same moment. Set --heir-delay to {} or more, or shorten --delay.",
-                self.heir_delay,
-                self.delay,
-                self.delay.saturating_mul(HEIR_DELAY_RATIO)
+                "The inactivity period before the heir can claim must be at least {HEIR_DELAY_RATIO} times the notice period, so funds that are ready to leave can never be claimed at the same moment. Lengthen the inactivity period or shorten the notice period."
             ));
         }
         Ok(())
     }
-    /// One line per dial, in bank words, with the clocks also in time at `daa_per_sec`.
+    /// One line per dial, in the app's on-screen names (notice period, limit, inactivity, claim), clocks as time only.
     pub fn describe(&self, daa_per_sec: f64, has_heir: bool) -> Vec<String> {
         let time = |daa: i64| human_time(daa as f64 / daa_per_sec.max(0.001));
         let mut lines = vec![
-            format!("notice before a withdrawal leaves: {} DAA (about {})", self.delay, time(self.delay)),
-            format!("spending window: {} DAA (about {})", self.window, time(self.window)),
-            format!("spend without notice, per window: up to {} KAS", kas(self.cap as u64)),
-            format!("network fee allowance per move: {} KAS", kas(self.max_fee as u64)),
+            format!("notice period before a large payment leaves: about {}", time(self.delay)),
+            format!("the daily limit refreshes after: about {}", time(self.window)),
+            format!("limit: up to {} KAS in total per {}", kas(self.cap as u64), time(self.window)),
+            format!("network fee allowance per payment: {} KAS", kas(self.max_fee as u64)),
             format!("the account always keeps at least: {} KAS", kas(self.min_remainder as u64)),
         ];
         lines.push(if has_heir {
-            format!("heir may take over after: {} DAA of silence (about {})", self.heir_delay, time(self.heir_delay))
+            format!("your heir can claim after: about {} of inactivity", time(self.heir_delay))
         } else {
-            "heir: none, the silence clock never fires".into()
+            "heir: none".into()
         });
         lines
     }
@@ -182,7 +179,7 @@ pub fn human_time(secs: f64) -> String {
 pub const OVER_CAP: &str = "this spend would pass the cap";
 pub const LOW_REMAINDER: &str = "this spend would leave less than the minimum";
 /// v6 hard-limit dial: the contract's `request` entry fails outright, so the client says so first.
-pub const HARD_LIMIT: &str = "This account never lets a payment above the limit wait: it has the hard limit. Money above the limit leaves only by the emergency stop to your safe, or to your heir.";
+pub const HARD_LIMIT: &str = "This account never lets a payment above the limit wait: it has the hard limit. Funds above the limit leave only by the emergency stop to your vault, or to your heir.";
 /// Share of the heir period after which the watcher warns; the phone draws the same warning (status `heir_warn_share`).
 pub const HEIR_WARN_SHARE: f64 = 0.9;
 
@@ -357,7 +354,11 @@ pub fn is_known_source(sha: &str) -> bool {
     known_sha256s().iter().any(|(_, h)| h == sha)
 }
 fn unknown_rules(sha: &str) -> String {
-    format!("{UNKNOWN_RULES} (sha {}...). Use the program version that opened this vault, or open a new vault in a new folder.", &sha[..sha.len().min(8)])
+    let head: String = sha.chars().take(8).filter(char::is_ascii_hexdigit).collect();
+    format!(
+        "{UNKNOWN_RULES} (sha {head}...). Use the program version that opened this vault, \
+         or open a new vault in a new folder."
+    )
 }
 
 /// The repository copy of the contract, read only to say when it drifts from the built-in rules.
@@ -455,7 +456,44 @@ pub fn save_vault_anchored(state: &Path, v: &Vault, public_sha256: &str) -> Resu
     let mut json = serde_json::to_value(v).map_err(|e| format!("state.json: {e}"))?;
     json[PUBLIC_ANCHOR] = serde_json::Value::String(public_sha256.to_string());
     let text = serde_json::to_string_pretty(&json).map_err(|e| format!("state.json: {e}"))?;
-    std::fs::write(state, text).map_err(|e| format!("state.json: {e}"))
+    // Written beside, then renamed over: a reader (a stop on a watched copy while its follower saves) sees the
+    // old record or the new one, never half a file.
+    let tmp = state.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("state.json: {e}"))?;
+    std::fs::rename(&tmp, state).map_err(|e| format!("state.json: {e}"))?;
+    stamp_history(state, &v.history); // after the money record, and never able to fail it
+    Ok(())
+}
+
+/// When each history line was first saved (Statements dates): `<state>.times.json` beside
+/// the account's state file, `[[unix secs, line], ...]` in history order. A line keeps its
+/// stamp while the same text sits at the same place (Update now keeps the old lines and
+/// appends); a new line gets now. Lines already there when the file is first made get 0
+/// (unknown), never a made-up date.
+pub fn history_times_path(state: &Path) -> PathBuf {
+    state.with_extension("times.json")
+}
+
+pub fn history_times(state: &Path) -> Vec<(u64, String)> {
+    let text = std::fs::read_to_string(history_times_path(state)).unwrap_or_default();
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn stamp_history(state: &Path, history: &[String]) {
+    let path = history_times_path(state);
+    let first = !path.exists();
+    let old = history_times(state);
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    let now = since.map_or(0, |d| d.as_secs());
+    let mut out: Vec<(u64, String)> = Vec::with_capacity(history.len());
+    for (i, line) in history.iter().enumerate() {
+        let kept = old.get(i).filter(|(_, t)| t == line).map(|(at, _)| *at);
+        out.push((kept.unwrap_or(if first { 0 } else { now }), line.clone()));
+    }
+    if let Ok(text) = serde_json::to_string(&out) {
+        let tmp = path.with_extension("tmp");
+        let _ = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &path));
+    }
 }
 
 /// Every compile passes here (`load_source`): with a code recorded in state.json, the `public`
@@ -520,14 +558,14 @@ mod tests {
         assert_eq!((m.delay, m.window, m.heir_delay), (864_000, 864_000, 155_520_000));
         assert_eq!((m.cap, m.max_fee, m.min_remainder), (100 * KAS as i64, 5 * KAS as i64 / 100, KAS as i64));
         assert!(m.heir_delay < CLOCK_LIMIT);
-        assert!(Dials::preset("devnet", 10.0).unwrap_err().contains("--dials testnet"));
+        assert!(Dials::preset("devnet", 10.0).unwrap_err().contains("testnet (minutes"));
         assert!(t.check(true, false).is_ok() && m.check(true, true).is_ok() && m.check(false, true).is_ok());
         assert!(t.check(true, true).unwrap_err().contains("at least 10 times"), "the proof dials with an heir are refused on real money");
         assert!(t.check(false, true).is_ok(), "without an heir the short dials may run on real money (proof dials)");
         // the heir's silence must be at least ten withdrawal delays, unless there is no heir
         let short = Dials { delay: 3_000, heir_delay: 29_999, ..m.clone() };
         let e = short.check(true, false).unwrap_err();
-        assert!(e.contains("at least 10 times") && e.contains("30000 or more"), "{e}");
+        assert!(e.contains("at least 10 times the notice period"), "{e}");
         assert!(short.check(false, false).is_ok());
         assert!(Dials { delay: 0, ..t.clone() }.check(false, false).unwrap_err().contains("delay dial"));
         assert!(Dials { heir_delay: CLOCK_LIMIT + 1, ..t.clone() }.check(false, false).unwrap_err().contains("heir delay dial"));
@@ -598,6 +636,39 @@ mod tests {
         // the original back: fine again, secrets or not
         std::fs::write(&keys_path, serde_json::to_string_pretty(&Keys { public: Some(keys.public()), ..Default::default() }).unwrap()).unwrap();
         assert!(load_source(&dir, &dir.join("state.json"), None).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_outside_safe_is_pinned_at_fund_like_every_rule() {
+        let net = crate::network::Network::testnet();
+        let dir = std::env::temp_dir().join(format!("kv-outside-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut keys = Keys::fresh(&net);
+        let keys_path = dir.join("keys.json");
+        std::fs::write(&keys_path, serde_json::to_string_pretty(&keys).unwrap()).unwrap();
+        let outside = net.p2pk(&crate::keys::xonly(&crate::keys::keypair(&[42u8; 32]))).to_string();
+        let other = net.p2pk(&crate::keys::xonly(&crate::keys::keypair(&[43u8; 32]))).to_string();
+        // before fund the command sets it (plain file stays plain)
+        crate::commands::do_set_cold_to(&dir, &outside, &net).unwrap();
+        let text = std::fs::read_to_string(&keys_path).unwrap();
+        keys = serde_json::from_str(&text).unwrap();
+        assert!(keys.public().cold_external && keys.cold.is_none() && keys.public().cold_address == outside);
+        assert!(crate::commands::do_set_cold_to(&dir, &outside, &crate::network::Network::mainnet()).is_err(), "the folder's network only");
+        // fund records the block's code
+        let v = Vault { covenant_id: Hash::from_bytes([5u8; 32]), state: locked(), pending_to: None, history: vec!["fund".into()], contract_sha256: None, network: String::new(), dials: Dials::testnet() };
+        save_vault_anchored(&dir.join("state.json"), &v, &keys.public().sha256()).unwrap();
+        assert!(load_source(&dir, &dir.join("state.json"), None).is_ok());
+        // after fund the command refuses, and a hand edit (flag kept, address moved) is refused by the pin
+        let err = crate::commands::do_set_cold_to(&dir, &other, &net).unwrap_err();
+        assert!(err.contains("open account"), "{err}");
+        for f in [|p: &mut Public, o: &str| p.cold_address = o.into(), |p: &mut Public, _: &str| p.cold_external = false] {
+            let mut edited = Keys { public: Some(keys.public()), ..Default::default() };
+            f(edited.public.as_mut().unwrap(), &other);
+            std::fs::write(&keys_path, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
+            assert_eq!(load_source(&dir, &dir.join("state.json"), None), Err(RULE_BLOCK_CHANGED.to_string()));
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

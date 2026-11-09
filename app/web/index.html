@@ -2,11 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<!-- Only the bundled files may run or style the page; the laptop is reached through the phone bridge, not from here. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://api.coingecko.com; base-uri 'none'; form-action 'none'">
+<!-- Only the bundled scripts, style.css and its font may load; images, network, media, frames and plugins are all refused.
+     The page fetches nothing itself: prices and the engine answer through window.KaspaVaultBridge. The address code is
+     inline SVG, and the scanner's camera reaches its <video> through srcObject, which no directive governs. Script-set
+     styles are CSSOM writes (el.style.x, setProperty), which style-src allows; style="" attributes, inline scripts and
+     on* handlers are refused (pagelint checks for them). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <meta name="theme-color" content="#06070c">
-<title>KaspaVault</title>
+<title>KVault</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="notabs">
@@ -18,7 +23,7 @@
   <button data-tab="receive">Receive</button>
   <button data-tab="price">Price</button>
   <button data-tab="people">People</button>
-  <button data-tab="settings">Settings</button>
+  <button data-tab="safe" class="vtab">Vault</button>
 </nav>
 <div id="sheet" aria-hidden="true"></div>
 <script src="scene.js"></script>

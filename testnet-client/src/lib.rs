@@ -13,8 +13,15 @@ pub mod commands;
 pub mod contract;
 pub mod core;
 pub mod keys;
+pub mod lineage;
+pub mod market;
+pub mod link;
 pub mod network;
+pub mod paper;
 #[cfg(feature = "laptop")]
 pub mod serve;
 pub mod tx;
 pub mod watch;
+pub mod autostop;
+pub mod watched;
+pub mod indexer;

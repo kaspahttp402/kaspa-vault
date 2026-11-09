@@ -49,9 +49,44 @@
         return priceCache[range];
       }
 
+      /* Sample's history and People, shaped like live */
+      function samplePeople() {
+        return {
+          history: [
+            { text: 'Limit refreshed, 100 KAS ready', when: 'Yesterday, 9:12', go: 'home',
+              kind: 'refresh' },
+            { text: 'Paid 15 KAS to Corner Cafe', when: 'Today, 8:40', go: 'home', kind: 'paid' },
+            { text: 'Mum added you as a guardian of her account', when: 'Monday', go: 'people',
+              kind: 'people' },
+            { text: 'Sam is now your guardian, emergency stop button 2', when: 'Last week',
+              go: 'people', kind: 'people' },
+            { text: 'Alex is now your heir', when: 'Last week', go: 'people', kind: 'people' },
+          ].reverse(),
+          stops: [],
+          /* People, shaped like live: helpers = app.js helperRows() rows (Your guardians), watched
+             = D.state.watched (You guard) */
+          helpers: [
+            {
+              role: 'guardian',
+              which: 2,
+              name: 'Sam',
+              what:
+                'Guardian. Holds emergency stop button 2. A stop only ever sends your funds to your own vault.',
+            },
+            { role: 'unused', which: 3, name: 'Emergency stop 3',
+              what: 'Not in use. Add a guardian to give it to someone you trust.' },
+            { role: 'heir', name: 'Alex',
+              what:
+              'Heir. After a year with no payment from you, they can claim what is in your ' +
+                'account.' },
+          ],
+          watched: [{ id: 'sample-mum', name: 'Mum', roles: { guardian: 2 }, st: { stage: 'open',
+            kas: 300 } }],
+        };
+      }
       function sampleState() {
         var now = Date.now();
-        return {
+        var o = {
           source: 'sample',
           connected: true,
           error: '',
@@ -70,7 +105,7 @@
           fee: FEE,
           plan: 'Standard',
           stopKeys: 2,
-          heir: false,
+          heir: true /* Sample has an heir (Alex), as a set-up live account would */,
           sheets: 3,
           locked: false,
           network: '',
@@ -79,17 +114,12 @@
           heirDelaySeconds: null,
           heirWarnShare: 0.9,
           hardLimit: false,
-          lastActivity: now /* the heir clock: Sample counts the silence from the last activity */,
+          /* the heir clock: Sample counts the inactivity from the last activity */
+          lastActivity: now,
           outgoing: null /* a send in its grace window: {to, amount, secondsLeft, total} */,
           everyday: { name: 'Everyday', balance: 86.4 },
           coins: [40, 20.5, 12.1, 6.3, 3.2, 2.1, 1.4, 0.8] /* Everyday's coins (sample); the vault is one coin */,
           extra: [],
-          history: [
-            { text: 'Limit refreshed, 100 KAS ready', when: 'Yesterday, 9:12', go: 'home', kind: 'refresh' },
-            { text: 'Paid 15 KAS to Corner Cafe', when: 'Today, 8:40', go: 'home', kind: 'paid' },
-            { text: 'Mum added you as a guardian', when: 'Monday', go: 'people', kind: 'people' },
-          ].reverse(),
-          stops: [],
           /* the watcher's word: alerts newest first; watcherSeenAt undefined = the service never said, null = no watcher file */
           alerts:
             DEMO === 'alert'
@@ -103,6 +133,7 @@
               : [],
           watcherSeenAt: DEMO === 'quiet' ? null : undefined,
         };
+        return Object.assign(o, samplePeople());
       }
 
       /* the grace window ran out: the money leaves now */
@@ -149,7 +180,8 @@
         }
       }
       /* the heir clock in Sample: the delay in hours from the account rules (the heir dial's months; 8760 h when unset)
-         minus the silence since the last activity. Live gets the same numbers from the engine. */
+         minus the inactivity since the last activity. Live gets the same numbers from the engine.
+         */
       function heirDelaySeconds() {
         return (api.state.heirMonths ? api.state.heirMonths * 730 : 8760) * 3600;
       }
@@ -199,7 +231,8 @@
           var p = api.state.pending;
           if (!p) return { ok: true };
           api.state.history.unshift({
-            text: 'Declined the withdrawal of ' + p.amount + ' KAS to ' + p.to + '. The money stays.',
+            text: 'Declined the withdrawal of ' + p.amount + ' KAS to ' + p.to +
+              '. The funds stay in your account.',
             when: when(),
             go: 'home',
             kind: 'decline',
@@ -319,7 +352,8 @@
         },
         renewClock: function () {
           renew();
-          api.state.history.unshift({ text: 'Clock restarted', when: when(), go: 'heirclock', kind: 'heir' });
+          api.state.history.unshift({ text: 'Inactivity clock restarted', when: when(),
+            go: 'heirclock', kind: 'heir' });
           emit();
         },
         skipHeir: function () {
@@ -335,7 +369,8 @@
           api.state.left = api.state.limit;
           api.state.refreshSeconds = 0;
           renew(); /* money coming back is a top-up */
-          api.state.history.unshift({ text: 'Took your money out of the vault', when: when(), go: 'home', kind: 'safe' });
+          api.state.history.unshift({ text: 'Took your funds out of the vault with two vault seeds',
+            when: when(), go: 'home', kind: 'safe' });
           emit();
         },
         addAccount: function (a) {

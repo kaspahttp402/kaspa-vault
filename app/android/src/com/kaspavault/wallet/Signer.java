@@ -73,8 +73,6 @@ final class Signer {
 
     /** Fingerprint class, or the phone's own PIN / pattern / password (the phone's fingerprint OR PIN prompt). No class-2 face. */
     static final int AUTHENTICATORS = BiometricManager.Authenticators.BIOMETRIC_STRONG | BiometricManager.Authenticators.DEVICE_CREDENTIAL;
-    /** The only Keystore-wrapped secrets: the laptop's token and the SHA-256 of its certificate (the pin). */
-    static final Set<String> SECRETS = new HashSet<>(Arrays.asList("live_token", "live_pin"));
     /** A signer prompt that is not used within this many seconds is forgotten (the floor of the window below). */
     static final int SIGNER_SECONDS = 60;
     /**
@@ -88,8 +86,6 @@ final class Signer {
     /** A real fingerprint within this long is "fresh": the moves that cannot be undone (take-out, sheets, burn, reset, heir)
      *  need one, whatever the window says (a page that set a long window could ride one prompt for an hour). */
     static final long FRESH_PROMPT_MS = 90_000L;
-    /** How long after an in-app fingerprint the page may still read (once per secret) or write the stored secrets. Dial. */
-    static final int UNLOCK_SECONDS = 120;
     static final String KEY_ALIAS = "kaspavault.secrets.v3"; /* v3: one use per in-app fingerprint or PIN prompt, never the phone's own unlock */
     /**
      * Older keys: v1 was fingerprint-only, v2 stayed open for 30 s after any phone unlock.
@@ -97,15 +93,18 @@ final class Signer {
      */
     static final String KEY_ALIAS_V1 = "kaspavault.secrets", KEY_ALIAS_V2 = "kaspavault.secrets.v2";
     /** Why the phone must pair again, in the page's words: after this update, or after the phone's fingerprints changed. */
-    static final String REPAIR_NOTICE = "This update changed how your phone keeps its laptop key. Pair your phone with your laptop again from the code the laptop shows.";
-    static final String ENROL_NOTICE = "Your phone's fingerprints changed, so the laptop key kept on this phone was cleared. Pair your phone with your laptop again from the code the laptop shows.";
+    static final String REPAIR_NOTICE =
+            "This update renewed how KaspaVault asks for your fingerprint. Nothing else changed.";
+    static final String ENROL_NOTICE =
+            "Your phone's fingerprints changed. KaspaVault will ask for your fingerprint again.";
 
     /**
      * The wrapping key: AES in the phone's secure hardware that works for ONE operation per in-app fingerprint or PIN
      * prompt (timeout 0), and only through the cipher that prompt was shown for (BiometricPrompt.CryptoObject). The
-     * phone's own unlock never opens it, and neither does a prompt the page did not just show. It wraps a random data key
-     * that encrypts the stored secrets; after a prompt the data key stays in memory for UNLOCK_SECONDS and each secret may
-     * be read once. A new fingerprint enrolment kills the wrapping key, and with it every secret.
+     * phone's own unlock never opens it, and neither does a prompt the page did not just show.
+     * It wraps a random data key; confirmWithBiometric's prompt is good only if that one
+     * operation succeeds. The laptop secrets the data key once sealed are gone. A new
+     * fingerprint enrolment kills the wrapping key.
      */
     static SecretKey wrappingKey() throws Exception {
         KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
@@ -125,10 +124,8 @@ final class Signer {
 
     /** The data key wrapped by the Keystore key, "IV:ciphertext"; removed with the other "secret." entries. */
     static final String WRAPPED_KEY = "secret.wrapped_key";
-    /** The data key while open (null when shut), when it was opened, and which secrets the page may still read this time. All under the bridge lock. */
+    /** The data key after the last prompt (null when shut). Under the bridge lock. */
     private byte[] dataKey = null;
-    private long unlockedAt = 0;
-    private final Set<String> readable = new HashSet<>();
 
     /** The cipher the next prompt is shown for: it unwraps the stored data key, or wraps a fresh one when there is none yet. */
     Cipher prepareCipher() throws Exception {
@@ -156,17 +153,6 @@ final class Signer {
         synchronized (act.bridge) {
             shut();
             dataKey = k;
-            unlockedAt = android.os.SystemClock.elapsedRealtime();
-            readable.addAll(SECRETS);
-            if (act.livePin.isEmpty()) act.livePin = open("live_pin");
-        }
-    }
-
-    /** True while the data key is open; shuts it once UNLOCK_SECONDS have passed. */
-    boolean unlocked() {
-        synchronized (act.bridge) {
-            if (dataKey != null && android.os.SystemClock.elapsedRealtime() - unlockedAt > UNLOCK_SECONDS * 1000L) shut();
-            return dataKey != null;
         }
     }
 
@@ -174,24 +160,6 @@ final class Signer {
         synchronized (act.bridge) {
             if (dataKey != null) Arrays.fill(dataKey, (byte) 0);
             dataKey = null;
-            readable.clear();
-        }
-    }
-
-    /** One stored secret, decrypted with the open data key; "" when there is none or the store is shut. Not a page read. */
-    String open(String key) {
-        synchronized (act.bridge) {
-            if (!unlocked()) return "";
-            String v = act.prefs.getString("secret." + key, "");
-            int at = v.indexOf(':');
-            if (at < 0) return "";
-            try {
-                Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
-                c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(dataKey, "AES"), new GCMParameterSpec(128, Base64.decode(v.substring(0, at), Base64.NO_WRAP)));
-                return new String(c.doFinal(Base64.decode(v.substring(at + 1), Base64.NO_WRAP)), StandardCharsets.UTF_8);
-            } catch (Exception e) {
-                return "";
-            }
         }
     }
 
@@ -207,7 +175,7 @@ final class Signer {
         SharedPreferences.Editor ed = act.prefs.edit();
         for (String k : act.prefs.getAll().keySet()) if (k.startsWith("secret.")) ed.remove(k);
         ed.putString("live_on", "").apply();
-        synchronized (act.bridge) { shut(); act.livePin = ""; act.pendingPin = ""; act.pendingHost = ""; }
+        synchronized (act.bridge) { shut(); }
         act.main.post(act::applySecure);
     }
 
@@ -219,13 +187,17 @@ final class Signer {
     // a changed fingerprint), and the money keys must never ride on that. The pairing prompt cannot open this store:
     // its CryptoObject authorises one operation on KEY_ALIAS only. One fingerprint = one signature: a confirmSigner
     // prompt opens the data key, vault() takes each slot once and shuts it the moment the engine has the bytes.
-    // Nothing here is a @JavascriptInterface; getSecret keeps refusing every "signer.*" name to the page.
+    // Nothing here is a @JavascriptInterface, and no page call reads a sealed slot.
     // ---------------------------------------------------------------------------------------------------------------
     static final String SIGNER_ALIAS = "kaspavault.signer.v1";
     static final String SIGNER_WRAPPED_KEY = "signer.wrapped_key";
     /** The three slots, as pref suffixes: signer.card, signer.stop, signer.funding. */
     static final Set<String> SIGNER_SLOTS = new HashSet<>(Arrays.asList("card", "stop", "funding", "cold", "cold2", "cold3"));
-    static final String SIGNER_ENROL_NOTICE = "Your phone's fingerprints changed, so the card key, the emergency stop key and the funding key kept on this phone were cleared. The safe sheets kept on this phone are still there, and nothing in the safe changed. Stop this account and open a new one to keep using this phone.";
+    static final String SIGNER_ENROL_NOTICE = "Your phone's fingerprints changed, so the everyday card,"
+            + " emergency stop button 1 and the purse kept on this phone were cleared. This phone can no"
+            + " longer pay from or stop this account. A guardian, your heir or your paper stop can still"
+            + " move its funds into your vault, where your vault seeds take over. Funds already in your"
+            + " vault are not affected.";
     /** The signer data key while open (null when shut), when the prompt opened it, and which slots may still be read this time. All under the bridge lock. */
     private byte[] signerDataKey = null;
     private long signerOpenedAt = 0;
@@ -270,8 +242,26 @@ final class Signer {
     static final String SAFE_WRAPPED_KEY = "safe.wrapped_key";
     static final int SAFE_SECONDS = 15;
     static final String[] COLD_SLOTS = {"cold", "cold2", "cold3"};
+    // safe.v2 (docs/PIN_GAP_DESIGN.md, Engine 16 decision): the same store under its own alias kaspavault.safe.v2,
+    // FINGERPRINT ONLY (AUTH_BIOMETRIC_STRONG, no PIN), never while locked, NOT invalidated by a new fingerprint, own
+    // prefs safe2.* ("safe2." never starts with "safe."). Readers use safe2.* only when safe2.state is "proven", else
+    // safe.* (v1). New seals go only into v2, never into v1 again. migrateSafeV2() moves v1 -> v2 (section 3 order).
+    static final String SAFE2_ALIAS = "kaspavault.safe.v2";
+    static final String SAFE2 = "safe2.";
+    static final String SAFE2_WRAPPED_KEY = "safe2.wrapped_key";
+    static final String SAFE2_STATE = "safe2.state";
+    /** The last confirmSigner prompt was answered with a FINGER (AUTHENTICATION_RESULT_TYPE_BIOMETRIC), not the PIN. A hint; the v2 key is the gate. */
+    private volatile boolean lastPromptFinger = false;
+    /** The last answer was neither named FINGER nor PIN (AUTHENTICATION_RESULT_TYPE_UNKNOWN): the Keystore decides. */
+    private volatile boolean lastPromptUnknown = false;
     /** When a plain prompt (no signer cipher could be built) said yes; 0 when none. Under the bridge lock. */
     private long plainPromptAt = 0;
+    /**
+     * A real prompt's yes, not yet spent: set when a prompt opens the signer or a plain prompt
+     * says yes; cleared by consumeFresh() (one irreversible move), signerUsed() (one money call)
+     * and shutSigner(). Under the bridge lock.
+     */
+    private boolean freshUnused = false;
 
     /** The safe wrapping key: usable for SAFE_SECONDS after an in-app prompt, survives a new fingerprint, never while locked. */
     static SecretKey safeKey() throws Exception {
@@ -291,6 +281,376 @@ final class Signer {
         return g.generateKey();
     }
 
+    /** The v2 safe wrapping key: usable for SAFE_SECONDS after a FINGER (a PIN answer gives it no token), never while locked, survives a new fingerprint. */
+    static SecretKey safeKeyV2() throws Exception {
+        KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        KeyStore.Entry e = ks.getEntry(SAFE2_ALIAS, null);
+        if (e instanceof KeyStore.SecretKeyEntry) return ((KeyStore.SecretKeyEntry) e).getSecretKey();
+        KeyGenerator g = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        g.init(new KeyGenParameterSpec.Builder(SAFE2_ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setUserAuthenticationRequired(true)
+                .setUserAuthenticationParameters(SAFE_SECONDS, KeyProperties.AUTH_BIOMETRIC_STRONG)
+                .setInvalidatedByBiometricEnrollment(false)
+                .setUnlockedDeviceRequired(true)
+                .setKeySize(256).build());
+        return g.generateKey();
+    }
+
+    // ---- Fingerprint-change canary (docs/PIN_GAP_DESIGN.md, Engine 16 decision; built in Engine 17) ----
+    // A tiny AES key, fingerprint only, that Android kills when a finger is added or removed. Made at the first finger
+    // prompt (fingerSeen); checked with a bare Cipher.init (no prompt) before every vault-seed and guardian or heir action
+    // and before Guard off. Dead = the fingerprints changed: those actions wait FINGER_WAIT_MS of wall time AND
+    // FINGER_WAIT_DAA of network time (the engine status's daa_now, 10 per second), the wall count from when the death
+    // was seen, the network count from the first fresh daa_now after it; then a fresh canary is made. A moved phone clock
+    // cannot shorten the wait (the network count still runs); a network change restarts the network count (longer only).
+    // Paper take-out (typed seeds) never asks.
+    static final String CANARY_ALIAS = "kaspavault.finger.v1";
+    static final String DEAD_WALL = "finger.dead_wall", DEAD_DAA = "finger.dead_daa", DEAD_NET = "finger.dead_net";
+    static final String FINGER_PROMPTS = "finger.prompts";
+    // Set once a canary was made, never removed: keystore2 may DROP an invalidated key, and absent-after-made is dead.
+    static final String CANARY_MADE = "finger.canary_made";
+    // fingerWaitHours when the check could not be read just now (a passing Keystore error): this action is refused,
+    // no wait starts. The page matches the retry suffix word for word (data.js AGAIN).
+    static final long FINGER_UNREADABLE = -1;
+    static final String FINGER_AGAIN = "The phone could not check its fingerprints just now. Trying again in a moment.";
+    static final String SAFE2_PROVEN_N = "safe2.proven_n";
+    static final long FINGER_WAIT_MS = 72L * 3600 * 1000, FINGER_WAIT_DAA = 72L * 3600 * 10;
+
+    /**
+     * 0 none made yet, 1 alive, 2 dead (a finger was added or removed since it was made: invalidated, unrecoverable, or
+     * gone after CANARY_MADE), 3 unreadable just now (any other error: the action is refused, no wait). Never prompts.
+     */
+    static int canaryState(SharedPreferences p) {
+        try {
+            KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+            ks.load(null);
+            KeyStore.Entry e = ks.getEntry(CANARY_ALIAS, null);
+            if (!(e instanceof KeyStore.SecretKeyEntry)) return p.getInt(CANARY_MADE, 0) == 1 ? 2 : 0;
+            Cipher.getInstance("AES/GCM/NoPadding").init(Cipher.ENCRYPT_MODE, ((KeyStore.SecretKeyEntry) e).getSecretKey());
+            return 1;
+        } catch (android.security.keystore.UserNotAuthenticatedException e) {
+            return 1; // alive: it only wants a finger
+        } catch (KeyPermanentlyInvalidatedException | java.security.UnrecoverableKeyException e) {
+            android.util.Log.w("KaspaVault", "fingerprint check dead: " + e.getClass().getSimpleName());
+            return 2;
+        } catch (Exception e) {
+            android.util.Log.w("KaspaVault", "fingerprint check unreadable: " + e.getClass().getSimpleName());
+            return 3;
+        }
+    }
+
+    /** A fresh canary for the fingers enrolled now (throws with none enrolled). */
+    static void makeCanary(SharedPreferences p) throws Exception {
+        KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        if (ks.containsAlias(CANARY_ALIAS)) ks.deleteEntry(CANARY_ALIAS);
+        KeyGenerator g = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        g.init(new KeyGenParameterSpec.Builder(CANARY_ALIAS, KeyProperties.PURPOSE_ENCRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setUserAuthenticationRequired(true)
+                .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+                .setInvalidatedByBiometricEnrollment(true)
+                .setKeySize(128).build());
+        g.generateKey();
+        p.edit().putInt(CANARY_MADE, 1).commit();
+    }
+
+    /** A finger (or an answer the phone did not name) said yes: count the prompt; make the canary if none and no wait. */
+    void fingerSeen() {
+        synchronized (act.bridge) {
+            act.prefs.edit().putLong(FINGER_PROMPTS, act.prefs.getLong(FINGER_PROMPTS, 0) + 1).commit();
+            if (act.prefs.getLong(DEAD_WALL, 0) != 0 || canaryState(act.prefs) != 0) return;
+            try {
+                makeCanary(act.prefs);
+            } catch (Exception e) {
+                android.util.Log.w("KaspaVault", "fingerprint check not made: " + e.getClass().getSimpleName());
+            }
+        }
+    }
+
+    /**
+     * App start and keysNew: makes the canary with no prompt (key generation needs none), so it holds the owner's
+     * fingers before anyone can add one. Only with a strong fingerprint enrolled, no wait running and none made yet.
+     */
+    void ensureCanary() {
+        try {
+            BiometricManager bm = act.getSystemService(BiometricManager.class);
+            int can = bm == null ? -1 : bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG);
+            if (can != BiometricManager.BIOMETRIC_SUCCESS) return;
+            synchronized (act.bridge) {
+                if (act.prefs.getLong(DEAD_WALL, 0) != 0 || canaryState(act.prefs) != 0) return;
+                makeCanary(act.prefs);
+            }
+        } catch (Exception e) {
+            android.util.Log.w("KaspaVault", "fingerprint check not made at start: " + e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * 0 when the fingerprints did not change since the canary was made (or the wait just ended: a fresh canary is made),
+     * else the whole hours left, 1 to 72, or FINGER_UNREADABLE (-1: refuse this action, no wait written).
+     * Asks the engine for network time only while a wait runs. Call it on a bridge thread: never the main thread, never the vault thread (the status call runs there).
+     */
+    long fingerWaitHours() {
+        long wall0;
+        synchronized (act.bridge) {
+            wall0 = act.prefs.getLong(DEAD_WALL, 0);
+            int state = wall0 == 0 ? canaryState(act.prefs) : 2;
+            if (state == 3) return FINGER_UNREADABLE; // a passing Keystore error: refused now, never 72 hours
+            if (state != 2) return 0;
+            if (wall0 == 0) {
+                wall0 = System.currentTimeMillis();
+                act.prefs.edit().putLong(DEAD_WALL, wall0).remove(DEAD_DAA).remove(DEAD_NET).commit();
+                android.util.Log.i("KaspaVault", "fingerprints changed: the phone's vault seed copy waits");
+            }
+        }
+        String[] net = {act.prefs.getString("live_network", "")};
+        long daa = daaNow(net);
+        synchronized (act.bridge) {
+            if (act.prefs.getLong(DEAD_WALL, 0) == 0) return 0; // another thread just ended it
+            long start = act.prefs.getLong(DEAD_DAA, -1);
+            if (daa >= 0 && (start < 0 || !net[0].equals(act.prefs.getString(DEAD_NET, "")))) {
+                act.prefs.edit().putLong(DEAD_DAA, daa).putString(DEAD_NET, net[0]).commit(); // later start: only longer
+                start = daa;
+            }
+            long msLeft = wall0 + FINGER_WAIT_MS - System.currentTimeMillis();
+            long netMsLeft = start < 0 ? FINGER_WAIT_MS : daa < 0 ? 0 : (start + FINGER_WAIT_DAA - daa) * 100;
+            if (msLeft <= 0 && start >= 0 && daa >= 0 && netMsLeft <= 0) return endWait();
+            return Math.min(72, Math.max(1, (Math.max(msLeft, netMsLeft) + 3599999) / 3600000));
+        }
+    }
+
+    /** The wait is over: a fresh canary. With no finger enrolled it starts over, so a finger added later waits too. */
+    private long endWait() {
+        try {
+            makeCanary(act.prefs);
+        } catch (Exception e) {
+            act.prefs.edit().putLong(DEAD_WALL, System.currentTimeMillis()).remove(DEAD_DAA).remove(DEAD_NET).commit();
+            return 72;
+        }
+        act.prefs.edit().remove(DEAD_WALL).remove(DEAD_DAA).remove(DEAD_NET).commit();
+        android.util.Log.i("KaspaVault", "fingerprint wait over");
+        return 0;
+    }
+
+    /** The engine's network time (status daa_now) on a fresh answer, else -1; net[0] becomes the network it names. */
+    private long daaNow(String[] net) {
+        if (!VaultLib.AVAILABLE) return -1;
+        try {
+            java.util.concurrent.Callable<String> ask = () -> VaultLib.call("status", "{}");
+            String env = act.vaultThread.submit(ask).get(20, java.util.concurrent.TimeUnit.SECONDS);
+            JSONObject o = new JSONObject(env);
+            JSONObject body = o.optJSONObject("body"); // a 503 carries a fresh daa_now too (guardian-only phone)
+            Object d = body == null ? null : body.opt("daa_now");
+            if (!(d instanceof Number) || ((Number) d).longValue() < 0) return -1; // cached or stale answers carry none
+            net[0] = body.optString("network", net[0]);
+            return ((Number) d).longValue();
+        } catch (Exception e) {
+            android.util.Log.w("KaspaVault", "network time not read: " + e.getClass().getSimpleName());
+            return -1;
+        }
+    }
+
+    private static String about(long h) { return "about " + h + (h == 1 ? " hour" : " hours"); }
+    /** Bodies for a dead canary (bank words; the page shows them as they are). */
+    static String seedWait(long h) {
+        return "{\"ok\":false,\"error\":\"The fingerprints on this phone changed, so the phone's copy of the vault seeds opens in "
+                + about(h) + ". Two paper vault seeds work now.\"}";
+    }
+    static String linkWait(long h) {
+        return "{\"ok\":false,\"error\":\"The fingerprints on this phone changed, so this guardian or heir step opens in "
+                + about(h) + ".\"}";
+    }
+    static String fingerAgain() { return "{\"ok\":false,\"error\":\"" + FINGER_AGAIN + "\"}"; }
+    static String guardWait(long h) {
+        return "The fingerprints on this phone changed, so alerts can be turned off in " + about(h) + ".";
+    }
+
+    /**
+     * Review: v1 goes only after v2 opened on a SECOND, later finger prompt than the one that proved
+     * it, so a v2 that dies on this phone model leaves v1 in place. Under the bridge lock, straight after a finger answer.
+     */
+    private boolean v2OpenedLater() {
+        boolean v1Left = false;
+        for (String k : act.prefs.getAll().keySet()) if (k.startsWith("safe.")) v1Left = true;
+        try {
+            KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+            ks.load(null);
+            v1Left |= ks.containsAlias(SAFE_ALIAS);
+        } catch (Exception ignored) { }
+        if (!v1Left) return false;
+        long n = act.prefs.getLong(FINGER_PROMPTS, 0), at = act.prefs.getLong(SAFE2_PROVEN_N, -1);
+        if (at < 0) { act.prefs.edit().putLong(SAFE2_PROVEN_N, n).commit(); return false; } // proven before this rule
+        if (n <= at) return false;
+        byte[] dk = null;
+        try {
+            dk = unwrapWith(safeKeyV2(), act.prefs.getString(SAFE2_WRAPPED_KEY, ""));
+            return true;
+        } catch (Exception e) {
+            android.util.Log.w("KaspaVault", "safe.v2 did not open again, old copy kept: " + e.getClass().getSimpleName());
+            return false;
+        } finally {
+            if (dk != null) Arrays.fill(dk, (byte) 0);
+        }
+    }
+
+    boolean v2Proven() { return "proven".equals(act.prefs.getString(SAFE2_STATE, "")); }
+    /** The prefs prefix the readers use now: "safe2." once safe2.state is "proven", else "safe." (v1). */
+    String safePrefix() { return v2Proven() ? SAFE2 : "safe."; }
+    /** A finger answer; an unnamed one counts only once readers are on safe.v2 (its key gives a PIN no token). */
+    boolean lastPromptFinger() { return lastPromptFinger && (!lastPromptUnknown || v2Proven()); }
+
+    /** A slot sealed in the store the readers use (v1 while v2 is not proven; v2 once it is; v1 leftovers count too). */
+    private boolean sealedSafe(String name) {
+        return act.prefs.getString("safe." + name, "").indexOf(':') > 0 || (v2Proven() && act.prefs.getString(SAFE2 + name, "").indexOf(':') > 0);
+    }
+
+    /** Every sealed slot under a prefix ("safe." or "safe2."), name -> "IV:ciphertext"; never the wrapped key or the state. */
+    private java.util.TreeMap<String, String> slotsUnder(String prefix) {
+        java.util.TreeMap<String, String> out = new java.util.TreeMap<>();
+        for (java.util.Map.Entry<String, ?> e : act.prefs.getAll().entrySet()) {
+            String k = e.getKey();
+            if (!k.startsWith(prefix) || k.equals(SAFE_WRAPPED_KEY) || k.equals(SAFE2_WRAPPED_KEY) || k.equals(SAFE2_STATE)) continue;
+            if (e.getValue() instanceof String && ((String) e.getValue()).indexOf(':') > 0) out.put(k.substring(prefix.length()), (String) e.getValue());
+        }
+        return out;
+    }
+
+    /** Removes every safe2.* pref (a failed or stray v2 copy). Never touches safe.*. The v2 alias stays (it holds nothing alone). */
+    private boolean clearV2Prefs() {
+        SharedPreferences.Editor ed = act.prefs.edit();
+        for (String k : act.prefs.getAll().keySet()) if (k.startsWith(SAFE2)) ed.remove(k);
+        return ed.commit();
+    }
+
+    /** The second commit after "proven": every safe.* pref goes, then alias v1. Does nothing unless safe2.state is "proven". */
+    private void dropV1() {
+        if (!v2Proven()) return;
+        SharedPreferences.Editor ed = act.prefs.edit();
+        boolean any = false;
+        for (String k : act.prefs.getAll().keySet()) if (k.startsWith("safe.")) { ed.remove(k); any = true; }
+        if (any && !ed.commit()) { android.util.Log.w("KaspaVault", "old vault seed copy not removed yet"); return; } // alias v1 stays while any safe.* does
+        try {
+            KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+            ks.load(null);
+            if (ks.containsAlias(SAFE_ALIAS)) ks.deleteEntry(SAFE_ALIAS);
+        } catch (Exception e) {
+            android.util.Log.w("KaspaVault", "old safe alias not deleted: " + e.getClass().getSimpleName());
+        }
+    }
+
+    /** "IV:ciphertext" pref -> the data key it wraps under a Keystore key. */
+    private static byte[] unwrapWith(SecretKey key, String w) throws Exception {
+        int at = w.indexOf(':');
+        if (at <= 0) throw new IllegalStateException("no safe data key");
+        Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+        c.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, Base64.decode(w.substring(0, at), Base64.NO_WRAP)));
+        return c.doFinal(Base64.decode(w.substring(at + 1), Base64.NO_WRAP));
+    }
+
+    /** A data key wrapped under a Keystore key, as "IV:ciphertext". */
+    private static String wrapWith(SecretKey key, byte[] k) throws Exception {
+        Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+        c.init(Cipher.ENCRYPT_MODE, key);
+        byte[] ct = c.doFinal(k);
+        return Base64.encodeToString(c.getIV(), Base64.NO_WRAP) + ":" + Base64.encodeToString(ct, Base64.NO_WRAP);
+    }
+
+    /** The v2 data key, read from prefs. Refused outright after a PIN answer (the Keystore refuses it too). */
+    private byte[] dataKeyV2() throws Exception {
+        if (!lastPromptFinger) throw new android.security.keystore.UserNotAuthenticatedException("the PIN never opens safe.v2");
+        return unwrapWith(safeKeyV2(), act.prefs.getString(SAFE2_WRAPPED_KEY, ""));
+    }
+
+    /**
+     * A fresh v2 store when v1 holds no slot: new data key wrapped under v2, committed with state "written", unwrapped
+     * AGAIN from prefs and compared, then state "proven" (then the empty v1 goes). Finger answers only.
+     */
+    private byte[] newV2() throws Exception {
+        if (!lastPromptFinger) throw new android.security.keystore.UserNotAuthenticatedException("the PIN never opens safe.v2");
+        if (!clearV2Prefs()) throw new IllegalStateException("old v2 copy not cleared");
+        byte[] k = new byte[32];
+        new SecureRandom().nextBytes(k);
+        byte[] back = null;
+        try {
+            if (!act.prefs.edit().putString(SAFE2_WRAPPED_KEY, wrapWith(safeKeyV2(), k)).putString(SAFE2_STATE, "written").commit())
+                throw new IllegalStateException("safe data key not stored");
+            back = unwrapWith(safeKeyV2(), act.prefs.getString(SAFE2_WRAPPED_KEY, ""));
+            if (!java.security.MessageDigest.isEqual(back, k)) throw new IllegalStateException("safe data key differs");
+            if (!act.prefs.edit().putString(SAFE2_STATE, "proven").putLong(SAFE2_PROVEN_N, act.prefs.getLong(FINGER_PROMPTS, 0)).commit())
+                throw new IllegalStateException("safe data key not proven");
+        } catch (Exception x) {
+            Arrays.fill(k, (byte) 0);
+            if (!v2Proven()) clearV2Prefs();
+            throw x;
+        } finally {
+            if (back != null) Arrays.fill(back, (byte) 0);
+        }
+        // v1 held no slot: its wrapped key and alias go once v2 opens on a later finger prompt (v2OpenedLater)
+        return k;
+    }
+
+    /**
+     * docs/PIN_GAP_DESIGN.md section 3, real funds: v1 is never deleted before v2 is written AND proven. Runs straight
+     * after a confirmSigner prompt answered with a FINGER (both safe keys inside SAFE_SECONDS); a PIN answer never
+     * migrates. States: (none) -> step 3-4: new data key under v2, every safe.* slot sealed, ONE commit of
+     * safe2.wrapped_key + safe2.* + safe2.state=written (safe.* untouched) -> step 5: safe2.wrapped_key re-read FROM
+     * PREFS, unwrapped with v2, every safe2.* opened and compared byte for byte with the v1 bytes (same slot set) ->
+     * step 6: commit safe2.state=proven, and a SECOND commit (safe.* and alias v1 go, dropV1) waits for a LATER finger prompt that opens v2 again. Killed before
+     * "written": nothing new on disk. Killed at "written": both copies, readers on v1, the next finger redoes 5-6.
+     * Killed at "proven" before the second commit: both copies, readers on v2, the next finger finishes dropV1. Any
+     * failure before "proven" removes only safe2.* (never safe.*) and the next finger tries again.
+     */
+    void migrateSafeV2() {
+        synchronized (act.bridge) {
+            if (!lastPromptFinger) return; // a PIN answer never migrates
+            if (v2Proven()) { if (v2OpenedLater()) dropV1(); return; } // the second commit, on a LATER finger prompt
+            java.util.TreeMap<String, String> v1 = slotsUnder("safe.");
+            if (v1.isEmpty()) return; // nothing to move; a new seal makes v2 itself (newV2)
+            java.util.TreeMap<String, byte[]> plain = new java.util.TreeMap<>();
+            byte[] dk1 = null, dk2 = null, dk3 = null;
+            try {
+                dk1 = unwrapWith(safeKey(), act.prefs.getString(SAFE_WRAPPED_KEY, "")); // step 2: v1 window, same prompt
+                for (java.util.Map.Entry<String, String> e : v1.entrySet()) plain.put(e.getKey(), openWith(dk1, e.getValue()));
+                if (!"written".equals(act.prefs.getString(SAFE2_STATE, ""))) {
+                    if (!clearV2Prefs()) throw new IllegalStateException("old v2 copy not cleared"); // stray safe2.* from a failed try
+                    dk2 = new byte[32]; // step 3
+                    new SecureRandom().nextBytes(dk2);
+                    SharedPreferences.Editor ed = act.prefs.edit().putString(SAFE2_WRAPPED_KEY, wrapWith(safeKeyV2(), dk2));
+                    for (java.util.Map.Entry<String, byte[]> e : plain.entrySet()) ed.putString(SAFE2 + e.getKey(), sealWith(dk2, e.getValue()));
+                    ed.putString(SAFE2_STATE, "written");
+                    if (!ed.commit()) throw new IllegalStateException("v2 copy not stored"); // step 4: ONE commit
+                }
+                dk3 = unwrapWith(safeKeyV2(), act.prefs.getString(SAFE2_WRAPPED_KEY, "")); // step 5: from prefs, as every later reader
+                java.util.TreeMap<String, String> v2 = slotsUnder(SAFE2);
+                if (!v2.keySet().equals(plain.keySet())) throw new IllegalStateException("v2 slots differ");
+                for (java.util.Map.Entry<String, byte[]> e : plain.entrySet()) {
+                    byte[] back = openWith(dk3, v2.get(e.getKey()));
+                    boolean same = java.security.MessageDigest.isEqual(back, e.getValue());
+                    Arrays.fill(back, (byte) 0);
+                    if (!same) throw new IllegalStateException("v2 copy differs");
+                }
+                if (!act.prefs.edit().putString(SAFE2_STATE, "proven").putLong(SAFE2_PROVEN_N, act.prefs.getLong(FINGER_PROMPTS, 0)).commit())
+                    throw new IllegalStateException("v2 not proven"); // step 6
+                android.util.Log.i("KaspaVault", "vault seeds moved");
+            } catch (Exception e) {
+                android.util.Log.w("KaspaVault", "vault seeds stay in safe.v1: " + e.getClass().getSimpleName());
+                if (!v2Proven()) clearV2Prefs(); // only safe2.*, never safe.*
+                return;
+            } finally {
+                for (byte[] p : plain.values()) if (p != null) Arrays.fill(p, (byte) 0);
+                if (dk1 != null) Arrays.fill(dk1, (byte) 0);
+                if (dk2 != null) Arrays.fill(dk2, (byte) 0);
+                if (dk3 != null) Arrays.fill(dk3, (byte) 0);
+            }
+            // no dropV1 here: v1 stays until v2 opens again on a LATER finger prompt (review)
+        }
+    }
+
     /** True when any safe slot is sealed on this phone (safe.* or the old signer.*). */
     boolean hasAnyCold() {
         for (String n : COLD_SLOTS) if (hasSlot(n)) return true;
@@ -302,26 +662,10 @@ final class Signer {
      * Throws UserNotAuthenticatedException more than SAFE_SECONDS after the last prompt. The caller zero-fills it.
      */
     private byte[] safeDataKey(boolean create) throws Exception {
-        String w = act.prefs.getString(SAFE_WRAPPED_KEY, "");
-        int at = w.indexOf(':');
-        Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
-        if (at > 0) {
-            c.init(Cipher.DECRYPT_MODE, safeKey(), new GCMParameterSpec(128, Base64.decode(w.substring(0, at), Base64.NO_WRAP)));
-            return c.doFinal(Base64.decode(w.substring(at + 1), Base64.NO_WRAP));
-        }
-        if (!create) throw new IllegalStateException("no safe data key");
-        c.init(Cipher.ENCRYPT_MODE, safeKey());
-        byte[] k = new byte[32];
-        new SecureRandom().nextBytes(k);
-        try {
-            byte[] ct = c.doFinal(k);
-            if (!act.prefs.edit().putString(SAFE_WRAPPED_KEY, Base64.encodeToString(c.getIV(), Base64.NO_WRAP) + ":" + Base64.encodeToString(ct, Base64.NO_WRAP)).commit())
-                throw new IllegalStateException("safe data key not stored");
-        } catch (Exception x) {
-            Arrays.fill(k, (byte) 0);
-            throw x;
-        }
-        return k;
+        if (v2Proven()) return dataKeyV2();
+        if (!create) return unwrapWith(safeKey(), act.prefs.getString(SAFE_WRAPPED_KEY, "")); // v1, read only
+        if (!slotsUnder("safe.").isEmpty()) throw new IllegalStateException("vault seeds not moved to safe.v2 yet"); // never a new seal in v1
+        return newV2();
     }
 
     /** "IV:ciphertext" of v under a data key (AES-GCM). */
@@ -342,9 +686,9 @@ final class Signer {
     }
 
     /**
-     * keysNew: the safe keys sealed under the safe data key, in order, or null when the safe key cannot be used now
-     * (its SAFE_SECONDS since the prompt ran out): keysNew then seals them in the old signer store and migrateCold()
-     * moves them at the next prompt. The inputs are not zero-filled here (keysNew does that).
+     * keysNew: the safe keys sealed under the v2 safe data key (prefs safe2.*), in order, or null when v2 cannot be
+     * used now (a PIN answer, its SAFE_SECONDS ran out, or v1 not moved yet): keysNew then keeps no vault seeds on this
+     * phone (never the signer store again). The inputs are not zero-filled here (keysNew does that).
      */
     String[] sealSafe(byte[]... v) {
         synchronized (act.bridge) {
@@ -373,9 +717,10 @@ final class Signer {
         synchronized (act.bridge) {
             byte[][] out = new byte[names.length][];
             byte[] dk = null;
+            final String pre = safePrefix();
             try {
                 for (int i = 0; i < names.length; i++) {
-                    String v = act.prefs.getString("safe." + names[i], "");
+                    String v = act.prefs.getString(pre + names[i], "");
                     if (v.indexOf(':') > 0) {
                         try {
                             if (dk == null) dk = safeDataKey(false);
@@ -406,10 +751,10 @@ final class Signer {
      */
     void migrateCold() {
         synchronized (act.bridge) {
-            if (signerDataKey == null) return;
+            if (signerDataKey == null || !lastPromptFinger) return; // into safe.v2 only, on a finger answer
             boolean legacy = false;
             for (String n : COLD_SLOTS) {
-                if (act.prefs.getString("safe." + n, "").indexOf(':') > 0) return;
+                if (sealedSafe(n)) return;
                 if (act.prefs.getString("signer." + n, "").indexOf(':') > 0) legacy = true;
             }
             if (!legacy) return;
@@ -425,6 +770,7 @@ final class Signer {
                     sealed[i] = sealWith(dk, plain[i]);
                 }
                 dk2 = safeDataKey(false); // from the stored blob, as every later reader will
+                if (!v2Proven()) throw new IllegalStateException("safe.v2 not proven"); // never into v1 again
                 SharedPreferences.Editor ed = act.prefs.edit();
                 for (int i = 0; i < COLD_SLOTS.length; i++) {
                     if (sealed[i] == null) continue;
@@ -432,7 +778,7 @@ final class Signer {
                     boolean same = java.security.MessageDigest.isEqual(back, plain[i]);
                     Arrays.fill(back, (byte) 0);
                     if (!same) throw new IllegalStateException("safe copy differs");
-                    ed.putString("safe." + COLD_SLOTS[i], sealed[i]).remove("signer." + COLD_SLOTS[i]);
+                    ed.putString(SAFE2 + COLD_SLOTS[i], sealed[i]).remove("signer." + COLD_SLOTS[i]);
                 }
                 if (!ed.commit()) throw new IllegalStateException("safe copy not stored");
                 android.util.Log.i("KaspaVault", "safe keys moved to the safe store");
@@ -447,22 +793,127 @@ final class Signer {
     }
 
     /** keys.burn: only the sealed safe keys, in both stores (safe.cold*, old signer.cold*). */
-    void burnCold() {
+    boolean burnCold() {
         SharedPreferences.Editor ed = act.prefs.edit();
-        for (String n : COLD_SLOTS) ed.remove("safe." + n).remove("signer." + n);
-        ed.commit();
+        for (String n : COLD_SLOTS) ed.remove("safe." + n).remove(SAFE2 + n).remove("signer." + n);
+        return ed.commit(); // false: not on disk, and the page is told
     }
 
-    /** keys.reset (engine ok): the old safe goes too, alias and every "safe." pref, so it never shadows the next set. */
+    /**
+     * keys.reset (engine ok): the old safe goes too, alias and every "safe." pref, so it never shadows the next set.
+     * While a link is sealed (safe.guardian / safe.heir) the link stays: the alias, safe.wrapped_key and the two link
+     * slots are kept and only the wallet's own safe slots go (the link is separate from the wallet's keys).
+     */
     void forgetSafe() {
+        if (hasLink()) {
+            SharedPreferences.Editor ed = act.prefs.edit();
+            for (String k : act.prefs.getAll().keySet()) {
+                if (!(k.startsWith("safe.") || k.startsWith(SAFE2)) || SAFE_WRAPPED_KEY.equals(k) || SAFE2_WRAPPED_KEY.equals(k) || SAFE2_STATE.equals(k)) continue;
+                boolean link = false;
+                for (String n : LINK_SLOTS) if (k.equals("safe." + n) || k.equals(SAFE2 + n)) link = true;
+                if (!link) ed.remove(k);
+            }
+            ed.apply();
+            return;
+        }
         try {
             KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
             ks.load(null);
             ks.deleteEntry(SAFE_ALIAS);
+            ks.deleteEntry(SAFE2_ALIAS);
         } catch (Exception ignored) { }
         SharedPreferences.Editor ed = act.prefs.edit();
-        for (String k : act.prefs.getAll().keySet()) if (k.startsWith("safe.")) ed.remove(k);
+        for (String k : act.prefs.getAll().keySet()) if (k.startsWith("safe.") || k.startsWith(SAFE2)) ed.remove(k);
         ed.apply();
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // The link (guardians and heirs, docs/LINK_DESIGN.md): this phone's guardian key and heir key, the helper's side,
+    // sealed under the SAME safe key and safe data key as safe.cold* (prefs safe.guardian, safe.heir). So they survive
+    // a new fingerprint (signer clearing never touches "safe."), keys.burn (burnCold removes only the cold slots) and
+    // keys.reset (forgetSafe keeps them while a link is sealed). Sealed together in one commit, read one at a time
+    // (each read inside the safe key's SAFE_SECONDS after the prompt), forgotten together (forgetLink).
+    // ---------------------------------------------------------------------------------------------------------------
+    static final String[] LINK_SLOTS = {"guardian", "heir"};
+
+    /** True when either link key is sealed on this phone. */
+    boolean hasLink() {
+        for (String n : LINK_SLOTS) if (sealedSafe(n)) return true;
+        return false;
+    }
+
+    /** linkMake, before the engine runs: true when the safe data key opens (or is made) now, inside SAFE_SECONDS. */
+    boolean safeUsableNow() {
+        synchronized (act.bridge) {
+            byte[] dk = null;
+            try {
+                dk = safeDataKey(true);
+                return true;
+            } catch (Exception e) {
+                android.util.Log.w("KaspaVault", "safe store not usable now: " + e.getClass().getSimpleName());
+                return false;
+            } finally {
+                if (dk != null) Arrays.fill(dk, (byte) 0);
+            }
+        }
+    }
+
+    /**
+     * linkMake: seals both link keys under the safe data key, re-opens each from the stored safe.wrapped_key and
+     * compares byte for byte (as migrateCold), then writes safe.guardian + safe.heir in ONE commit. False when any
+     * step fails (nothing written then). The inputs are not zero-filled here (the caller does that).
+     */
+    boolean sealLink(byte[] guardian, byte[] heir) {
+        synchronized (act.bridge) {
+            byte[] dk = null, dk2 = null;
+            try {
+                dk = safeDataKey(true);
+                String g = sealWith(dk, guardian), h = sealWith(dk, heir);
+                dk2 = safeDataKey(false); // from the stored blob, as every later reader will
+                byte[] bg = openWith(dk2, g), bh = openWith(dk2, h);
+                boolean same = java.security.MessageDigest.isEqual(bg, guardian) && java.security.MessageDigest.isEqual(bh, heir);
+                Arrays.fill(bg, (byte) 0);
+                Arrays.fill(bh, (byte) 0);
+                if (!same) throw new IllegalStateException("link copy differs");
+                if (!v2Proven()) throw new IllegalStateException("safe.v2 not proven"); // never into v1 again
+                if (!act.prefs.edit().putString(SAFE2 + "guardian", g).putString(SAFE2 + "heir", h).commit()) throw new IllegalStateException("link not stored");
+                return true;
+            } catch (Exception e) {
+                android.util.Log.w("KaspaVault", "link keys not kept: " + e.getClass().getSimpleName());
+                return false;
+            } finally {
+                if (dk != null) Arrays.fill(dk, (byte) 0);
+                if (dk2 != null) Arrays.fill(dk2, (byte) 0);
+            }
+        }
+    }
+
+    /**
+     * vault(): one link key ("guardian" or "heir"), or null when it is not sealed or does not decrypt. Throws
+     * UserNotAuthenticatedException when the safe key's SAFE_SECONDS after the prompt are over. The caller zero-fills it.
+     */
+    byte[] openLink(String name) throws android.security.keystore.UserNotAuthenticatedException {
+        if (!"guardian".equals(name) && !"heir".equals(name)) return null;
+        synchronized (act.bridge) {
+            String v = act.prefs.getString(safePrefix() + name, "");
+            if (v.indexOf(':') <= 0) return null;
+            byte[] dk = null;
+            try {
+                dk = safeDataKey(false);
+                return openWith(dk, v);
+            } catch (android.security.keystore.UserNotAuthenticatedException e) {
+                throw e;
+            } catch (Exception e) {
+                return null;
+            } finally {
+                if (dk != null) Arrays.fill(dk, (byte) 0);
+            }
+        }
+    }
+
+    /** Drops both link keys together (only when the link itself is gone; keys.reset and keys.burn never call this). */
+    void forgetLink() {
+        act.prefs.edit().remove("safe.guardian").remove("safe.heir").remove(SAFE2 + "guardian").remove(SAFE2 + "heir").commit();
     }
 
     /** The cipher the next signer prompt is shown for: unwraps the signer data key, or wraps a fresh one when there is none yet (first keysNew). */
@@ -486,13 +937,19 @@ final class Signer {
             k = new byte[32];
             new SecureRandom().nextBytes(k);
             byte[] ct = c.doFinal(k);
-            act.prefs.edit().putString(SIGNER_WRAPPED_KEY, Base64.encodeToString(c.getIV(), Base64.NO_WRAP) + ":" + Base64.encodeToString(ct, Base64.NO_WRAP)).apply();
+            String wrapped = Base64.encodeToString(c.getIV(), Base64.NO_WRAP) + ":"
+                    + Base64.encodeToString(ct, Base64.NO_WRAP);
+            if (!act.prefs.edit().putString(SIGNER_WRAPPED_KEY, wrapped).commit()) {
+                Arrays.fill(k, (byte) 0); // never seal under a key that is not on disk
+                throw new IllegalStateException("signer key not stored");
+            }
         }
         synchronized (act.bridge) {
             shutSigner();
             signerDataKey = k;
             signerOpenedAt = android.os.SystemClock.elapsedRealtime();
             signerReadable.addAll(SIGNER_SLOTS);
+            freshUnused = true; // a real prompt: ONE irreversible move may follow (consumeFresh)
         }
     }
 
@@ -509,6 +966,7 @@ final class Signer {
     /** After a money call took its bytes: inside the window the slots become readable again, else the key is dropped. */
     void signerUsed() {
         synchronized (act.bridge) {
+            freshUnused = false; // the money call spent the prompt's yes
             if (signerWindowSeconds() > 0 && signerOpen()) signerReadable.addAll(SIGNER_SLOTS);
             else shutSigner();
         }
@@ -523,11 +981,25 @@ final class Signer {
         }
     }
 
-    /** True only within FRESH_PROMPT_MS of a real prompt (the window shortcut never moves signerOpenedAt); a plain prompt (no signer cipher) counts too. */
+    /**
+     * True only within FRESH_PROMPT_MS of a real prompt whose yes is unspent (freshUnused; the
+     * window shortcut neither moves signerOpenedAt nor sets it); a plain prompt (no signer
+     * cipher) counts too. Reads, never spends.
+     */
     boolean promptedRecently() {
         synchronized (act.bridge) {
+            if (!freshUnused) return false;
             long now = android.os.SystemClock.elapsedRealtime();
             return (signerDataKey != null && now - signerOpenedAt <= FRESH_PROMPT_MS) || (plainPromptAt > 0 && now - plainPromptAt <= FRESH_PROMPT_MS);
+        }
+    }
+
+    /** promptedRecently(), then the yes is spent: one prompt, one irreversible move. */
+    boolean consumeFresh() {
+        synchronized (act.bridge) {
+            boolean ok = promptedRecently();
+            freshUnused = false;
+            return ok;
         }
     }
 
@@ -538,6 +1010,7 @@ final class Signer {
             signerDataKey = null;
             signerReadable.clear();
             plainPromptAt = 0;
+            freshUnused = false;
         }
     }
 
@@ -582,7 +1055,12 @@ final class Signer {
     }
 
     /** True when this phone has a sealed key under the slot (the engine has made keys here); the safe slots count under safe.* or the old signer.*. */
-    boolean hasSlot(String name) { return act.prefs.getString("signer." + name, "").indexOf(':') > 0 || act.prefs.getString("safe." + name, "").indexOf(':') > 0; }
+    boolean hasSlot(String name) { return act.prefs.getString("signer." + name, "").indexOf(':') > 0 || sealedSafe(name); }
+
+    /** An account key is sealed here (card, stop, funding or a cold slot), on any network. */
+    boolean holdsAnySlot() {
+        return hasSlot("card") || hasSlot("stop") || hasSlot("funding") || hasAnyCold();
+    }
 
     /**
      * The signer key was invalidated (fingerprints changed): drop that alias and the everyday sealed keys (card, stop,
@@ -627,31 +1105,19 @@ final class Signer {
         return out;
     }
 
-    boolean setSecret(String key, String value) {
-            if (!SECRETS.contains(key)) return false;
-            String k = "secret." + key;
-            if (value == null || value.isEmpty()) {
-                if ("live_pin".equals(key)) { act.pendingPin = ""; act.pendingHost = ""; act.livePin = ""; }
-                act.prefs.edit().remove(k).apply();
-                return true;
-            }
-            if (!unlocked()) return false;
-            try {
-                Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
-                c.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(dataKey, "AES"));
-                byte[] ct = c.doFinal(value.getBytes(StandardCharsets.UTF_8));
-                act.prefs.edit().putString(k, Base64.encodeToString(c.getIV(), Base64.NO_WRAP) + ":" + Base64.encodeToString(ct, Base64.NO_WRAP)).apply();
-            } catch (Exception e) {
-                return false;
-            }
-            if ("live_pin".equals(key)) { act.pendingPin = ""; act.pendingHost = ""; act.livePin = value; } // decided: the stored pin rules from here
-            return true;
+    /**
+     * The laptop pairing is gone: an old install's sealed laptop token and pin
+     * ("secret.live_*") are dropped at start. "secret.wrapped_key" stays:
+     * confirmWithBiometric's prompt still uses it.
+     */
+    void dropLaptopSecrets() {
+        SharedPreferences.Editor ed = act.prefs.edit();
+        boolean any = false;
+        for (String k : act.prefs.getAll().keySet()) {
+            if (k.startsWith("secret.live_")) { ed.remove(k); any = true; }
         }
-
-    String getSecret(String key) {
-            if (!SECRETS.contains(key) || !unlocked() || !readable.remove(key)) return "";
-            return open(key);
-        }
+        if (any) ed.apply();
+    }
 
     void confirmWithBiometric(String callbackName, String subtitle) {
             act.main.post(() -> {
@@ -725,24 +1191,35 @@ final class Signer {
                     return;
                 }
                 final Cipher shown = cipher;
+                lastPromptFinger = false; // set again by this prompt's answer
+                lastPromptUnknown = false;
                 BiometricPrompt prompt = new BiometricPrompt.Builder(act)
                         .setTitle("KaspaVault").setSubtitle(subtitle)
                         .setConfirmationRequired(false)
                         .setAllowedAuthenticators(AUTHENTICATORS).build();
                 BiometricPrompt.AuthenticationCallback answer = new BiometricPrompt.AuthenticationCallback() {
                     @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult r) {
+                        // Only a NAMED PIN is refused here. FINGER or UNKNOWN (some phones never say): the Keystore decides,
+                        // since safe.v2 gives a PIN answer no token. lastPromptFinger() still needs a named finger on v1.
+                        int type = r.getAuthenticationType();
+                        lastPromptFinger = type != BiometricPrompt.AUTHENTICATION_RESULT_TYPE_DEVICE_CREDENTIAL;
+                        lastPromptUnknown = lastPromptFinger && type != BiometricPrompt.AUTHENTICATION_RESULT_TYPE_BIOMETRIC;
+                        if (lastPromptFinger) fingerSeen(); // counts the prompt, makes the canary the first time
                         try {
                             if (shown == null) { // plain prompt: only the safe store (FRESH_PROMPT_METHODS) may follow
                                 synchronized (act.bridge) {
                                     shutSigner();
                                     plainPromptAt = android.os.SystemClock.elapsedRealtime();
+                                    freshUnused = true; // ONE irreversible move may follow
                                 }
+                                migrateSafeV2(); // both safe keys inside SAFE_SECONDS: v1 -> v2 (written, re-read, proven), finger only
                                 act.call(callbackName, "\"ok\"");
                                 return;
                             }
                             BiometricPrompt.CryptoObject co = r.getCryptoObject();
                             openSignerWith(co != null && co.getCipher() != null ? co.getCipher() : shown);
-                            migrateCold(); // both keys open right now: move old signer.cold* into the safe store (verified, never lossy)
+                            migrateSafeV2(); // v1 -> v2 first (written, re-read, proven, then v1 goes), finger only
+                            migrateCold(); // both keys open right now: move old signer.cold* into safe.v2 (verified, never lossy), finger only
                             act.call(callbackName, "\"ok\"");
                         } catch (KeyPermanentlyInvalidatedException e) {
                             forgetSigner(); act.notice = SIGNER_ENROL_NOTICE; act.pushNotice();

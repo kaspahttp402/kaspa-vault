@@ -45,13 +45,13 @@
       label: 'Daily limit refreshes every',
       presets: [6, 12, 24, 48, 168],
       none: 'Always',
-      zero: 'The limit refreshes right away, so it is no limit at all.',
+      zero: 'The limit resets immediately, so it offers no protection.',
     },
     heir: {
-      label: 'Heir can claim after a silence of',
+      label: 'Heir can claim after an inactivity period of',
       presets: [2160, 4320, 8760, 17520],
-      none: 'No silence',
-      zero: 'Your heir could take the money today.',
+      none: 'No inactivity period',
+      zero: 'Your heir could claim the money today.',
     },
   };
   var UNIT = { minutes: 1 / 60, hours: 1, days: 24 };
@@ -85,52 +85,6 @@
     retryMs: 125000 /* when the price feed is busy and nothing is saved: ask again this many times, this far apart */,
   };
 
-  /* the People tree (a circle of woven tendrils, like a tree of life): sizes in SVG units, colours in style.css */
-  var PEOPLE_TREE = {
-    w: 340,
-    h: 220,
-    trunk: 0.5 /* drawing size; trunk = where the roots meet the branches, as a share of the height */,
-    rootSpread: 0.85,
-    branchSpread: 0.8 /* how wide the roots (guardians) and branches (heir, guard, payees) fan, as a share of the width */,
-    weave: 18,
-    weaveTurns: 2.5,
-    curve: 0.55 /* sideways amplitude in px, sine turns along a tendril, how far the control points lean */,
-    line: 1.6,
-    thin: 0.8,
-    glow: 3,
-    dot: 5,
-    font: 11 /* stroke widths, the glow blur, the owner dot, label size */,
-  };
-
-  /* The drawer-device tutorial, one step per page: making the keys on a device that never goes online */
-  var OFFLINE_STEPS = [
-    [
-      'Pick the drawer device',
-      'An old laptop or phone you can wipe and keep in a drawer. Reinstall it from scratch, then turn off wifi and Bluetooth for good. From now on it never connects. A used machine with old malware is not offline.',
-    ],
-    ['Put the vault program on it', 'Carry it over on a USB stick that holds nothing else.'],
-    [
-      'Make the keys there',
-      'On the drawer device choose "Make my stop key and safe sheets". It can mix in dice rolls you type, for old hardware with doubtful randomness. It writes a small file holding only public halves, like an account number.',
-    ],
-    [
-      'Write the three sheets',
-      'Three sheets of 24 words, shown one at a time; read three words back from each. Keep them in three places, never with the device, never as a photo.',
-    ],
-    [
-      'Carry the public half over',
-      'As a code the drawer device shows, or on the stick. It holds only public halves and is safe to show. On this phone: "I have a drawer device", scan or paste it. This phone then makes its own card key and shows a rule block code.',
-    ],
-    [
-      'Carry that code back once',
-      'The drawer device works out its own rule block code. The two codes must match letter for letter. If they differ, stop and start over: something changed on the way. This one check catches a swapped vault address.',
-    ],
-    ['Lock the drawer', 'Put a password on the key file, power the device off, and store it like a fourth sheet.'],
-    [
-      'Test with small money',
-      'Press the emergency stop from this phone: it shows a code, the drawer device signs, this phone scans the answer. Then take a little from the vault with sheets 1 and 2, 2 and 3, and 1 and 3.',
-    ],
-  ];
   var ui = {
     liveRules: {
       limit: 100,
@@ -148,10 +102,9 @@
     fresh: null,
     weekOver: false,
     notice: '',
-    people: [
-      { name: 'Mum', role: 'Sponsored', note: 'She spends from it. You hold her emergency stop.' },
-      { name: 'Sam', role: 'Guardian', note: 'Sam holds a copy of your emergency stop.' },
-    ],
+    /* Sample's heir named from the heir dial (persondetail); the People screen shows demo.js
+       D.state.helpers */
+    people: [],
   };
 
   function esc(s) {
@@ -159,13 +112,28 @@
       return '&#' + c.charCodeAt(0) + ';';
     });
   }
+  /* text read when shown (esc calls toString), so it can follow the mode */
+  function lazyText(f) {
+    return { toString: f };
+  }
+  /* what Settings > Keys lists in each mode (the rows in SCR.settings) */
+  function keysHolds() {
+    return D.isLocal()
+      ? 'your covenant code, your vault seeds, the purse, your guardians and your alerts'
+      : 'recovery, your alerts and a second device';
+  }
   function plainNum(n) {
-    var s = String(n);
-    return /e/i.test(s) ? Number(n).toFixed(8).replace(/0+$/, '').replace(/\.$/, '') : s;
+    /* at most 8 decimals, never 1e-7: data.js formats what is sent the same way */
+    return D.kasText(n);
   }
   /* exact, never rounded here: Live numbers are shown as the vault gave them */
   function shortAddr(a) {
     return a.length > 26 ? a.slice(0, 14) + '\u2026' + a.slice(-8) : a;
+  }
+  /* a send confirmation shows the whole address, in groups of 4 after its prefix */
+  function addrGroups(a) {
+    var m = /^([a-z]+:)?(.*)$/i.exec(String(a || ''));
+    return (m[1] ? m[1] + ' ' : '') + m[2].replace(/(.{4})(?=.)/g, '$1 ');
   }
   function fmt(n) {
     if (n == null) return '—';
@@ -173,6 +141,19 @@
     p[0] = p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     return p.join('.');
   }
+  /* an amount box (data.js): '' = everything (0); ".5" and "5." too; at most 8 decimals; else NaN
+     (refused) */
+  function amountOf(text) {
+    return D.amountOf(text);
+  }
+  /* the one read of the BIP-39 list (bip39.js gives an array): anything but all 2048 words reads
+     as empty, so every word check fails closed */
+  function bip39List() {
+    var list = [].concat(window.KV_BIP39 || []),
+      whole = list.length === 2048;
+    return whole ? list : [];
+  }
+  var AMOUNT_BAD = 'Enter an amount like 12.5, with up to 8 decimals.';
   function money(kas) {
     var eur = D.getSetting('currency') === 'eur',
       v = kas * D.state.rate * (eur ? 0.92 : 1);
@@ -181,9 +162,6 @@
   function under(kas) {
     return D.isLive() ? 'KAS' : money(kas);
   }
-  function priceHead() {
-    return D.isLive() ? 'KAS' : 'KAS ' + money(1).replace(/^about /, '');
-  } /* the chart header */
   function dur(s) {
     if (s >= 31536000 && s % 31536000 === 0) return s / 31536000 + (s === 31536000 ? ' year' : ' years');
     var m = Math.round(s / 60),
@@ -235,7 +213,7 @@
   function fit(el) {
     /* long Live balances shrink to stay on one line */
     var len = el.textContent.length,
-      room = innerWidth - 56,
+      room = Math.min(innerWidth, 590) - 56,
       base = Math.min(innerWidth * 0.21, 84);
     el.style.setProperty('--big', Math.min(base, room / (len * 0.56)) + 'px');
   }
@@ -263,7 +241,8 @@
         setText(el, '[data-purse]', r.error);
         return;
       }
-      setText(el, '[data-purse]', 'Your purse holds ' + fmt(r.kas) + ' KAS.');
+      var lead = ui.duress ? 'Available: ' : 'Your purse holds ';
+      setText(el, '[data-purse]', lead + fmt(r.kas) + ' KAS.');
       if (onOk) onOk(r);
     });
   }
@@ -477,70 +456,122 @@
   /* ---- help: two sentences per screen (screen id -> text), shown by the "?" in the top corner ---- */
   var HELP = {
     welcome:
-      'KaspaVault keeps your money like a bank account with a daily limit and an emergency stop. Start a new account, bring one back with your recovery seed, or open an invitation from someone you know.',
+      'KVault keeps your money like a bank account, with a daily limit and an emergency stop. Start a new account, restore one with your recovery seed, ' +
+      'or open an invitation from someone you know.',
     words:
-      'These words are your paper copy. The recovery seed brings the app back on a new phone; the vault seed opens your vault and is never typed into this phone.',
-    wordcheck: 'A quick check that your paper copy is right. Tap the word that matches the number we ask for.',
+      'Write these words on paper, never in a photo or a message. Your recovery seed brings this account back on a new phone; your vault seeds open your ' +
+      'vault.',
+    wordcheck:
+      'A quick check that your paper copy is right. Tap the word that matches the number we ask for.',
     makekeys:
-      'Your account needs three keys. The simple way makes all of them on this phone with one fingerprint and gives you three sheets of words to write down. The advanced way brings in the public file from a drawer device that never goes online.',
-    keysdrawer:
-      'For a drawer device: paste or scan the public file it made and, if you want one, the heir\u2019s public key. One fingerprint seals this phone\u2019s own keys. The tutorial button walks through making the drawer device.',
+      'This sets up your account on this phone with one fingerprint. You then write down three vault seeds, and any two of them open your vault.',
     sheet:
-      'One of your three safe sheets. Any two open your vault, so they must outlive this phone: paper, three places, never a photo. This phone keeps a copy, and adding a fingerprint leaves it in place.',
-    sheetcheck: 'A quick check that your paper copy is right. Tap the word that matches the number asked for.',
-    offlinehow: 'How a drawer device is made and used, one step per page.',
-    showsheets: 'Your three vault sheets, kept sealed on this phone. Any two open the vault. Paper, three places, never a photo.',
-    burnsheets: 'Burn the sealed copy and only your paper sheets open the vault from then on. It cannot be undone.',
-    pursepay: 'The purse is outside the account and its rules. A payment from it goes at once, no notice period, no limit.',
+      'One of your three vault seeds; any two open your vault. Write it on paper and keep the three in separate places, never in a photo.',
+    sheetcheck:
+      'A quick check that your paper copy is right. Tap the word that matches the number asked for.',
+    showsheets:
+      'Your three vault seeds, kept sealed on this phone behind your fingerprint. Use them to check or rewrite your paper copies.',
+    burnsheets:
+      'This deletes the sealed copy of your vault seeds from this phone, and it cannot be undone. From then on only your paper seeds open the vault.',
+    pursepay:
+      'The purse sits outside the account and its rules. A payment from it leaves at once, with no notice period and no daily limit.',
     resetkeys:
-      'New keys, new purse, new account, new vault. Only once the purse and the account are empty. The old keys are set aside, not deleted.',
+      'This starts a fresh account, purse and vault, with new vault seeds to write down. It is only possible once the purse and the account are empty.',
     keysmade:
-      'The rule block code names the rules your money lives under. Your offline device shows the same code. The purse is where money goes in before the account opens.',
+      'The covenant code identifies the rules your money lives under. Money goes into the purse first, then into your account.',
     topup:
       'Money moves from the purse into your open account and comes under its rules. Leave about 1 KAS in the purse for the network fee.',
-    fundacct: 'Money moves from the purse into your account and comes under its rules. Leave about 1 KAS in the purse for the network fee.',
-    restore: 'Type the 24-word recovery seed from your paper to bring your account back onto this phone. Nothing else is needed.',
-    home: 'Your balance, what can still leave today on the spot, and five bars for the five rules on this account: daily limit, notice period, emergency stop, heir and vault. Tap a bar to change that rule; a dim bar is off. The log shows what happened. Your vault and the emergency stop are at the bottom.',
-    open: 'An Everyday account is for spending and receiving. A Protected account adds a covenant: a daily limit, a notice period and an emergency stop.',
-    plans:
-      'A covenant is the set of rules your money lives under. It sets how much can leave on the spot each day, how long large payments wait, and what happens in an emergency. The Kaspa network itself enforces it, so nobody can skip it, not even you from this phone. Pick the one that fits. You can change it later.',
+    fundacct:
+      'Money moves from the purse into your account and comes under its rules. Leave about 1 KAS in the purse for the network fee.',
+    restore:
+      'Type the 24-word recovery seed from your paper to bring your account back onto this phone. Your vault still opens with two of your vault seeds.',
+    home:
+      'Your balance, what you can still spend immediately today, and five bars for your rules: daily limit, notice period, emergency stop, heir and vault. ' +
+      'Tap a bar to change that rule; the emergency stop and your vault are at the bottom.',
+    open:
+      'An Everyday account is for spending and receiving. A Protected account adds a covenant: a daily limit, a notice period and an emergency stop.',
     glossary:
-      'Every term in crypto and Kaspa this app leans on, each with a plain line and a technical one. The search line filters as you type.',
-    dials:
-      'Your own settings for this account: the daily limit, how long large payments wait, how often the limit refreshes, and how long a silence before your heir can claim. Pick a preset, or choose Custom and type a number. Zero is allowed, and we say plainly what it costs.',
-    movein: 'Moving money from Everyday into your new protected account. You can also do this later.',
-    send: 'Payments under today’s limit go right away. Large ones become a pending withdrawal that waits for the notice period, so you can stop them.',
-    sent: 'Your payment is on its way, or waiting as a pending withdrawal. A pending one can still be stopped until it lands.',
-    receive: 'Share this address, or let someone scan the code, to get paid. Money that arrives goes into this account.',
-    pending: 'A large payment waiting out its notice period. Decline it if you did not ask for it. Approve only quiets the alert: it still waits its notice period, and you can decline it from Alerts until it leaves.',
-    stop: 'The emergency stop moves all your money, pending withdrawals included, into your vault at once. Nobody can pay out of the vault from a phone: not you, not a thief, not us. Only your vault seed, kept on paper somewhere else, takes it out again.',
-    stopdone: 'Everything is in your vault now. It stays there until you open the vault with your vault seed.',
-    safe: 'Your vault holds money the emergency stop moved out of reach. Taking it out needs your vault seed, which never lives on this phone.',
+      'Every term this app uses, each with a plain line and a technical one. Type in the search line to filter.',
+    movein:
+      'Moving money from Everyday into your new protected account. You can also do this later.',
+    send:
+      'Payments under today’s limit go right away. Large ones become a pending withdrawal that waits for the notice period, so you can stop them.',
+    sent:
+      'Your payment is on its way, or waiting as a pending withdrawal. A pending one can still be stopped until it lands.',
+    receive:
+      'Share this address, or let someone scan the code, to get paid. Money that arrives goes into this account.',
+    pending:
+      'A large payment waiting out its notice period. Decline it if you did not ask for it; Approve only dismisses the alert, and the payment still waits.',
+    stop:
+      'The emergency stop moves all your money, pending withdrawals included, into your vault at once. Only two of your three vault seeds, typed from paper, ' +
+      'take it out again.',
+    stopdone:
+      'Everything is in your vault now. It stays there until you take it out with two of your vault seeds.',
+    safe:
+      'Your vault holds the money an emergency stop moved out of reach. Taking it out needs two of your three vault seeds, typed from paper.',
     takeout:
-      'Type the 24 words of your vault seed from paper to move the money back into your account. Take your time; a wrong word simply does nothing.',
+      'Type two of your three vault seeds from paper to move money out of the vault. The words are used once and not kept, and a mistyped word moves nothing.',
     people:
-      'Everyone linked to this account: guardians who hold a copy of your emergency stop, your heir, trusted payees who are paid on the spot, and anyone you sponsor or give an allowance to.',
-    addperson:
-      'Choose how someone is linked to you. A guardian can stop your account for you; a sponsored person gets a protected account you watch over.',
+      'Your guardians shows who can stop this account for you and who is your heir: scan their link code to add them, then share your watch code. You guard ' +
+      'shows the accounts you watch for others and any funds received as heir; share your link code to be added.',
     persondetail:
-      'Give the person a name and, where it applies, a daily limit. You can remove the link from People; for a guardian or an heir that means updating your rules.',
-    shareinvite: 'Send this link to the person. It opens their own KaspaVault with the account you set up for them.',
+      'Give the person a name and, where it applies, a daily limit. Adding or removing a guardian or an heir changes your rules, so it ends with Update now.',
+    shareinvite:
+      'Send this link to the person. It opens their own KVault with the account you set up for them.',
     invite:
       'Someone set up a protected account for you and holds its emergency stop for now. After your first week you can take the stop over.',
     alerts:
       'Everything that happened on your account: payments, pending withdrawals, stops and invitations. Tap one to see where it leads.',
     protection:
-      'The rules on this account, one row each: tap a row to change that rule. Below them, who hears about a pending withdrawal, and the extra protections on this phone.',
-    settings:
-      'Money: your covenant, coins and statement. Keys: your sheets, the guard and fresh keys. Help: how it works, the library, preferences and about.',
+      'The rules on this account, one row each; tap a row to change that rule. Below them are who hears about a pending withdrawal and the extra protections ' +
+      'on this phone.',
+    settings: lazyText(function () {
+      return (
+        'Money holds your rules, accounts, coins and statement; Keys holds ' +
+        keysHolds() +
+        '. Help holds how it works, the glossary, preferences and about.'
+      );
+    }),
     prefs:
-      'Your currency, which alerts you get, and whether screenshots are allowed. A second device can hold your vault seed so this phone never has to.',
-    seconddevice: 'A second phone or tablet can keep your vault seed, so this one never sees them. Linking one is not part of this app.',
-    about: 'Which build this is, and whether it is Live on this phone or the Sample. Start over wipes the sample and begins again.',
+      'Your currency, alerts, app lock and fingerprint, and whether screenshots are allowed. These settings apply to this phone only and do not change your ' +
+      'rules.',
+    guardians:
+      'Who holds your emergency stop buttons, and who is your heir. To change them, use ' +
+      'Change guardians or heir: it opens People.',
+    seconddevice:
+      'A second phone or tablet can watch this account and hear about every withdrawal, so a lost phone does not mean a missed alert. Linking one is not ' +
+      'part of this app.',
+    about:
+      'Which build this is, and whether it is Live on this phone or the Sample. Start over wipes the sample and begins again.',
     heirclock:
-      'How long until your heir could claim this account. The clock runs while the account hears nothing from you; any payment, top-up or stop restarts it. The line turns amber as the time approaches and red when it is close.',
+      'How long until your heir could claim this account. Any payment, top-up or stop restarts the clock, and the line turns amber, then red, as the time ' +
+      'gets close.',
     howitworks:
-      'Short steps, one idea each, on how and why your account keeps your money safe. Swipe or tap Next; each step links to its full story. The ? on any screen brings you back to the step that fits.',
+      'Short steps, one idea each, on how your account protects your money. Swipe or tap Next; each step links to its full story.',
+    linkcode:
+      'Your link code lets an account holder make you their guardian, their heir, or both. It contains nothing secret, so it is safe to show.',
+    papers:
+      'Every paper you need, and whether each is done: your three vault seeds, your paper stop and its printed code, and any ' +
+      'heir seed. Tap a row to write, check or print it.',
+    heirsheet:
+      'These 24 words are your heir seed. If this phone is lost, they are the only way to claim an account you are heir to.',
+    heircheck:
+      'A quick check that your paper copy of the heir seed is right. Tap the word that matches the number asked for.',
+    watchcode:
+      'Your guardians scan this code to see the account: its balance, any pending withdrawal and the heir clock. It cannot move money; show it again after ' +
+      'you change who helps you.',
+    watched:
+      'An account you guard: its balance, any pending withdrawal and its heir clock. You can stop it or send a withdrawal back, and claim it as heir when ' +
+      'its inactivity period has passed, but never spend from it.',
+    heirpurse:
+      'Funds you claimed as an heir. They sit outside any account and its rules, and go where you send them at once.',
+    paperstop:
+      'An emergency stop button written on paper as 24 words. With it, a lost phone is recovered from paper alone.',
+    paperuse:
+      'For a lost phone: the code printed with your stop words, then the 24 words. Everything moves to your vault.',
+    paperout:
+      'Any two of your three vault seeds take the funds out of your vault, with no fingerprint. ' +
+      'First the account code, then the two vault seeds, then where the funds go.',
   };
   /* which walk-through step a screen's ? leads to */
   var HELP_STEP = {
@@ -558,22 +589,28 @@
     wordcheck: 2,
     restore: 2,
     people: 13,
-    addperson: 13,
     persondetail: 13,
     shareinvite: 13,
     invite: 13,
     protection: 7,
     seconddevice: 12,
+    guardians: 13,
     about: 16,
     receive: 10,
     settings: 15,
     price: 17,
+    linkcode: 13,
+    heirsheet: 13,
+    heircheck: 13,
+    watchcode: 13,
+    watched: 13,
+    heirpurse: 14,
   };
   /* the How-it-works screen: [title, story] */
   var STORIES = [
     [
       'Your account has a daily limit',
-      'Every day you can spend up to your limit on the spot, with a tap and your fingerprint. The limit refreshes once a day. Anything a thief could grab in a hurry is capped at that amount.',
+      'Every day you can spend up to your daily limit immediately, with a tap and your fingerprint. The limit refreshes once a day. Anything a thief could grab in a hurry is capped at that amount.',
     ],
     [
       'Large payments wait',
@@ -581,19 +618,24 @@
     ],
     [
       'The emergency stop',
-      'Slide the stop and all your money moves into your vault in one go, pending withdrawals included. Nobody can spend from the vault: not you, not a thief, not us. Your vault seed, kept on paper, opens it again.',
+      'Slide the stop and all your money moves into your vault in one go, pending withdrawals included. Nobody can spend from the vault: not you, not a ' +
+      'thief, not us. Two of your three vault seeds, kept on paper, open it again.',
     ],
     [
-      'Your two sets of words',
-      'Your recovery seed brings the app and your account back on a new phone. Your vault seed opens your vault. Both live on paper, and the vault seed is never typed into this phone, so a thief with your phone gets neither.',
+      'Your vault seeds',
+      'Your three vault seeds open your vault, and any two are enough. They live on paper; the copy on this phone ' +
+        'is sealed behind your fingerprint, so a thief with your phone cannot open the vault.',
     ],
     [
       'Guardians and sponsoring',
-      'A guardian is someone you trust who holds a copy of your emergency stop; if you lose your phone, they can stop everything for you. Sponsoring works the other way round: you set up a protected account for a newcomer and hold their stop until they are ready to take it over.',
+      'A guardian is someone you trust who holds one of your emergency stop buttons and watches your account from their own phone; if you lose yours, they ' +
+      'can stop everything for you. Sponsoring works the other way round: you set up a protected account for a newcomer and hold their stop until they are ' +
+      'ready to take it over.',
     ],
     [
       'What a thief can and cannot do with your unlocked phone',
-      'They can see your balance and spend up to today’s limit. They cannot take more without waiting out the notice period, during which you or a guardian stop everything. They cannot reach your vault, because its words are not on the phone.',
+      'They can see your balance and spend up to today’s limit. They cannot take more without waiting out the notice period, during which you or a guardian ' +
+      'stop everything. They cannot reach your vault, because it needs two vault seeds and the copy on the phone is sealed behind your fingerprint.',
     ],
   ];
   /* the walk-through (page by page, the basics first, Kaspa last): [heading, what happens, why, stories to read in full] */
@@ -611,8 +653,8 @@
       [],
     ],
     [
-      'Your seed',
-      'Your recovery seed is 24 words written on paper. They are the only way to bring this wallet back on a new phone. Your vault has its own seed, which stays off this phone.',
+      'Your vault seeds',
+      'Your three vault seeds are words written on paper, and any two of them open your vault.',
       'Whoever holds the words holds the money, so they never go into a photo, a message or a website.',
       [3],
     ],
@@ -636,7 +678,7 @@
     ],
     [
       'Home',
-      'Your balance, what can still leave today on the spot, and five bars for the five rules on this account: limit, notice, stops, heir and vault. Tap a bar to change that rule. The log underneath shows what happened.',
+      'Your balance, what is still available immediately today, and five bars for the five rules on this account: limit, notice, stops, heir and vault. Tap a bar to change that rule. The log underneath shows what happened.',
       'Everything that guards your money is on this one screen. The account name at the top switches between your accounts.',
       [],
     ],
@@ -666,37 +708,50 @@
     ],
     [
       'The emergency stop and the vault',
-      'One red button moves everything in the account, pending withdrawals included, into your vault. No phone can pay out of the vault. Only your vault seed, kept on paper somewhere else, opens it again.',
-      'Why the vault is separate and offline: a thief with your phone cannot reach it, and neither can we.',
+      'One red button moves everything in the account, pending withdrawals included, into your vault. No phone can pay out of the vault. Only two of your ' +
+      'three vault seeds, typed from paper, open it again.',
+      'Why the vault is separate: a thief with your phone cannot reach it, and neither can we.',
       [2, 3],
     ],
     [
       'Three stops and guardians',
-      'Your emergency stop can exist as three copies: yours, one with a guardian you trust, one kept somewhere safe. Any one of them can stop the account. A guardian presses theirs for you when your phone is lost. Changing or removing them later means updating your rules.',
+      'Your emergency stop has up to three buttons: yours, and one each for up to two guardians you trust. Any one of them can stop the account, so a ' +
+      'guardian can press theirs when your phone is lost. Adding or removing a guardian changes your rules and ends with Update now.',
       'Why three: stopping must always be possible, and a stop can only ever move money into your vault, never out of it.',
       [4],
     ],
     [
       'People',
-      'Everyone linked to this account: guardians who hold a copy of your stop, your heir, trusted payees who are paid on the spot, and anyone you sponsor.',
+      'Two tabs. Your guardians shows who can stop this account and who is your heir; you add them by scanning their link code and share your watch code so ' +
+      'they can see the account. You guard shows the accounts you watch for others, and funds you received as heir.',
       'Each of them is a rule the network enforces, not a promise.',
       [4],
     ],
     [
-      'The heir after silence',
-      'You can name an heir. If the account hears nothing from you for the silence you set, your heir can take the money. Every payment you make, even a small one, starts the silence again. The emergency stop is stronger than the heir. Once the money is in your vault only the vault seed opens it, so a stop pressed in time keeps a false heir out too. Changing or removing them later means updating your rules.',
-      'Why silence, and why it resets: your money should not be lost with you, and while you are here it stays yours.',
+      'The heir after inactivity',
+      'You can name an heir. If the account hears nothing from you for the inactivity period you set, your heir can claim the money. Every payment you make, ' +
+      'even a small one, starts the inactivity period again. The emergency stop is stronger than the heir. Once the money is in your vault only the vault ' +
+      'seed opens it, so a stop pressed in time keeps a false heir out too. What an heir claims lands on their phone under Received as heir. Naming or ' +
+      'removing an heir changes your rules and ends with Update now.',
+      'Why inactivity, and why it resets: your money should not be lost with you, and while you are here it stays yours.',
       [],
     ],
     [
       'Settings',
-      'Money holds your covenant, your coins and your statement. Keys holds recovery, the guard and a second phone or tablet. Help holds this walk-through and what the words mean.',
-      'Everything is a dial, and every dial is on a screen you can reach.',
+      lazyText(function () {
+        return (
+          'Money holds your rules, your accounts, your coins and your statement. Keys holds ' +
+          keysHolds() +
+          '. Help holds this walk-through and what the words mean.'
+        );
+      }),
+      'Every rule can be adjusted from a screen in the app.',
       [],
     ],
     [
       'What we can and cannot promise',
-      'The rules were tested against the attacks we could think of: stolen phones, rushed payments, a lost stop. Everything is open source, so anyone can read the rules and test them. Nobody can return money that has left, and whoever holds both your sets of words holds everything.',
+      'The rules were tested against the attacks we could think of: stolen phones, rushed payments, a lost stop. Everything is open source, so anyone can ' +
+      'read the rules and test them. Nobody can return money that has left, and whoever holds your recovery seed and two of your vault seeds holds everything.',
       'Why we say it plainly: with money, a promise you cannot check is worth nothing.',
       [5],
     ],
@@ -707,7 +762,15 @@
       [],
     ],
   ];
-  /* the screen each step shows, as a small live copy of the real screen in Sample data; the five basics, the promise and Why Kaspa show none */
+  /* the rule shape each step shows in the scene behind it (scene.js modes); steps without one
+     keep the calm ribbon. No step draws a copy of a real screen: on the phone that copy held
+     the owner's real people and numbers (a guardian's name once showed in it) */
+  /* a step's shape: a mode, or a whole scene (the K seal tracing in = the logo locking in) */
+  var KSEAL = { mode: 'safe', mark: 'k', lift: 0.25 },
+    REDSTOP = { mode: 'stopped', k: 1, lift: 0.25 };
+  var STEP_SCENE = { 2: 'safe', 5: 'coin', 7: 'limit', 8: 'notice', 9: 'sending', 10: 'receiving',
+    11: REDSTOP, 12: 'stops', 13: 'people', 14: 'beat', 16: KSEAL, 17: KSEAL };
+  /* the screen each step talks about: the menu's explanation opens that step */
   var STEP_PEEK = {
     5: 'protection',
     6: 'home',
@@ -721,30 +784,6 @@
     14: 'people',
     15: 'settings',
   };
-  function peek(name) {
-    /* a non-interactive copy of a screen, scaled by .peek in style.css; data hooks run so lists and numbers fill */
-    var def = SCR[name];
-    if (!def) return null;
-    var wrap = document.createElement('div');
-    wrap.className = 'peek';
-    var el = document.createElement('section');
-    el.className = 'ui' + (def.tab ? ' tabbed' : '');
-    try {
-      el.innerHTML = def.html({});
-      glassify(el);
-    } catch (e) {
-      return null;
-    }
-    wrap.appendChild(el);
-    try {
-      if (def.after) def.after(el, {});
-    } catch (e) {}
-    try {
-      if (def.live) def.live(el, {});
-    } catch (e) {}
-    el.setAttribute('inert', '');
-    return wrap;
-  }
   function openStory(i) {
     var s = STORIES[i];
     if (!s) return;
@@ -789,7 +828,8 @@
     stops: {
       title: 'Emergency stop',
       what: 'A button that moves all your money into your vault at once.',
-      how: 'You hold one. People you trust, your guardians, can hold others, so someone can press it if you lose your phone.',
+      how:
+        'You hold button 1. Up to two guardians can hold buttons 2 and 3, so someone can press it if you lose your phone.',
       why: 'Once it is pressed, nobody can spend that money from a phone: not you, not a thief, not us.',
       mine: function (g) {
         return 'You have ' + g.stops + (g.stops === 1 ? ' button.' : ' buttons.');
@@ -797,8 +837,10 @@
     },
     heir: {
       title: 'Heir',
-      what: 'Someone who can claim this account if you go silent for a long time.',
-      how: 'Every payment you make restarts the clock. Your heir can only claim after the full silence has passed. An emergency stop puts the money in your vault, and nothing leaves a vault without its seed: not for a thief, not for your heir.',
+      what: 'Someone who can claim this account if you stop using it for a long time.',
+      how:
+        'Every payment you make restarts the clock. Your heir can only claim after the full inactivity period has passed. An emergency stop puts the money ' +
+        'in your vault, and nothing leaves the vault without two vault seeds: not for a thief, not for your heir.',
       why: 'Your money is not lost if something happens to you.',
       mine: function (g) {
         return g.heir ? 'You have named an heir.' : 'You have not named one. Tap the Heir bar on Home to name someone.';
@@ -807,7 +849,8 @@
     safe: {
       title: 'Vault',
       what: 'Where your money goes when an emergency stop is pressed.',
-      how: 'It opens only with your vault seed, kept on paper and never on this phone. With three seeds on paper, any two open it, so losing one is not a disaster.',
+      how:
+        'It opens only with two of your three vault seeds, typed from paper, so losing one is not a disaster.',
       why: 'A thief with your phone cannot reach it.',
       mine: function (g) {
         return g.sheets === 1 ? 'Yours opens with one seed.' : 'Yours has ' + g.sheets + ' seeds; any two open it.';
@@ -957,24 +1000,6 @@
     var c = colorMap()[id];
     return c && c.length === 3 ? c : null;
   }
-  function nameSheet(title, value, cb) {
-    openSheet(
-      '<div class="label">' +
-        esc(title) +
-        '</div><label class="field mt8"><span>Name</span><input data-nm value="' +
-        esc(value) +
-        '" maxlength="24"></label><button class="pill" data-save>Save</button><button class="ghost" data-no>Close</button>'
-    );
-    var inp = sheet.querySelector('[data-nm]');
-    inp.focus();
-    inp.select();
-    sheet.querySelector('[data-save]').onclick = function () {
-      var v = inp.value.trim();
-      if (!v) return;
-      ui.closeSheet();
-      cb(v);
-    };
-  }
   function accountSheet(id) {
     var s = D.state,
       cur =
@@ -1045,12 +1070,13 @@
   }
   /* the menu top right: the explanations and the settings live here, not on Home */
   function openMenu() {
+    if (ui.duress) return; /* the menu lists every other screen */
     var items = [
       ['explain', 'Explain this screen'],
       ['alerts', 'Alerts'],
       ['protection', 'Your rules'],
       ['howitworks', 'How it works'],
-      ['glossary', 'Library: crypto and Kaspa'],
+      ['glossary', 'Glossary'],
       ['settings', 'Settings'],
     ];
     openSheet(
@@ -1072,6 +1098,39 @@
       };
     });
   }
+  /* the heir dial: the named heir and the inactivity period, or a way to name one */
+  function heirDialBody(s) {
+    var body;
+    /* the named heir is the option here; nobody named yet means naming one first */
+    var hp = ui.people.filter(function (q) {
+      return q.role === 'Heir';
+    });
+    body = hp.length
+      ? '<div class="dial"><div class="h"><span>Your heir</span></div><span class="seg" data-seg>' +
+        hp
+          .map(function (q, i) {
+            return '<button data-v="' + i + '"' + (i === 0 ? ' class="on"' : '') + '>' +
+              esc(q.name) + '</button>';
+          })
+          .join('') +
+        '</span></div>' +
+        '<div class="dial"><div class="h"><span>Inactivity period before ' +
+        esc(hp[0].name) +
+        ' can claim it</span><b data-l>' +
+        (s.heir ? (s.heirMonths || 6) + ' months' : 'No heir') +
+        '</b></div><input type="range" aria-label="Months of inactivity" data-hr min="0" max="24" step="1" value="' +
+        (s.heir ? s.heirMonths || 6 : 0) +
+        '"><div class="custom"><input data-hnum inputmode="numeric" aria-label="Months of inactivity, any number" placeholder="Or type the ' +
+        'months"></div></div>' +
+        '<div class="sub">0 means no heir. Every payment you make restarts the inactivity period. After an emergency stop nothing can be taken from your ' +
+        'vault, not by your heir either: only your vault seed opens it.</div><button class="ghost" data-heir-add>Name someone else</button>'
+      : '<div class="line">You have not named an heir yet. Name one, and this bar sets the ' +
+        'inactivity period before they can claim.</div><div class="sub">An heir can claim what ' +
+        'is in this account if it hears nothing from you for the inactivity period you set. ' +
+        'Never from your vault: after an emergency stop only your vault seed opens it.</div>' +
+        '<button class="pill" data-heir-add>Name an heir</button>';
+    return body;
+  }
   function dialBody(key, s, g) {
     var body = '';
     if (key === 'limit')
@@ -1080,7 +1139,10 @@
         fmt(s.limit) +
         ' KAS</b></div><input type="range" aria-label="Daily limit" data-lr min="0" max="500" step="5" value="' +
         s.limit +
-        '"><div class="custom"><input data-lnum inputmode="decimal" aria-label="Daily limit, any amount" placeholder="Or type any amount"></div></div><div class="sub">Anything above it is a large payment: it waits the notice period and can be pulled back. At 0, every payment is a large payment.</div>';
+        '"><div class="custom"><input data-lnum inputmode="decimal" aria-label="Daily limit, any ' +
+          'amount" placeholder="Or type any amount"></div></div><div class="sub">Anything above ' +
+          'it is a large payment: it waits the notice period and can be stopped. At 0, every ' +
+          'payment is a large payment.</div>';
     else if (key === 'notice')
       body =
         timeDial('notice', Math.round(noticeOf(s) / 60) / 60) +
@@ -1098,29 +1160,8 @@
           })
           .join('') +
         '</span></div><div class="sub">A stop can only ever move money into your vault, never out of it. Guardians are named under People.</div>';
-    else if (key === 'heir') {
-      /* the named heir is the option here; nobody named yet means naming one first */
-      var hp = ui.people.filter(function (q) {
-        return q.role === 'Heir';
-      });
-      body = hp.length
-        ? '<div class="dial"><div class="h"><span>Your heir</span></div><span class="seg" data-seg>' +
-          hp
-            .map(function (q, i) {
-              return '<button data-v="' + i + '"' + (i === 0 ? ' class="on"' : '') + '>' + esc(q.name) + '</button>';
-            })
-            .join('') +
-          '</span></div>' +
-          '<div class="dial"><div class="h"><span>Silence before ' +
-          esc(hp[0].name) +
-          ' can take it</span><b data-l>' +
-          (s.heir ? (s.heirMonths || 6) + ' months' : 'No heir') +
-          '</b></div><input type="range" aria-label="Months of silence" data-hr min="0" max="24" step="1" value="' +
-          (s.heir ? s.heirMonths || 6 : 0) +
-          '"><div class="custom"><input data-hnum inputmode="numeric" aria-label="Months of silence, any number" placeholder="Or type the months"></div></div>' +
-          '<div class="sub">0 means no heir. Every payment you make restarts the silence. After an emergency stop nothing can be taken from your vault, not by your heir either: only your vault seed opens it.</div><button class="ghost" data-heir-add>Name someone else</button>'
-        : '<div class="line">You have not named an heir yet. Name one, and this bar sets how long a silence they wait.</div><div class="sub">An heir can take what is in this account if it hears nothing from you for the silence you set. Never from your vault: after an emergency stop only your vault seed opens it.</div><button class="pill" data-heir-add>Name an heir</button>';
-    } else if (key === 'safe')
+    else if (key === 'heir') body = heirDialBody(s);
+    else if (key === 'safe')
       body =
         '<div class="dial"><div class="h"><span>How your vault opens</span></div><span class="seg" data-seg>' +
         [
@@ -1131,7 +1172,8 @@
             return '<button data-v="' + o[0] + '"' + (o[0] === (g.sheets || 1) ? ' class="on"' : '') + '>' + o[1] + '</button>';
           })
           .join('') +
-        '</span></div><div class="sub">Three seeds on paper, any two open the vault: losing one is not a disaster.</div>';
+        '</span></div><div class="sub">Three seeds on paper; any two open the vault, so one can ' +
+          'be lost safely.</div>';
     return body;
   }
   function wireDialInputs(lr, ln, hr, hn, limitV, heirV, root) {
@@ -1180,7 +1222,8 @@
             : key === 'heir'
               ? hv === 0
                 ? 'Remove ' + heirName + ' as your heir'
-                : 'Set the silence before ' + heirName + ' can take it to ' + hv + (hv === 1 ? ' month' : ' months')
+                : 'Set the inactivity period before ' + heirName + ' can claim it to ' + hv +
+                  (hv === 1 ? ' month' : ' months')
               : 'Open your vault with ' + (value === 1 ? 'one seed' : 'any two of three seeds');
     if (preOpen) {
       if (key === 'limit') ui.liveRules.limit = limitV();
@@ -1276,7 +1319,7 @@
       };
   }
   /* the heir, the guardians (stop keys) and every rule live inside the coin on the network and cannot be edited in place.
-     The only change is updating the rules: the money moves under the new ones. Up to the daily limit goes on the spot,
+     The only change is updating the rules: the money moves under the new ones. Up to the daily limit moves immediately,
      the rest waits the notice period (a withdrawal above the limit), or the emergency stop and then out of the vault. Every path that used to
      edit a rule or a person in place ends here. Sample fakes the move. */
   /* on this phone a rules change is edited first on one screen (changerules), then confirmed once on a short sheet: the changes in plain
@@ -1335,12 +1378,12 @@
   }
   function heirWaitDial(m) {
     return (
-      '<div class="dial"><div class="h"><span>Silence before your heir can take it</span><b data-l>' +
+      '<div class="dial"><div class="h"><span>Inactivity period before your heir can claim it</span><b data-l>' +
       monthsOf(m) +
-      '</b></div><input type="range" aria-label="Months of silence" data-hr min="1" max="24" step="1" value="' +
+      '</b></div><input type="range" aria-label="Months of inactivity" data-hr min="1" max="24" step="1" value="' +
       m +
-      '"><div class="custom"><input data-hnum inputmode="numeric" aria-label="Months of silence, any number" placeholder="Or type the months"></div></div>' +
-      '<div class="sub">Every payment you make restarts the silence.</div>'
+      '"><div class="custom"><input data-hnum inputmode="numeric" aria-label="Months of inactivity, any number" placeholder="Or type the months"></div></div>' +
+      '<div class="sub">Every payment you make restarts the inactivity period.</div>'
     );
   }
   function changeRulesHtml(p) {
@@ -1412,37 +1455,43 @@
     setText(el, '[data-e]', '');
     D.changeRules(ch.dials).then(function (r) {
       rv.disabled = false;
-      openSheet(reviewSheetHtml(ch.lines, r || {}));
-      wireFold(sheet);
-      var st = sheet.querySelector('[data-start]');
-      if (st)
-        st.onclick = function () {
-          rulesSlide(st, r);
-        };
-      var nw = sheet.querySelector('[data-now]');
-      if (nw)
-        nw.onclick = function () {
-          nowSlide(nw);
-        };
+      rulesReviewSheet(ch.lines, r || {});
     });
   }
+  /* the review sheet after rules.change (dials, guardians, heir): the slide that moves the money, or Update now */
+  function rulesReviewSheet(lines, r, paper) {
+    openSheet(reviewSheetHtml(lines, r));
+    wireFold(sheet);
+    var st = sheet.querySelector('[data-start]');
+    if (st)
+      st.onclick = function () {
+        rulesSlide(st, r);
+      };
+    var nw = sheet.querySelector('[data-now]');
+    if (nw)
+      nw.onclick = function () {
+        nowSlide(nw, paper);
+      };
+  }
   /* the instant route: one slide, then "Updating your rules..." runs stop, take-out and reopen (D.updateNow) */
-  function nowSlide(btn) {
-    armSlide(btn, 'Update now', 'Your money stays yours, on the same keys.', false, 'Slide to update', 'send', function () {
+  function nowSlide(btn, paper) {
+    armSlide(btn, 'Update now', 'Your funds stay under your control throughout.', false,
+      'Slide to update', 'send', function () {
       ui.closeSheet();
-      go('waiting', { job: 'rules', now: true }, { replace: true });
+      go('waiting', { job: 'rules', now: true, paper: !!paper }, { replace: true });
     });
   }
   /* the slide on the review sheet: 'move' pays the purse, then 'now' finishes at once and 'notice' waits on Home; 'open' finishes straight away */
   function rulesSlide(btn, r) {
-    armSlide(btn, 'Update my rules', 'Your money stays yours, on the same keys.', false, 'Slide to update', 'send', function () {
+    armSlide(btn, 'Update my rules', 'Your funds stay under your control throughout.', false,
+      'Slide to update', 'send', function () {
       if (r.route === 'open') {
         ui.closeSheet();
         return go('waiting', { job: 'rules' }, { replace: true });
       }
       D.moveRules(r).then(function (x) {
         if (!x.ok) {
-          setText(sheet, '[data-serr]', x.error || 'That did not go through. Nothing has moved.');
+          setText(sheet, '[data-serr]', x.error || 'The action failed. No funds were moved.');
           resetSlide(sheet);
           return;
         }
@@ -1455,7 +1504,7 @@
   /* the step line under "Updating your rules...": plain words per step, or the engine's own words while it waits */
   var RULE_STEPS = {
     finish: 'Finishing the payment to your purse.',
-    stop: 'Your money is going to your safe.',
+    stop: 'Moving your funds to your vault.',
     takeout: 'Bringing it back to your purse.',
     fund: 'Opening your account under your new rules.',
   };
@@ -1466,7 +1515,8 @@
   }
   /* Home's one button while a rule change is ready to finish */
   function rulesFinishSlide(btn) {
-    armSlide(btn, 'Finish updating my rules', 'Your money stays yours, on the same keys.', false, 'Slide to finish', 'send', function () {
+    armSlide(btn, 'Finish updating my rules', 'Your funds stay under your control throughout.',
+      false, 'Slide to finish', 'send', function () {
       go('waiting', { job: 'rules' }, {});
     });
   }
@@ -1519,11 +1569,13 @@
       '<button class="ghost" data-no>Not now</button>' +
       fold(
         (now
-          ? '<div class="sub">Update now stops your account: your money goes to your safe, comes straight back to your purse and opens again under the new rules.</div>'
+          ? '<div class="sub">Updating now briefly stops your account: funds move to your vault, ' +
+            'return to your purse, and reopen under the new rules.</div>'
           : '') +
-        '<div class="sub">The network holds your rules with your money, so your money passes through your purse and comes back under the new rules, on the same keys.</div>' +
-          '<div class="sub">1 KAS always stays in your safe; you can take it out any time.</div>' +
-          (r.fee_kas == null ? '' : '<div class="sub">The payment and the safe step cost ' + (+r.fee_kas).toFixed(4) + ' KAS.</div>')
+        '<div class="sub">Your rules are stored with your funds, so an update moves them through your purse and back under the new rules.</div>' +
+          '<div class="sub">1 KAS remains in your vault; you can withdraw it at any time.</div>' +
+          (r.fee_kas == null ? '' : '<div class="sub">Fees for this update: ' +
+            (+r.fee_kas).toFixed(4) + ' KAS.</div>')
       )
     );
   }
@@ -1541,21 +1593,587 @@
     openSheet(
       '<div class="label">' +
         title +
-        '</div><div class="line mt8">These are part of your keys. To change them, start fresh keys (Settings &gt; Keys).</div>' +
-        '<button class="pill" data-fresh>Start fresh keys</button><button class="ghost" data-no>Close</button>'
-    );
-    sheet.querySelector('[data-fresh]').onclick = function () {
-      ui.closeSheet();
-      go('resetkeys', {});
-    };
+        '</div><div class="line mt8">These are part of your keys and cannot be changed on their own.</div>' +
+        '<button class="pill" data-no>Close</button>'
+    ); /* never a way to replace keys from here (the owner's call: not on the main pages at all) */
   }
   /* the heir on this phone's keys (engine heir.set, keyless): a kaspa: address; refused in the engine's words while any account is open or holds money */
+  /* ---- guardians and heirs on this phone (docs/PEOPLE_SCREENS.md). The owner's helpers come from the rule block
+     (keys.public): stop buttons 2 and 3 when they are not button 1, and the heir. Names live in setting helper_names. ---- */
+  /* Who holds stop slot k ('cancel2_x' / 'cancel3_x'): 'you' | 'unheld' | 'guardian'. keys.public
+     answers it per slot
+     (stops: [{which, holder}]); a key set made before that list answers 'unknown', and an older
+     engine nothing: then a
+     slot repeating stop 1 is yours, and any other is a guardian only when a link the owner applied
+     named it in
+     helper_names (phone setup fills the slots with keys nobody holds, since the rule block needs
+     five different keys). */
+  function slotHolder(k) {
+    var pb = ui.pub || {},
+      x = pb[k],
+      which = k === 'cancel3_x' ? 3 : 2,
+      s = (ui.stops || []).filter(function (t) {
+        return t && t.which === which;
+      })[0];
+    if (s && /^(you|unheld|guardian|paper)$/.test(s.holder)) return s.holder;
+    if (!x || x === pb.cancel_x) return 'you';
+    return Object.prototype.hasOwnProperty.call(D.helperNames(), x) ? 'guardian' : 'unheld';
+  }
+  function helperRows() {
+    if (!D.isLocal()) return D.state.helpers || []; /* Sample: demo.js rows in this same shape */
+    var pb = ui.pub || {},
+      names = D.helperNames(),
+      out = [];
+    [
+      ['cancel2_x', 2],
+      ['cancel3_x', 3],
+    ].forEach(function (k) {
+      var x = pb[k[0]];
+      if (slotHolder(k[0]) === 'unheld')
+        out.push({
+          role: 'unused',
+          which: k[1],
+          name: 'Emergency Stop ' + k[1],
+          what: 'Not in use. Add a guardian to give it to someone you trust.',
+        });
+      else if (slotHolder(k[0]) === 'guardian')
+        out.push({
+          role: 'guardian',
+          which: k[1],
+          name: names[x] || 'Someone',
+          what: 'Guardian. Holds Emergency Stop ' + k[1] +
+            '. A stop only ever sends your money to your own vault.',
+        });
+      else if (slotHolder(k[0]) === 'paper') out.push(paperRow(k[1]));
+    });
+    var hk = pb.heir_x || pb.heir_address;
+    if (hk)
+      out.push({
+        role: 'heir',
+        name: names[pb.heir_x] || names[pb.heir_address] || 'Someone',
+        what: 'Heir. After ' + heirSilence() +
+          ' with no payment from you, they can claim what is in your account.',
+      });
+    return out;
+  }
+  /* Your rules > Who hears: each real guardian and heir, one plain row (their alerts are set on
+     their own phone, so no switch here); Sample keeps its made-up guardian Sam */
+  function hearRows() {
+    if (!D.isLive()) return toggleRow('alert_sam', 'Sam', 'Guardian');
+    return helperRows()
+      .filter(function (h) {
+        return h.role === 'guardian' || h.role === 'heir';
+      })
+      .map(function (h) {
+        var role = h.role === 'heir' ? 'Heir' : 'Guardian';
+        return '<div class="item"><span><span class="t">' + esc(h.name) +
+          '</span><span class="d">' + role + '. Hears on their own phone.</span></span></div>';
+      })
+      .join('');
+  }
+  /* Your rules: who holds each stop button, and who the heir is, in one line each */
+  function rulesWho() {
+    var stops = ['Button 1: you.'],
+      heir = '';
+    helperRows().forEach(function (h) {
+      if (h.role === 'guardian') stops.push('Button ' + h.which + ': ' + h.name + '.');
+      else if (h.role === 'paper') stops.push('Button ' + h.which + ': your paper stop.');
+      else if (h.role === 'heir') heir = h.name;
+    });
+    return { stops: stops.join(' '), heir: heir };
+  }
+  function paintRulesWho(el) {
+    var w = rulesWho();
+    setText(el, '[data-whostops]', w.stops);
+    setText(el, '[data-whoheir]', w.heir ? w.heir + ' can claim after the inactivity period.' : '');
+  }
+  function wireRulesWho(el) {
+    paintRulesWho(el);
+    if (D.isLocal())
+      D.keysPublic().then(function (r) {
+        if (!r || !r.ok) return;
+        ui.pub = r.public || {};
+        ui.stops = r.stops || null;
+        paintRulesWho(el);
+      });
+  }
+  /* Settings > Guardians: the real list (keys.public stops + names), read-only */
+  var GUARD_WARN =
+    "Changing a guardian or your heir changes your account's rules. It takes a rules update, " +
+    'which moves your funds into a new account, at once or after your notice period. Anyone ' +
+    'you remove can no longer stop it or claim it.';
+  function guardiansPaint(el) {
+    var rows = helperRows()
+      .map(function (h) {
+        return '<div class="item"><span><span class="t">' + esc(h.name) +
+          '</span><span class="d">' + esc(h.what) + '</span></span></div>';
+      })
+      .join('');
+    setHtml(el, '[data-gl]', rows || '<div class="sub">' + (D.isLocal() && !ui.pub ?
+      'Loading\u2026' : 'No guardians yet.') + '</div>');
+  }
+  function guardiansWarn() {
+    openSheet(
+      '<div class="label">Change guardians or heir</div><div class="line mt8">' + esc(GUARD_WARN) +
+        '</div><button class="pill mt8" data-yes>Go to People</button>' +
+        '<button class="ghost" data-no>Cancel</button>'
+    );
+    sheet.querySelector('[data-yes]').onclick = function () {
+      ui.closeSheet();
+      go('people', {}, { root: true });
+    };
+  }
+  function helperWord(h) {
+    if (h.role === 'guardian') return 'Guardian';
+    if (h.role === 'paper') return 'Emergency Stop ' + h.which;
+    return h.role === 'unused' ? 'Not in use' : 'Heir';
+  }
+  /* the paper stop's row: never "Not in use", never a guardian with Remove */
+  function paperRow(which) {
+    return {
+      role: 'paper',
+      which: which,
+      name: 'Paper stop',
+      what:
+        'Emergency Stop ' + which + ', written on paper as 24 words. ' +
+        'A stop only ever sends your money to your own vault.',
+    };
+  }
+  function heirSilence() {
+    var hs = D.state.heirDelaySeconds;
+    return hs ? dur(hs) : 'the inactivity period set on your account';
+  }
+  /* People, left column: one short row per helper (name, role); a tap opens the details and Remove */
+  function helperRowsHtml() {
+    var rows = helperRows()
+      .map(function (h, i) {
+        return (
+          '<button class="item" data-hi="' +
+          i +
+          '"><span><span class="t">' +
+          esc(h.name) +
+          '</span><span class="d' +
+          (h.role === 'guardian' || h.role === 'heir' ? ' role' : '') +
+          '">' +
+          helperWord(h) +
+          '</span></span></button>'
+        );
+      })
+      .join('');
+    return (rows || '<div class="sub">None yet.</div>') + (D.state.peopleNext ? '<div class="sub">Change pending: update your rules to apply it.</div>' : '');
+  }
+  function openHelperSheet(h) {
+    if (!h) return;
+    var head = '<div class="label">' + esc(h.name) + '</div><div class="line mt8">' + esc(h.what) +
+      '</div>';
+    if (h.role === 'unused' || h.role === 'paper')
+      return openSheet(head + '<button class="ghost" data-no>Close</button>');
+    openSheet(
+      '<div class="label">' + esc(h.name) + '</div><div class="line mt8">' + esc(h.what) + '</div><button class="ghost" data-hrm>Remove</button><button class="ghost" data-no>Close</button>'
+    );
+    sheet.querySelector('[data-hrm]').onclick = function () {
+      removeHelper(h);
+    };
+  }
+  /* People, right column: one short row per guarded account */
+  function watchedShortHtml(onlyHot) {
+    return watchedList()
+      .filter(function (w) {
+        var st = w.st || {};
+        return !onlyHot || st.stage === 'waiting' || st.can_claim;
+      })
+      .map(function (w) {
+        var st = w.st || {},
+          hot = st.stage === 'waiting',
+          word = hot ? 'Withdrawal waiting' : st.can_claim ? 'Ready to claim' : '';
+        if (!word && st.stage === 'stopped') word = 'Stopped. Ask the owner for a new watch code.';
+        else if (!word && st.stage === 'closed') word = 'Stopped';
+        if (!word && st.kas != null) word = fmt(st.kas) + ' KAS';
+        return (
+          '<button class="item' +
+          (hot ? ' hot' : '') +
+          '" data-go="watched" data-params="' +
+          esc(JSON.stringify({ id: w.id })) +
+          '"><span><span class="t">' +
+          esc(w.name || 'Someone') +
+          '</span><span class="d role">' +
+          esc(rolesShort(w.roles)) +
+          '</span><span class="d">' +
+          esc(word) +
+          '</span></span></button>'
+        );
+      })
+      .join('');
+  }
+  function watchedLine(w) {
+    var st = w.st;
+    if (!st) return 'Reading the account…';
+    if (st.stage === 'waiting' && st.pending)
+      return 'A withdrawal of ' + fmt(st.pending.kas) + ' KAS is waiting. It goes through in ' + dur(st.pending.ends_in_seconds) + '.';
+    if (st.stage === 'stopped')
+      return 'This account was closed. If ' + (w.name || 'the owner') +
+        ' changed their rules, the money is in their new account: ask them for a new watch code.';
+    if (st.stage === 'closed')
+      return 'This account was closed. Ask the owner for a new watch code.';
+    var l = fmt(st.kas) + ' KAS\nNothing waiting.';
+    if (st.can_claim) return l + '\nThe inactivity period has run out: you can claim it.';
+    if (!(w.roles && w.roles.heir && st.heir_seconds_left != null)) return l;
+    /* the phone's count ran out but the network has not caught up yet: never "0 seconds left" */
+    var almost =
+      '\nAlmost ready: the inactivity period ends in a few minutes, then you can claim it.';
+    if (st.heir_seconds_left <= 0) return l + almost;
+    return l + '\nHeir Unlock: ' + dur(st.heir_seconds_left) + ' left.';
+  }
+  /* the short role line on a watched row, in the role colour */
+  function rolesShort(r) {
+    var g = r && r.guardian,
+      h = r && r.heir;
+    return [g ? 'Guardian' : '', h ? 'Heir' : ''].filter(Boolean).join(', ');
+  }
+  function rolesWord(r) {
+    var g = r && r.guardian,
+      h = r && r.heir;
+    if (g && h) return 'You are their guardian (Emergency Stop ' + g + ') and their heir.';
+    if (g) return 'You are their guardian (Emergency Stop ' + g + ').';
+    return h ? 'You are their heir.' : 'View only.';
+  }
+  function watchedList() {
+    return D.state.watched || []; /* Sample: demo.js rows */
+  }
+  function watchedName(w) {
+    return (w && w.name ? w.name : 'Someone') + '’s account';
+  }
+  /* Home's rows for the accounts this phone helps: folded to the name, the role and one line
+     (read more only if you want); a tap opens the whole status and its button. A row with
+     something waiting (a withdrawal, a claim) is always open */
+  function watchedRowsHtml(onlyHot) {
+    ui.wOpen = ui.wOpen || {};
+    return watchedList()
+      .map(function (w) {
+        var st = w.st || {},
+          hot = st.stage === 'waiting',
+          open = hot || st.can_claim || ui.wOpen[w.id],
+          act = hot && st.can_stop ? 'Stop' : st.can_claim ? 'Claim' : 'Open',
+          lines = watchedLine(w);
+        if (onlyHot && !(hot || st.can_claim)) return '';
+        return (
+          '<div class="item' + (hot ? ' hot' : '') + '"><button class="rowmain" data-wx="' +
+          esc(w.id) + '" aria-expanded="' + !!open + '"><span><span class="t">' +
+          esc(watchedName(w)) + '</span><span class="d role">' + esc(rolesShort(w.roles)) +
+          '</span><span class="d lines">' +
+          esc(open ? lines : lines.split('\n')[0]) + '</span></span></button>' +
+          (open ? '<button class="r go" data-go="watched" data-params="' +
+            esc(JSON.stringify({ id: w.id })) + '">' + act + '</button>' : '') + '</div>'
+        );
+      })
+      .join('');
+  }
+  /* You guard: what a claim paid to this phone's heir address (heir.purse), shown only when there
+     is something */
+  function heirPurseRowHtml() {
+    var h = ui.heirPurse;
+    if (!h || !(h.kas > 0)) return '';
+    return (
+      '<div class="label mt20">Received as heir</div><div class="list"><button class="item" data-go="heirpurse"><span><span class="t">' +
+      fmt(h.kas) +
+      ' KAS</span><span class="d">Funds you claimed. Tap to send them on.</span></span></button></div>'
+    );
+  }
+  function peopleLiveHtml() {
+    return (
+      '<div class="top"><span class="label">People</span>' +
+      tag() +
+      menuBtn() +
+      '</div><div class="treegap short"></div>' +
+      '<div class="label mt20">Your guardians and heir</div><div data-helpfold></div><div class="list" data-helpers></div>' +
+      '<button class="door" data-addhelper>+ Add a guardian or heir</button>' +
+      '<button class="ghost" data-go="watchcode">Share watch code</button>' +
+      '<div class="label mt20">People you protect</div><div data-protfold></div><div class="list" data-helped></div>' +
+      '<button class="door" data-addwatch>+ Protect someone</button><div data-heirpurse></div>'
+    );
+  }
+  function wirePeopleLive(el) {
+    ui.pub = ui.pub || null;
+    if (D.isLocal()) {
+      /* Sample has no engine to ask; its rows come from demo.js */
+      D.keysPublic().then(function (r) {
+        if (r && r.ok) {
+          ui.pub = r.public || {};
+          ui.stops = r.stops || null;
+        }
+        refresh();
+      });
+      D.heirPurse().then(function (r) {
+        ui.heirPurse = r && r.ok ? r : null;
+        refresh();
+      });
+    }
+    D.loadWatched();
+    el.querySelector('[data-addhelper]').onclick = scanLink;
+    el.querySelector('[data-addwatch]').onclick = function () {
+      go('linkcode', { guide: true });
+    };
+    el.querySelector('[data-helpers]').addEventListener('click', function (e) {
+      var b = e.target.closest('[data-hi]');
+      if (b) openHelperSheet(helperRows()[+b.dataset.hi]);
+    });
+  }
+  /* People folds each list to one line (names and roles; the count); with nobody yet the list
+     and its door show as before. Share watch code always shows */
+  function helperSummary(rows) {
+    var by = {},
+      order = [];
+    rows.forEach(function (h) {
+      var w = h.role === 'guardian' ? 'Guardian' : h.role === 'heir' ? 'Heir' : '';
+      if (!by[h.name]) {
+        by[h.name] = [];
+        order.push(h.name);
+      }
+      if (w && by[h.name].indexOf(w) < 0) by[h.name].push(w);
+    });
+    return order.map(function (nm) {
+      return by[nm].length ? nm + ': ' + by[nm].join(', ') : nm;
+    }).join(' \u00b7 ') + (D.state.peopleNext ? ' \u00b7 Change pending' : '');
+  }
+  function livePeopleLive(el) {
+    var ready = ui.pub || !D.isLocal(),
+      rows = ready ? helperRows().filter(function (h) {
+        return h.role !== 'unused';
+      }) : [],
+      oh = !rows.length || foldOpen('helpers'),
+      w = watchedList(),
+      ow = !w.length || foldOpen('protect');
+    setHtml(el, '[data-helpfold]', rows.length ? foldHead('helpers', esc(helperSummary(rows))) : '');
+    el.querySelector('[data-helpers]').hidden = !oh;
+    el.querySelector('[data-addhelper]').hidden = !oh;
+    setHtml(el, '[data-helpers]', ready ? helperRowsHtml() : '<div class="sub">Loading…</div>');
+    setHtml(el, '[data-protfold]', w.length ? foldHead('protect', esc(w.length + (w.length === 1 ? ' account: ' : ' accounts: ') +
+      w.map(function (x) {
+        return x.name || 'Someone';
+      }).join(', '))) : '');
+    setHtml(el, '[data-helped]', w.length ? watchedShortHtml(!ow) : '<div class="sub">None yet.</div>');
+    el.querySelector('[data-addwatch]').hidden = !ow;
+    setHtml(el, '[data-heirpurse]', heirPurseRowHtml());
+  }
+  function scanSays(title, err) {
+    openSheet('<div class="label">' + esc(title) + '</div><div class="err mt8">' + esc(err) + '</div><button class="ghost" data-no>Close</button>');
+  }
+  /* the owner scans a helper's link code (link.read), then picks each role */
+  /* the guided add (People's first door): 1 you scan their link code, 2 you choose their
+     role and Update now, 3 you show your watch code (ui.guide holds their name until then) */
+  function scanLink() {
+    ui.guide = null;
+    ui.onScan = function (text) {
+      back();
+      D.readLink(text).then(function (r) {
+        if (!r.ok) return scanSays('Link code', r.error || 'That is not a link code.');
+        openPickRoles(r);
+      });
+    };
+    go('scan', { what: 'answer', step: 'Step 1 of 3 \u00b7 You scan', head: 'Scan their code',
+      say: 'Ask them to tap Protect someone. Point your camera at the code on their phone.' });
+  }
+  /* the button a new guardian takes: one nobody holds first, then the paper stop's,
+     then a guardian's (2 on a tie) */
+  function guardianSlot() {
+    var rank = { paper: 1, guardian: 2 },
+      r2 = rank[slotHolder('cancel2_x')] || 0,
+      r3 = rank[slotHolder('cancel3_x')] || 0;
+    return r3 < r2 ? 3 : 2;
+  }
+  function slotNote(which) {
+    var h = slotHolder(which === 3 ? 'cancel3_x' : 'cancel2_x');
+    if (h === 'paper') return ', in place of your paper stop';
+    return h === 'guardian' ? ', in place of who holds it now' : '';
+  }
+  function openPickRoles(r) {
+    var pb = ui.pub || {},
+      al = r.already || {},
+      which = al.guardian || guardianSlot(),
+      on = { g: !al.guardian, h: !al.heir };
+    if (al.guardian && al.heir) return scanSays(r.name, r.name + ' is already your guardian and your heir.');
+    function item(k, t, d) {
+      if (k === 'g' ? al.guardian : al.heir) return '<div class="item"><span><span class="t">' + t + '</span><span class="d">Already.</span></span></div>';
+      return (
+        '<button class="item on" data-role="' + k + '"><span><span class="t">' + t + '</span><span class="d">' + d + '</span></span><span class="r go" data-yes>Yes</span></button>'
+      );
+    }
+    openSheet(
+      '<div class="label">Step 2 of 3 \u00b7 You choose</div><div class="line mt8">Tap to choose what ' +
+        esc(r.name) +
+        ' can be.</div><div class="list">' +
+        item(
+          'g',
+          'Your guardian',
+          'Holds Emergency Stop ' + which + slotNote(which) +
+            '. A stop only ever sends your money to your own vault.'
+        ) +
+        item(
+          'h',
+          'Your heir',
+          'After ' + esc(heirSilence()) +
+            ' with no payment from you, they can claim what is in your account.' +
+            (pb.heir_x || pb.heir_address ? ' In place of your heir now.' : '')
+        ) +
+        '</div><div class="err" data-pe></div><button class="pill" data-pok>Review the change</button><button class="ghost" data-no>Not now</button>'
+    );
+    [].forEach.call(sheet.querySelectorAll('[data-role]'), function (b) {
+      b.onclick = function () {
+        on[b.dataset.role] = !on[b.dataset.role];
+        b.classList.toggle('on', on[b.dataset.role]);
+        b.querySelector('[data-yes]').textContent = on[b.dataset.role] ? 'Yes' : 'No';
+      };
+    });
+    sheet.querySelector('[data-pok]').onclick = function () {
+      if (!on.g && !on.h) return setText(sheet, '[data-pe]', 'Choose at least one.');
+      var a = {},
+        lines = [];
+      if (on.g) {
+        a.guardian_x = r.stop_x;
+        a.guardian_which = which;
+        D.nameHelper(r.stop_x, r.name || 'Guardian');
+        lines.push(r.name + ' becomes your guardian (Emergency Stop ' + which + ').');
+      }
+      if (on.h) {
+        a.heir_x = r.heir_x;
+        D.nameHelper(r.heir_x, r.name);
+        lines.push(r.name + ' becomes your heir.');
+      }
+      ui.guide = r.name || 'them';
+      peopleChange(lines, a);
+    };
+  }
+  function removeHelper(h) {
+    if (!h) return;
+    var g = h.role === 'guardian';
+    confirmAction(
+      'Remove ' + h.name,
+      g ? 'Their copy of Emergency Stop ' + h.which + ' stops working.' :
+        'They can no longer claim your account after the inactivity period.'
+    ).then(function (yes) {
+      if (!yes) return;
+      peopleChange(
+        [h.name + (g ? ' is no longer your guardian.' : ' is no longer your heir.')],
+        g ? { guardian_x: '', guardian_which: h.which } : { heir_x: '' }
+      );
+    });
+  }
+  /* a guardian or heir lives in the rules: rules.change stores it, then the usual review sheet and Update now */
+  function peopleChange(lines, args) {
+    D.changeRules(args).then(function (r) {
+      rulesReviewSheet(lines, r || {});
+    });
+  }
+  /* the helper scans an owner's watch code (watch.import) */
+  function scanWatch() {
+    ui.onScan = function (text) {
+      back();
+      D.watchImport(text).then(function (r) {
+        if (!r.ok) return scanSays('Watch code', r.error || 'That is not a watch code.');
+        haptic();
+        D.addHistory('Now watching ' + watchedName(r) + '. ' + rolesWord(r.roles), 'people');
+        go('watched', { id: r.id }, { root: true });
+        protectDone(r);
+      });
+    };
+    go('scan', { what: 'answer', step: 'Step 2 of 3 \u00b7 You scan',
+      head: 'They are choosing your role',
+      say: 'When they have saved it, their phone shows a code. Point your camera at it.' });
+  }
+  /* the helper's last step: what they can do now, in plain words */
+  function protectDone(r) {
+    var who = r.name || 'them',
+      g = r.roles && r.roles.guardian,
+      h = r.roles && r.roles.heir;
+    openSheet(
+      '<div class="label">Done</div><div class="line mt8">You now protect ' + esc(who) + '. ' +
+        esc(rolesWord(r.roles)) + '</div>' +
+        (g ? '<div class="sub mt8">Guardian: if their phone is lost or taken, you can press ' +
+          'emergency stop button ' + esc(String(g)) + '.</div>' : '') +
+        (h ? '<div class="sub mt8">Heir: if they stop using their account for the inactivity ' +
+          'period, you can claim it.</div>' : '') +
+        '<div class="sub mt8">You can see their account here. You cannot move their funds.</div>' +
+        '<button class="pill" data-no>See ' + esc(watchedName(r)) + '</button>'
+    );
+  }
+  function wordsHtml(w) {
+    return (
+      '<div class="words">' +
+      w
+        .map(function (x, i) {
+          return '<div><i>' + (i + 1) + '</i>' + esc(x) + '</div>';
+        })
+        .join('') +
+      '</div>'
+    );
+  }
+  /* the helper's first link code: a name, one finger, then the heir sheet */
+  function openMakeLink(el) {
+    openSheet(
+      '<div class="label">Your link code</div><div class="line mt8">It lets someone make you their guardian, their heir, or both. Nothing in it is secret, so it is safe to show.</div>' +
+        '<div class="sub">This phone makes two new keys for it and keeps them in its safe store. The heir key also goes on paper as your heir seed: 24 ' +
+        'words. If this phone is lost, that seed is the only way to claim.</div>' +
+        '<label class="field"><span>Your name, as they will see it</span><input data-ln maxlength="40"></label><div class="err" data-le></div>' +
+        '<button class="pill" data-lok>Make my link code</button><button class="ghost" data-no>Not now</button>'
+    );
+    var b = sheet.querySelector('[data-lok]');
+    b.onclick = function () {
+      var v = sheet.querySelector('[data-ln]').value.trim();
+      if (!v) return setText(sheet, '[data-le]', 'Type your name.');
+      b.disabled = true;
+      D.makeLink(v).then(function (r) {
+        b.disabled = false;
+        if (!r.ok) return setText(sheet, '[data-le]', r.error || 'The link code could not be made.');
+        ui.closeSheet();
+        ui.heirWords = r.heir_words || null;
+        go('heirsheet', { first: true }, { replace: true });
+      });
+    };
+    if (el) setText(el, '[data-e]', '');
+  }
+  /* the watched account's buttons: Stop and Send it back (guardian), Claim (heir) */
+  function watchedButtons(w) {
+    var st = (w && w.st) || {},
+      b = '';
+    if (st.can_stop && st.stage === 'waiting') b += '<button class="pill" data-wd>Send the withdrawal back</button>';
+    if (st.can_stop) b += '<button class="pill danger" data-ws>Stop their account</button>';
+    if (st.can_claim) b += '<button class="pill" data-wc>Claim it</button>';
+    return b;
+  }
+  function watchedMove(el, btn, w, kind) {
+    var M = {
+      ws: ['Stop ' + watchedName(w),
+        'Their money goes to their own vault. Only they can open it again.', true, 'Slide to stop',
+        'stop', 'watchStop'],
+      wd: ['Send the withdrawal back', 'The waiting withdrawal goes back into their account.', false, 'Slide to send it back', 'send', 'watchDecline'],
+      wc: ['Claim ' + watchedName(w), 'Everything in it comes to you.', false, 'Slide to claim', 'send', 'watchClaim'],
+    }[kind];
+    armSlide(btn, M[0], M[1], M[2], M[3], M[4], function () {
+      D[M[5]](w.id).then(function (r) {
+        if (!r.ok) {
+          setText(el, '[data-e]', r.error || 'The action failed. No funds were moved.');
+          resetSlide(el);
+          return;
+        }
+        haptic();
+        D.addHistory(M[0] + ': done.', 'people');
+        openSheet('<div class="label">' + esc(M[0]) +
+          '</div><div class="line mt8">Submitted. It will show on the account shortly.</div>' +
+            '<button class="ghost" data-no>Close</button>');
+      });
+    });
+  }
   function openHeirSheet() {
+    if (D.isLocal()) {
+      if (ui.closeSheet) ui.closeSheet();
+      return go('people', {});
+    } /* on the phone the heir comes from a link code (People) */
     var has = !!D.state.heir;
     openSheet(
       '<div class="label">' +
         (has ? 'Change the heir' : 'Name an heir') +
-        '</div><div class="line mt8">Your heir can take what is in an account after it hears nothing from you for the silence set on it. Never what is in your vault.</div>' +
+        '</div><div class="line mt8">Your heir can claim what is in an account after it hears nothing from you for the inactivity period set on it. Never ' +
+        'what is in your vault.</div>' +
         '<div class="sub">Your heir can be changed while no account holds money.</div>' +
         '<label class="field"><span>Your heir</span><input data-heir-addr autocapitalize="none" spellcheck="false" placeholder="kaspa: address of your heir"></label><div class="err" data-herr></div>' +
         '<button class="pill" data-heir-ok>' +
@@ -1640,7 +2258,7 @@
         '<div class="sub">The rules of this account live in the account itself, on the Kaspa network. They cannot be edited in place.</div>' +
         '<div class="line mt8">Your money moves under the new rules. Up to the daily limit (' +
         fmt(s.limit) +
-        ' KAS) moves on the spot; the rest waits the notice period (' +
+        ' KAS) moves immediately; the rest waits the notice period (' +
         dur(noticeOf(s)) +
         ').</div>' +
         '<div class="sub">Or press the emergency stop and open the new account from your vault with ' +
@@ -1673,7 +2291,9 @@
     openSheet(
       '<div class="label">No covenant</div><div class="line mt8">' +
         esc(name) +
-        ' has no covenant: payments leave at once, with no limit, no notice period and no emergency stop.</div><div class="sub">Put it under one and the five bars come alive: 100 KAS a day on the spot, 24 h notice above it. Change any rule afterwards from its bar.</div>' +
+        ' has no covenant: payments leave at once, with no limit, no notice period and no emergency stop.</div><div class="sub">Add a covenant to turn on ' +
+        'all five rules: 100 KAS a day available immediately; larger payments clear after a 24 h notice period. Change any rule afterwards from its ' +
+        'bar.</div>' +
         (D.isLive()
           ? '<div class="sub">' + 'Your account is already under a covenant.</div>'
           : '<button class="pill" data-save>Protect this account</button>') +
@@ -1689,7 +2309,13 @@
           if (KVScene.pulse) KVScene.pulse('send');
           go(
             'covenantset',
-            { text: fmt(FRESH_RULES.limit) + ' KAS a day on the spot, ' + dur(FRESH_RULES.notice * 3600) + ' notice above it.' },
+            {
+              text:
+                fmt(FRESH_RULES.limit) +
+                ' KAS a day available immediately; larger payments clear after a ' +
+                dur(FRESH_RULES.notice * 3600) +
+                ' notice period.',
+            },
             { root: true }
           );
         });
@@ -1703,7 +2329,8 @@
         {
           term: 'Everyday account',
           plain: 'An account with no covenant, for spending and receiving. It has no limit and no stop.',
-          tech: "A plain pay-to-public-key address derived from the recovery seed. Any coin at it is spent by one signature from this phone's key, with no script rules.",
+          tech:
+            "A plain pay-to-public-key address. Any coin at it is spent by one signature from this phone's key, with no script rules.",
         },
         {
           term: 'Protected account',
@@ -1734,25 +2361,30 @@
         {
           term: 'Vault',
           plain:
-            'Where your money goes after a stop. Nobody can spend from it with a phone; it takes two vault seeds and the offline signer.',
+            'Where your money goes after a stop. Nobody can spend from it with a phone alone; it takes two of your three vault seeds, typed from paper.',
           tech: "The app's name for the vault address: a 2-of-3 multisig script whose hash the covenant commits to at creation.",
         },
         {
           term: 'Vault seed',
           plain:
-            'The 24 words that open your vault. Three sheets are made and any two open it. They live on paper and are never typed into this phone.',
+            'The 24 words that open your vault. Three vault seeds are made and any two open it. They live on paper; this phone keeps a sealed copy until you ' +
+            'delete it.',
           tech: 'Three BIP-39 mnemonics, one per vault key. The covenant stores only the hash of the 2-of-3 script, so the words are needed only to spend from the vault.',
         },
         {
           term: 'Recovery seed',
-          plain: 'The words that bring your account back on a new phone. They do not open the vault.',
+          plain:
+            'In Sample, the words that bring the account back on a new phone. An account made on this phone ' +
+            'has none: if the phone is lost, a guardian\u2019s stop moves it to your vault.',
           tech: "A BIP-39 mnemonic for the hot keys: the Everyday address, the card key and this phone's stop key. The covenant coin is found again on the network by its covenant id.",
         },
         {
           term: 'Guardian',
           plain:
-            'Someone you trust who holds a copy of your emergency stop, in case you lose your phone. They can stop or decline, never spend.',
-          tech: 'A holder of one of the up to three stop keys set at creation. Their key can sign only the cancel and decline entries.',
+            'Someone you trust who holds emergency stop button 2 or 3. With your watch code they see the account and can stop it or send a withdrawal back, ' +
+            'never spend.',
+          tech:
+            'The holder of stop key 2 or 3, set from their link code by a rules change. That key can sign only the cancel and decline entries.',
         },
         {
           term: 'Sponsored',
@@ -1767,14 +2399,18 @@
         {
           term: 'Panic PIN',
           plain:
-            'A PIN you type on the unlock screen when someone makes you open the app. The app opens quiet, showing only your Everyday money.',
-          tech: "A second PIN kept in the phone's secure store. Matching it sets quiet mode before Home renders; the protected account and the vault are neither shown nor spendable in that state.",
+            'A PIN you type on the unlock screen when someone makes you open the app. The app opens showing only your purse.',
+          tech:
+            'Six digits kept on this phone as a salted SHA-256, never as the digits. Matching it ' +
+            'opens the duress view; the page then refuses every action except a payment from the purse.',
         },
         {
-          term: 'Quiet mode',
+          term: 'Duress view',
           plain:
-            'The app as the panic PIN shows it: Everyday only, the protected account and the vault out of sight, nothing else to find.',
-          tech: 'A display state only. It hides the protected account and the vault entry; no rule on the network changes, so the daily limit and the stop still hold.',
+            'The app as the panic PIN shows it: the purse only. Your account, vault, stops, people and rules are out of sight.',
+          tech:
+            'It lasts until the app is closed and started again. No rule on the network changes, so the daily limit, ' +
+            'the notice period and the emergency stops still hold.',
         },
       ],
     },
@@ -1814,7 +2450,8 @@
         {
           term: 'Seed words',
           plain:
-            "Seed words are 12 or 24 ordinary words that encode a wallet's master secret. Anyone with the words can rebuild every key, so they are kept on paper only.",
+            "Seed words are 12 or 24 ordinary words that encode an account's master secret. Anyone with the words can rebuild every key, so they are kept on " +
+            "paper only.",
           tech: 'BIP-39 mnemonic: 128 or 256 bits of randomness plus a checksum mapped to a 2048-word list. The words are stretched with PBKDF2 into a 512-bit seed.',
         },
         {
@@ -1920,7 +2557,8 @@
         {
           term: 'kaspa: and kaspatest: addresses',
           plain:
-            'Real-money addresses start with kaspa:. Test-network addresses start with kaspatest: and hold coins with no value. The wallet refuses to mix the two.',
+            'Real-money addresses start with kaspa:. Test-network addresses start with kaspatest: and hold coins with no value. This app refuses to mix the ' +
+            'two.',
           tech: 'The prefix is part of the bech32 encoding and checksum, so a kaspatest: address is invalid on mainnet and vice versa. Both carry the same version byte and key or script payload.',
         },
         {
@@ -1971,22 +2609,28 @@
           tech: "A request writes destination hash and amount into the coin's state; finish is allowed only after the notice period, measured in DAA score, has elapsed since the request.",
         },
         {
-          term: 'The stop key',
+          term: 'Stop buttons',
           plain:
-            'The stop key moves everything in the account into your vault, even while a withdrawal is pending. It can only send money there, nowhere else, so it is safe to share.',
-          tech: 'Cancel requires a stop key signature and an output paying the whole coin, less at most maxFee, to the fixed cold script hash. Up to three stop keys are set at creation.',
+            'An emergency stop button moves everything in the account into your vault, even while a withdrawal is pending. It can only send money there, ' +
+            'nowhere else, so it is safe to give one to a guardian.',
+          tech:
+            'Cancel requires a stop key signature and an output paying the whole coin, less at most maxFee, to the fixed cold script hash. There are up to ' +
+            'three stop keys; keys 2 and 3 go to guardians through a rules change.',
         },
         {
           term: 'Decline',
           plain:
-            'Decline sends a waiting withdrawal back to locked without moving any money. Use it when the request is wrong but there is no need to empty the account.',
+            'Decline cancels a waiting withdrawal without moving any money. Use it when the request is wrong but there is no need to empty the account.',
           tech: 'Decline needs a stop key signature; it clears the pending destination and amount, leaves window counters unchanged and renews the coin under the same covenant.',
         },
         {
-          term: 'Heir and the silence clock',
+          term: 'Heir and the inactivity clock',
           plain:
-            'An heir can take the money if the account sits untouched for a long time, six months by default. Any payment or action restarts the clock.',
-          tech: 'Inherit allows the heir key after inheritDelay in DAA score since the coin was last renewed. With autoHeir set, anyone may send the coin to the heir script once the silence has passed.',
+            'An heir can claim the money in the account, never the vault, if it sits untouched for the inactivity period, six months by default. Any payment ' +
+            'or action restarts the clock, and what the heir claims lands under Received as heir.',
+          tech:
+            'Inherit allows the heir key after inheritDelay in DAA score since the coin was last renewed. With autoHeir set, anyone may send the coin to the ' +
+            'heir script once the inactivity period has passed.',
         },
         {
           term: '2 of 3',
@@ -1996,7 +2640,7 @@
         {
           term: 'Max fee and the minimum left behind',
           plain:
-            'Two guard rails: no action may burn more than a small fixed fee, and every coin the rules create must be big enough to be worth spending later.',
+            'Two guard rails: no action may spend more than a small fixed fee, and every coin the rules create must be big enough to be worth spending later.',
           tech: 'maxFee caps inputs minus outputs on every entry. minRemainder requires each continuation or exit output to be at least that many sompi, so no unspendable dust is created.',
         },
         {
@@ -2013,25 +2657,17 @@
         {
           term: 'Hot vs cold',
           plain:
-            "A hot key lives on a device that talks to the internet; a cold key never does. Your phone's key is hot, the vault is cold. Cold is slower and much harder to steal.",
-          tech: 'A hot key signs on a networked device and is exposed to its software. A cold key is generated and used on an offline device; only signed transactions cross over.',
-        },
-        {
-          term: 'Air gap',
-          plain:
-            'An air gap means no cable, wifi or Bluetooth between the signing device and the network. Data moves only by QR code or typed text that you can see.',
-          tech: 'The online wallet builds an unsigned transaction, carries it to the offline device as hex or QR, and brings back the signature. The private key never leaves the offline side.',
-        },
-        {
-          term: 'Offline signer',
-          plain:
-            'The offline signer is the program on the cold device that reads a request, shows you exactly what it will do, and signs it only if you agree.',
-          tech: 'It reconstructs the transaction from the carried bytes, displays outputs and amounts, signs with the cold key and returns the signature for submission by the online wallet.',
+            "Hot money can be spent from a device that talks to the internet; cold money cannot. Your account is hot, the vault is cold: it needs vault " +
+            "seeds from paper. Cold is slower and much harder to steal.",
+          tech:
+            'A hot key signs on a networked device and is exposed to its software. The vault is a 2-of-3 script whose keys are rebuilt from paper seeds only ' +
+            'for the one signing that takes money out.',
         },
         {
           term: 'Secure chip / Keystore',
           plain:
-            "The phone's secure chip seals your spending key and stop key behind your fingerprint. Apps, backups and even a copy of the phone's storage cannot read them.",
+            "The phone's secure chip seals what this phone signs with, and the copy of your vault seeds, behind your fingerprint. Apps, backups and even a " +
+            "copy of the phone's storage cannot read them.",
           tech: 'Android Keystore (StrongBox where present) stores keys non-exportable. The chip does ECDSA only, not Schnorr, so it seals the key and the app signs in memory while unlocked.',
         },
         {
@@ -2039,18 +2675,6 @@
           plain:
             'Fingerprint is fast and cannot be read over your shoulder; a PIN works when the sensor fails. Both only unlock the chip; neither is the key itself.',
           tech: 'Biometric or PIN authentication gates key use for a short validity window. A failed biometric falls back to the device credential; both are checked by the secure hardware.',
-        },
-        {
-          term: 'Pairing and certificate pin',
-          plain:
-            'When the phone is a remote control for the laptop, they are paired once with an 8-digit code and check words. After that the phone only trusts that laptop.',
-          tech: "Pairing exchanges a token over TLS; the phone stores the laptop's certificate fingerprint and refuses any other certificate, defeating a fake laptop on the same wifi.",
-        },
-        {
-          term: 'Check words',
-          plain:
-            'Check words are a few words both devices show after pairing. If they match, you are connected to your own device and not an impostor.',
-          tech: "Check words are a short word encoding of a hash over both sides' ephemeral keys and certificate, compared out of band by eye so a man in the middle shows a mismatch.",
         },
         {
           term: 'Seedless signer',
@@ -2067,8 +2691,11 @@
         {
           term: 'Paper backup',
           plain:
-            'Paper holds the vault seed. It cannot be hacked, but it can burn or be read, so keep the sheets in separate places and never photograph them.',
-          tech: 'A paper backup records BIP-39 words that regenerate a key. For the 2-of-3 vault, three sheets are stored apart; any two suffice, so one lost or stolen sheet is harmless.',
+            'Paper holds your vault seeds. It cannot be hacked, but it can be lost in a fire or read, so keep the seeds in separate places and never ' +
+            'photograph them.',
+          tech:
+            'A paper backup records BIP-39 words that regenerate a key. For the 2-of-3 vault, three seeds are stored apart; any two suffice, so one lost or ' +
+            'stolen seed is harmless.',
         },
       ],
     },
@@ -2076,10 +2703,13 @@
       title: 'Safety habits',
       items: [
         {
-          term: 'Never type seed words into a phone',
+          term: 'Where your vault seeds live',
           plain:
-            'The vault seed goes on paper and into an offline device only. A phone that talks to the internet is where thieves look first.',
-          tech: 'Any networked device may leak keyboard input through malware, clipboard or screen capture. The vault key must only ever be entered on the air-gapped signer.',
+            'On paper in three places, and sealed on this phone behind your fingerprint. Never in a photo, a note or a message: those are where thieves look ' +
+            'first.',
+          tech:
+            'The phone seals the seeds with the Android Keystore and opens them for one signing after a fingerprint. Words typed from paper stay in memory ' +
+            'for that signing only.',
         },
         {
           term: 'Check the address start and end',
@@ -2094,16 +2724,20 @@
           tech: 'A test transaction confirms the destination script accepts funds and the recipient controls it. Confirmation takes about a second and costs a few thousand sompi.',
         },
         {
-          term: 'Two guards',
+          term: 'Two phones watching',
           plain:
-            'Two guards watch the network from two different machines. If one is silenced or lied to, the other still raises the alert and the notice period still works.',
+            'This phone watches your money while it is on. A second phone or tablet can ' +
+            'watch too, so the alert still comes if this phone is off, lost or lied to.',
           tech: "Two independent guards poll separate nodes for the covenant coin's state. A pending request seen by either triggers alerts, so one compromised node cannot hide a withdrawal.",
         },
         {
           term: 'What a stop costs you',
           plain:
-            "A stop moves everything to your vault. Getting it back out needs two vault seeds and the offline signer, so expect a day's work. Pressing stop is never wrong.",
-          tech: 'Cancel pays the full coin, minus at most maxFee, to the cold script. Re-funding a vault needs a 2-of-3 signing round and a new topup; nothing is lost but time.',
+            "A stop moves everything to your vault. Getting it back out means typing two vault seeds from paper, which takes a few minutes. If in doubt, use " +
+            "the emergency stop.",
+          tech:
+            'Cancel pays the full coin, minus at most maxFee, to the cold script. Taking it out needs two of the three vault signatures, then a new topup ' +
+            'into an account; nothing is lost but time.',
         },
         {
           term: 'What a thief can and cannot do',
@@ -2112,16 +2746,22 @@
           tech: 'The covenant enforces the limit and notice period on every spend regardless of who signs. Bigger withdrawals are visible for the notice period and can be stopped or declined.',
         },
         {
-          term: 'If the laptop is lost',
+          term: 'If your phone is lost',
           plain:
-            'Press stop from your phone or ask a guardian to. The money goes to your vault. Then set up a fresh account from the vault seeds.',
-          tech: 'Any stop key holder can cancel the coin to the cold script. The lost device holds only hot keys bounded by the limit; the pairing token can be revoked from the phone.',
+            'A guardian presses their stop button and your account moves to your vault; two of your three vault ' +
+            'seeds open it. The purse has no backup, so keep it small. An heir can claim only after the ' +
+            'inactivity period, and the funds go to the heir.',
+          tech:
+            'Any stop key holder can cancel the coin to the cold script. The lost phone holds only hot keys, sealed behind its fingerprint and bounded by ' +
+            'the limit.',
         },
         {
           term: 'If a vault seed is lost',
           plain:
             'One lost vault seed is fine: any two of three still open the vault. Move the money to a new vault soon, so a second loss cannot lock you out.',
-          tech: "A 2-of-3 script tolerates one missing key. Spend the cold coins to a new 2-of-3 script with three fresh keys, then set that script's hash in a new vault.",
+          tech:
+            "A 2-of-3 script tolerates one missing key. Spend the cold coins to a new 2-of-3 script with three fresh keys, then point a fresh account's " +
+            "covenant at it (Replace your keys).",
         },
       ],
     },
@@ -2148,7 +2788,11 @@
       while (top.children.length > 1) right.appendChild(top.children[1]);
       top.appendChild(right);
     }
-    if (!SCR[name].tab || name === 'home') return; /* Home has its own; inner screens have no menu */
+    /* Home has its own; inner screens and the duress view have no menu */
+    if (!SCR[name].tab || name === 'home' || ui.duress) return;
+    /* the screen drew its own */
+    var own = right.querySelector('[data-menu]');
+    if (own) return void (own.onclick = openMenu);
     right.insertAdjacentHTML('beforeend', '<button class="menu" data-menu aria-label="Menu"><i></i><i></i><i></i></button>');
     right.querySelector('[data-menu]').onclick = openMenu;
   }
@@ -2185,11 +2829,13 @@
     home: [
       ['[data-pick]', 'Account', 'Which account you are looking at. Tap it to switch, or to open another.'],
       ['[data-bal]', 'Balance', 'What this account holds. Tap it, or the arrows under it, to see it in dollars.'],
-      ['[data-limit]', 'Today', 'What can still leave today on the spot, and when the limit refreshes.'],
+      ['[data-limit]', 'Today', 'What is still available immediately today, and when the limit refreshes.'],
       ['.pips', 'Your rules', 'The five rules on this money. Tap a bar to change that one rule.'],
-      ['[data-log]', 'Activity', 'The last things that happened. Anything still leaving has its own Stop.'],
-      ['[data-row] .s', 'Emergency stop', 'Moves everything into your vault at once.'],
-      ['[data-row] button:first-child', 'Vault', 'Where stopped money waits. Only your vault seed opens it.'],
+      ['[data-log]', 'Activity',
+        'Recent activity. Any payment still pending can be stopped from here.'],
+      ['[data-tab="safe"]', 'Vault',
+        'Where funds go after an emergency stop, and the emergency stop itself. Two of your ' +
+        'vault seeds open it.'],
       ['[data-menu]', 'Menu', 'Alerts, your covenant, the explanations and the settings.'],
     ],
     send: [
@@ -2198,7 +2844,7 @@
       [
         '[data-ok]',
         'Send',
-        'Your fingerprint or PIN, then a slide. Up to your limit it is final within a second, unless you turned on the minute to change your mind.',
+        'Your fingerprint or PIN, then a slide. Up to your limit it is final within a second, unless the one-minute cancellation window is on.',
       ],
     ],
     receive: [
@@ -2208,18 +2854,25 @@
       ['[data-share]', 'Share', 'Sends the address to someone.'],
     ],
     people: [
-      [
-        '[data-l]',
-        'People',
-        'Guardians hold a copy of your stop. An heir can take the money after a long silence. Trusted payees are paid on the spot.',
-      ],
-      ['[data-go="addperson"]', 'Add someone', 'A guardian, an heir, a trusted payee, or someone you sponsor.'],
+      ['[data-addhelper]', 'Add a guardian or heir',
+        'Three steps: scan their code, choose their role and Update now, then show your code.'],
+      ['[data-go="watchcode"]', 'Watch code',
+        'Lets your guardians see this account. It cannot move money.'],
+      ['[data-addwatch]', 'Protect someone',
+        'Show them your code, then scan theirs once they have chosen your role.'],
     ],
     price: [['.chart', 'KAS price', 'One KAS in dollars over a day, a week or a month.']],
     settings: [
-      ['.list', 'Money', 'Your rules, your coins, your statement.'],
-      ['.list:nth-of-type(2)', 'Keys', 'Recovery, the guard, a second device.'],
-      ['.list:nth-of-type(3)', 'Help', 'How it works, and what the words mean.'],
+      ['.list', 'Money', 'Your rules, accounts, coins and statement.'],
+      [
+        '.list:nth-of-type(2)',
+        'Keys',
+        lazyText(function () {
+          var t = keysHolds();
+          return t.charAt(0).toUpperCase() + t.slice(1) + '.';
+        }),
+      ],
+      ['.list:nth-of-type(3)', 'Help', 'How it works, the glossary, preferences and about.'],
     ],
   };
   function stepFor(name) {
@@ -2377,14 +3030,18 @@
     var def = ui.cur && SCR[ui.cur.name],
       o = baseScene();
     var over = def && def.scene ? def.scene(ui.cur.params || {}) : null;
+    if (ui.duress) over = { left: 100, mode: 'home', k: 0 }; /* no limit, no stop */
     if (over) for (var k in over) o[k] = over[k];
     if (over && over.mode && over.mode !== 'stopped' && over.k === undefined)
       o.k = 0; /* a stopped account collapses the ribbon to a point; a shape needs it whole */
-    o.dim = !(def && def.money);
+    /* reading screens dim the scene; a walk step that shows a rule shape keeps it bright */
+    o.dim = over && over.dim === false ? false : !(def && def.money);
     if (o.charge === undefined) o.charge = ui.drag; /* a held slide charges the background */
     if (o.due === undefined) o.due = null; /* only a Notice screen pins the fill; elsewhere the scene's own clock runs */
+    if (o.mark === undefined) o.mark = null; /* only the lock screen draws the K */
+    if (o.lift === undefined) o.lift = 0; /* only walk steps lift their shape clear of the text */
     if (ui.cur) o.screen = ui.cur.name;
-    o.accent = acctColor(ui.acct); /* the account's colour tints the scene */
+    o.accent = ui.duress ? null : acctColor(ui.acct); /* the account's colour tints the scene */
     KVScene.setState(o);
     document.getElementById('scene').style.opacity = def && def.noScene ? '0' : ''; /* a screen may switch the art off (Price) */
   }
@@ -2394,21 +3051,24 @@
     if (KVScene.sleep) KVScene.sleep(false); /* whatever happened in the scanner, a new screen wakes the scene */
     var def = SCR[name],
       el = document.createElement('section');
-    el.className = 'ui enter' + (def.tab ? ' tabbed' : '');
+    el.className = 'ui enter' + (def.tab ? ' tabbed' : '') +
+      (def.tab === 'settings' && name !== 'settings' && (def.dark || !def.money) ? ' dark' : '');
+    /* Settings pages wear dark glass; money screens keep the bright ribbon unless they opt in */
     ui.cur = { name: name, params: params || {} };
     if (bridge && bridge.screen) bridge.screen(name); /* the phone decides FLAG_SECURE from the screen name */
     el.innerHTML = def.html(ui.cur.params);
     addHelp(el, name);
     var mb = el.querySelector('[data-menu]');
     if (mb && name !== 'home') mb.onclick = openMenu; /* Home wires its own */
-    glassify(el); /* bottom-half glass sheet behind everything below the top bar */
+    if (!def.bare) glassify(el); /* bottom-half glass sheet behind everything below the top bar */
     stage.appendChild(el);
     var old = ui.el;
     ui.el = el;
     if (def.after) def.after(el, ui.cur.params);
     if (def.live) def.live(el, ui.cur.params);
     [].forEach.call(el.querySelectorAll('.big,.clock'), fit);
-    document.body.classList.toggle('notabs', !def.tab);
+    document.body.classList.toggle('notabs', !def.tab || !!ui.duress);
+    document.body.classList.toggle('scanning', name === 'scan'); /* the camera fills the screen */
     document.body.classList.toggle('qrscreen', name === 'receive'); /* the ribbon dims further behind the square code */
     [].forEach.call(tabs.children, function (b) {
       b.classList.toggle('on', b.dataset.tab === def.tab);
@@ -2427,13 +3087,23 @@
       }, 560);
     }
   }
+  /* the duress view (panic PIN): these screens only; any other name lands on the purse */
+  var DURESS_OK = ['lock', 'duress', 'pursepay'];
   function go(name, params, opts) {
+    if (ui.duress && DURESS_OK.indexOf(name) < 0) {
+      name = 'duress';
+      params = {};
+    }
+    /* Sample only */
+    if (SCR[name] && SCR[name].sample && D.isLive()) return go('home', {}, { root: true });
     if (ui.stopExplain) ui.stopExplain(); /* the explainer belongs to the screen it was opened on */
     opts = opts || {};
     if (opts.root) ui.stack = [];
     else if (opts.replace) ui.stack.pop();
     ui.stack.push({ name: name, params: params || {} });
     show(name, params);
+    /* put away during a locked screen's job: the lock is the next screen */
+    if (ui.lockDue && name !== 'lock') lockNow();
   }
   function back() {
     if (ui.closeSheet) {
@@ -2448,7 +3118,7 @@
     return true;
   }
   window.KV_back = back;
-  /* the phone's one-time notices ("pair your phone again", "fingerprints changed") sit on Home until tapped */
+  /* the phone's one-time notices (e.g. "fingerprints changed") sit on Home until tapped */
   window.KV_notice = function (text) {
     text = String(text || '').slice(0, 200);
     if (!text) return;
@@ -2489,16 +3159,43 @@
     return D.getSetting('welcomed') === '1' || D.isLive();
   }
   function lockNow() {
-    if (ui.bio || !hasAccount() || !ui.cur || ui.cur.name === 'lock' || SCR[ui.cur.name].locked) return;
+    if (ui.bio || D.prompting() || !hasAccount() || !ui.cur) return;
+    var held = ui.cur.name !== 'lock' && !!SCR[ui.cur.name].locked;
+    ui.lockDue = held; /* a money job holds the screen: the lock comes when it moves on */
+    if (held || ui.cur.name === 'lock') return;
     if (ui.closeSheet) ui.closeSheet(false);
     go('lock', {}, { root: true });
+  }
+  D.onAway = function () {
+    scrubAway();
+    lockNow();
+  }; /* the phone took a money prompt down because the app was put away */
+  /* put away: typed vault seeds and stop words leave the screen at once, whatever lock_after */
+  function scrubAway() {
+    var el = ui.el,
+      name = ui.cur && ui.cur.name;
+    if (!el || (name !== 'paperout' && name !== 'paperuse')) return;
+    if (el.querySelector('[data-armed]')) resetSlide(el);
+    if (name === 'paperuse') {
+      [].forEach.call(el.querySelectorAll('[data-pw]'), function (i) {
+        i.value = '';
+      });
+      return;
+    }
+    paperOutClear(el);
+    if (!el.kvBusy && el.kvCode) paperOutStep(el, 'seeds');
   }
   function lockAfterSecs() {
     return parseInt(D.getSetting('lock_after'), 10) || 0;
   } /* fewer prompts; 0 = at once */
+  function shown() {
+    return !ui.away && !document.hidden;
+  } /* the app is in front: the only time the phone's fingerprint prompt may open by itself */
   function wentAway() {
     var secs = lockAfterSecs();
+    ui.away = true;
     clearTimeout(ui.awayT);
+    scrubAway();
     if (!secs) return lockNow();
     ui.awayAt = Date.now();
     ui.awayT = setTimeout(lockNow, secs * 1000);
@@ -2506,13 +3203,14 @@
   function cameBack() {
     /* back on the lock screen: the phone's prompt opens by itself */
     clearTimeout(ui.awayT);
-    if (ui.awayAt && Date.now() - ui.awayAt >= lockAfterSecs() * 1000) lockNow();
+    ui.away = false;
+    if (ui.lockDue || (ui.awayAt && Date.now() - ui.awayAt >= lockAfterSecs() * 1000)) lockNow();
     ui.awayAt = 0;
     if (ui.cur && ui.cur.name === 'lock' && !ui.bio && ui.el) {
       var b = ui.el.querySelector('[data-ok]');
       if (b)
         setTimeout(function () {
-          if (!ui.bio && ui.cur && ui.cur.name === 'lock') b.click();
+          if (!ui.bio && shown() && ui.cur && ui.cur.name === 'lock') b.click();
         }, 250);
     }
   }
@@ -2537,6 +3235,8 @@
     else if (t.hasAttribute('data-help')) openHelp(ui.cur.name);
     else if (t.dataset.explain) {
       if (!ui.guards) openProtect();
+      else if (t.dataset.explain === 'safe' && t.classList.contains('pip'))
+        go('safe'); /* the Vault bar opens the vault */
       else openDial(t.dataset.explain);
     } /* a bar opens that one dial; no covenant yet: the offer to put one on */ else if (t.dataset.toggle) {
       var on = t.getAttribute('aria-checked') !== 'true';
@@ -2546,7 +3246,15 @@
       ui.acct = t.dataset.acct;
       refresh();
       applyScene();
-    } else go(t.dataset.go, t.dataset.params ? JSON.parse(t.dataset.params) : {});
+    } else {
+      var gp = {};
+      try {
+        gp = t.dataset.params ? JSON.parse(t.dataset.params) : {};
+      } catch (err) {
+        gp = {}; /* a broken params attribute opens the screen plain */
+      }
+      go(t.dataset.go, gp);
+    }
   });
   tabs.addEventListener('click', function (e) {
     var b = e.target.closest('button');
@@ -2560,7 +3268,108 @@
     if (d && d.live) d.live(ui.el, ui.cur.params);
   }
   /* ---- the activity log: the last few things, and a Stop on anything still leaving ---- */
-  function logRows(n) {
+  /* the guard's own alerts (engine status.alerts: newest first, bank words, `at` in seconds):
+     rows in the Alerts list (Home keeps its short log and alarm row); a waiting withdrawal
+     stands behind the waiting row above, as in history */
+  function alertRows(s) {
+    return (s.alerts || [])
+      .filter(function (a) {
+        return !(s.pending && a.kind === 'withdrawal_pending');
+      })
+      .map(function (a) {
+        return { text: a.text, sub: alertWhen(a.at), go: '', ref: '' };
+      });
+  }
+  function alertWhen(at) {
+    var d = new Date(at * 1000),
+      t = d.getHours() + ':' + ('0' + d.getMinutes()).slice(-2);
+    if (d.toDateString() === new Date().toDateString()) return 'Today, ' + t;
+    return d.toLocaleDateString() + ', ' + t;
+  }
+  /* the bell's amber dot: an alert newer than the newest one seen in Alerts. Kept in the
+     alerts_seen setting; a phone that does not keep that key yet keeps it for this run */
+  function alertsTop() {
+    var a = (D.state.alerts || [])[0];
+    return a ? a.at : 0;
+  }
+  /* alerts_seen: "<newest own alert seen>|<watched alert marks seen>", or the older bare number */
+  function seenStore() {
+    var v = String(D.getSetting('alerts_seen') || ''),
+      bar = v.indexOf('|'),
+      t = Number(bar < 0 ? v : v.slice(0, bar)) || 0,
+      marks = bar < 0 ? [] : v.slice(bar + 1).split(',');
+    return { t: Math.max(t, ui.alertsSeen || 0), marks: marks.concat(ui.watchSeen || []) };
+  }
+  function alertsNew() {
+    return alertsTop() > seenStore().t;
+  }
+  /* a short mark for one watched alert (FNV-1a, 8 hex) so the seen list stays small */
+  function alertMark(k) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < k.length && i < 512; i++)
+      h = Math.imul(h ^ k.charCodeAt(i), 0x01000193) >>> 0;
+    return ('0000000' + h.toString(16)).slice(-8);
+  }
+  /* alerts about the accounts this phone watches for others: what each one's status says
+     now (a withdrawal waiting, ready to claim, stopped) and the engine's alerts (st.alerts) */
+  function watchedAlerts() {
+    if (!D.isLocal()) return [];
+    var out = [];
+    watchedList().forEach(function (w) {
+      var st = w.st || {},
+        nm = watchedName(w);
+      function add(key, text, sub, loud) {
+        var mark = alertMark(w.id + '|' + key);
+        out.push({ mark: mark, text: text, sub: sub, loud: !!loud, id: w.id });
+      }
+      if (st.stage === 'waiting' && st.pending)
+        add('w' + st.pending.kas + st.pending.to,
+          'A withdrawal of ' + fmt(st.pending.kas) + ' KAS is waiting on ' + nm,
+          'Goes through in ' + dur(st.pending.ends_in_seconds), st.can_stop);
+      if (st.can_claim) add('c', nm + ' can be claimed', 'The inactivity period has run out');
+      if (st.stage === 'stopped') add('s', nm + ' was stopped', 'Emergency stop');
+      (st.alerts || []).slice(0, 10).forEach(function (a) {
+        var hot = a.kind === 'withdrawal_pending' && st.can_stop;
+        add('a' + a.at + a.text, nm + ': ' + a.text, alertWhen(a.at), hot);
+      });
+    });
+    return out;
+  }
+  function watchedUnseen() {
+    var marks = seenStore().marks;
+    return watchedAlerts().filter(function (a) {
+      return marks.indexOf(a.mark) < 0;
+    });
+  }
+  /* something still waits on a watched account (a withdrawal, or a claim): the bell stays lit */
+  function watchedWaiting() {
+    return watchedList().some(function (w) {
+      var st = w.st || {};
+      return (st.stage === 'waiting' && st.pending) || st.can_claim;
+    });
+  }
+  /* the bell: lit while anything waits (here or on a watched account), acknowledged or not;
+     red for a withdrawal not yet owned up to here, or one you can stop on an account you guard,
+     not yet seen; amber for news since Alerts */
+  function bellLight(bell, waits, banner, main) {
+    var wNew = main ? watchedUnseen() : [],
+      wLoud = wNew.some(function (a) {
+        return a.loud;
+      });
+    bell.classList.toggle('has', waits || (main && watchedWaiting()));
+    bell.classList.toggle('loud', banner || wLoud);
+    bell.classList.toggle('new', !banner && !wLoud && (alertsNew() || wNew.length > 0));
+  }
+  function alertsMark() {
+    var t = Math.max(alertsTop(), seenStore().t),
+      marks = watchedAlerts().map(function (a) {
+        return a.mark;
+      }).slice(0, 24);
+    ui.alertsSeen = t;
+    ui.watchSeen = marks;
+    D.setSetting('alerts_seen', String(t) + (marks.length ? '|' + marks.join(',') : ''));
+  }
+  function logRows(n, all) {
     var s = D.state,
       rows = [];
     if (s.outgoing)
@@ -2575,12 +3384,22 @@
       rows.push({
         text:
           pq.amount == null
-            ? 'A withdrawal the guard reported'
-            : 'Withdrawal of ' + fmt(pq.amount) + ' KAS to ' + (pq.to || 'an address the guard saw'),
+            ? 'A withdrawal your alerts caught'
+            : 'Withdrawal of ' + fmt(pq.amount) + ' KAS to ' +
+              (pq.to || 'an address your alerts saw'),
         sub:
-          pq.secondsLeft > 0 ? 'Leaves in ' + clock(pq.secondsLeft) : pq.secondsLeft == null ? 'Reported by the guard' : 'Ready to leave',
+          pq.secondsLeft > 0 ? 'Leaves in ' + clock(pq.secondsLeft)
+            : pq.secondsLeft == null ? 'Caught by your alerts' : 'Ready to leave',
         stop: 'pending',
         go: 'pending',
+      });
+    if (all)
+      watchedAlerts().forEach(function (a) {
+        rows.push({ text: a.text, sub: a.sub, go: 'watched', ref: '', watch: a.id });
+      });
+    if (all)
+      alertRows(s).forEach(function (r) {
+        if (rows.length < n) rows.push(r);
       });
     s.history.forEach(function (h) {
       if (rows.length >= n) return;
@@ -2602,10 +3421,11 @@
       )
     );
   }
-  function logHtml(n) {
-    var rows = (ui.logRows = logRows(n));
+  function logHtml(n, all, keep) {
+    var rows = (ui.logRows = logRows(n, all));
     return rows
       .map(function (r, i) {
+        if (keep && !keep(r)) return '';
         return (
           '<div class="item"><button class="rowmain" data-logrow="' +
           i +
@@ -2623,6 +3443,7 @@
   /* a tap on a row: the detail in a sheet (amount, when, reference, and Stop while it can still be stopped) */
   function openRow(r) {
     if (r.stop === 'pending') return go('pending', {});
+    if (r.watch) return go('watched', { id: r.watch });
     var m = /([\d.,]+) KAS/.exec(r.text),
       kas = m ? parseFloat(m[1].replace(/,/g, '')) : null;
     openSheet(
@@ -2660,16 +3481,56 @@
     var r = ui.logRows && ui.logRows[+b.dataset.logrow];
     if (r) openRow(r);
   });
+  /* Home and People fold their long blocks to one tappable line, so the scene behind stays in
+     view; anything waiting (a withdrawal, a claim, a Stop) stays shown. Open or
+     closed is kept in memory only: the phone's settings are allow-listed (Bridge.java) */
+  function foldOpen(k) {
+    return !!(ui.folds && ui.folds[k]);
+  }
+  function foldHead(k, html, cls) {
+    var o = foldOpen(k);
+    return '<button class="foldhd' + (cls ? ' ' + cls : '') + '" data-fold="' + k + '" aria-expanded="' + o +
+      '"><span class="t">' + html + '</span><svg class="chev' + (o ? ' on' : '') +
+      '" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4"/></svg></button>';
+  }
+  stage.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-fold]');
+    if (!b) return;
+    ui.folds = ui.folds || {};
+    ui.folds[b.dataset.fold] = !ui.folds[b.dataset.fold];
+    refresh();
+  });
+  /* Home's activity: one line with the count; a row that can still be stopped always shows */
+  function homeLogHtml() {
+    var body = logHtml(3, false, foldOpen('log') ? null : function (r) {
+        return r.stop;
+      }),
+      n = ui.logRows.length;
+    return n ? foldHead('log', 'Account activity (' + n + ')') + body : '';
+  }
+  /* Home's helped accounts: one line; a row with a withdrawal or claim waiting always shows */
+  function homeHelpedHtml() {
+    var n = watchedList().length;
+    return n ? foldHead('helped', 'People you help (' + n + ')') + watchedRowsHtml(!foldOpen('helped')) : '';
+  }
 
   /* ---- "protected by": five pips that show what guards this money ---- */
+  /* Home Heir pip: the heir's name, capital first; 'Set' while this phone does not know it */
+  function heirPip() {
+    var h = helperRows().filter(function (r) {
+        return r.role === 'heir';
+      })[0],
+      n = h && h.name && h.name !== 'Someone' ? String(h.name).trim() : '';
+    return n ? n.charAt(0).toUpperCase() + n.slice(1) : 'Set';
+  }
   function guardsHtml(g) {
     var pips = g
       ? [
           [true, 'Limit', fmt(g.limit) + ' a day'],
           [true, 'Notice', dur(g.notice)],
           [true, 'Stops', g.stops + (g.stops === 1 ? ' button' : ' buttons')],
-          [!!g.heir, 'Heir', g.heir ? 'named' : 'none'],
-          [true, 'Vault', g.sheets === 1 ? '1 seed' : '2 of ' + g.sheets],
+          [!!g.heir, 'Heir', g.heir ? heirPip() : 'none', g.heir && !g.stopped ? heirLeft() : null],
+          [true, 'Vault', g.stopped ? 'Holding' : 'Ready'],
         ]
       : [
           [false, 'Limit', 'none'],
@@ -2696,11 +3557,15 @@
             p[1] +
             '</span><span class="v">' +
             esc(p[2]) +
-            '</span></button>'
+            '</span>' +
+            (p[3] != null ? '<span class="hl ' + heirTone() + '">' + esc(dur(p[3])) +
+              ' left</span>' : '') +
+            '</button>'
           );
         })
         .join('') +
-      '</div>'
+      '</div>' +
+      (g ? '<button class="ghost small" data-go="protection">See all your rules</button>' : '')
     );
   }
 
@@ -2950,12 +3815,99 @@
     if (!at) return 'Sample prices until the real ones arrive';
     return 'Prices from CoinGecko' + (Date.now() - at > 600000 ? ', as of ' + chartWhen(at, 'week') : '');
   } /* older than 10 minutes: the saved prices say when they are from */
+  var RANGE_WORDS = {
+    day: 'past day',
+    week: 'past week',
+    month: 'past month',
+    quarter: 'past 3 months',
+    year: 'past year',
+    all: 'since the start',
+  };
+  function usd(v) {
+    return '$' + v.toFixed(v < 1 ? 4 : 2);
+  } /* the summary's prices: four decimals under a dollar */
+  function kasCount(v) {
+    var big = v >= 1000;
+    return v.toLocaleString('en-US', { maximumFractionDigits: big ? 0 : 4 });
+  } /* grouped thousands, never scientific notation */
+  function sumRow(k, v, sub) {
+    return (
+      '<div class="row prow"><span class="d">' +
+      esc(k) +
+      '</span><span class="v">' +
+      esc(v) +
+      (sub ? '<small>' + esc(sub) + '</small>' : '') +
+      '</span></div>'
+    );
+  }
+  function avgLabel(s) {
+    if (s.avgHours >= 156) return 'Average, last 7 days';
+    var h = s.avgHours;
+    return 'Average, last ' + (h >= 48 ? Math.round(h / 24) + ' days' : h + ' hours');
+  }
+  function priceSumInto() {
+    /* the big price, the period's change, average/high/low rows; follows the range buttons */
+    var box = ui.el && ui.el.querySelector('[data-psum]');
+    if (!box) return;
+    var s = D.priceSummary ? D.priceSummary(chartRange) : null;
+    if (!s) {
+      box.innerHTML = '';
+      return;
+    }
+    var up = s.change >= 0,
+      pct = (up ? '+' : '\u2212') + Math.abs(s.pct).toFixed(1) + '%';
+    box.innerHTML =
+      '<div class="pbig">' +
+      esc(usd(s.now)) +
+      '</div><div class="pch ' +
+      (up ? 'up' : 'down') +
+      '">' +
+      esc(chartDelta(s.change) + ' (' + pct + ')') +
+      '<span class="d">' +
+      esc(RANGE_WORDS[chartRange] || '') +
+      '</span></div>' +
+      sumRow(avgLabel(s), usd(s.avg)) +
+      sumRow('High', usd(s.high)) +
+      sumRow('Low', usd(s.low));
+  }
+  function supplyRows(s) {
+    var pct = ((s.mined / s.max) * 100).toFixed(1) + '% of the maximum';
+    return (
+      sumRow('Mined so far', kasCount(s.mined) + ' KAS', pct) +
+      sumRow('Maximum supply', kasCount(s.max) + ' KAS') +
+      (s.reward !== null ? sumRow('New coins per block', kasCount(s.reward) + ' KAS') : '') +
+      (s.cutAt && s.next !== null ?
+        sumRow('Next reduction', s.cutAt, 'to ' + kasCount(s.next) + ' KAS') : '')
+    );
+  }
+  function supplyInto(box) {
+    /* market.supply: hidden quietly on a refusal or an engine without it */
+    if (!box || !D.marketSupply) return;
+    D.marketSupply()
+      .then(function (s) {
+        if (!s || !(ui.cur && ui.cur.name === 'price')) return;
+        box.innerHTML = '<div class="label mt20">KAS supply</div>' + supplyRows(s);
+      })
+      .catch(function () {});
+  }
+  function chartHead(tools) {
+    var legend = CHART.ma
+      .filter(function (m) {
+        return tools[m.key];
+      })
+      .map(function (m) {
+        return '<span class="lg ' + m.cls + '">' + m.label + '</span>';
+      })
+      .join('');
+    return legend ? '<div class="ch">' + legend + '</div>' : '';
+  } /* the price and change sit in the summary above; the chart keeps its tool legend */
   function chartInto(box) {
     if (!box) return;
     var series = D.priceSeries(chartRange);
     chartAskPrices();
     if (!series) {
       box.innerHTML = '<div class="sub">Fetching the KAS price\u2026</div>';
+      priceSumInto();
       ui.priceSeries = null;
       applyScene();
       return;
@@ -2972,45 +3924,19 @@
       series.map(function (v, i) {
         return [Date.now() - (n - 1 - i) * 3600000, v];
       }); /* the chart draws every point; the scene keeps its calm 72 */
-    var pv = points.map(function (p) {
-        return p[1];
-      });
-    var first = pv[0],
-      last = pv[pv.length - 1],
-      ch = ((last - first) / first) * 100,
-      up = ch >= 0;
     var tools = {};
     CHART.ma.forEach(function (m) {
       tools[m.key] = D.getSetting(m.key) === 'on';
     });
-    var head = esc(priceHead());
-    var legend = CHART.ma
-      .filter(function (m) {
-        return tools[m.key];
-      })
-      .map(function (m) {
-        return '<span class="lg ' + m.cls + '">' + m.label + '</span>';
-      })
-      .join('');
     var W = Math.max(240, Math.round(box.clientWidth || 360)); /* one SVG unit per pixel keeps the hairlines crisp */
     box.innerHTML =
-      '<div class="ch"><span class="k">' +
-      head +
-      '</span><span class="' +
-      (up ? 'up' : 'down') +
-      '">' +
-      chartDelta(last - first) +
-      ' (' +
-      (up ? '+' : '\u2212') +
-      Math.abs(ch).toFixed(1) +
-      '%)</span>' +
-      legend +
-      '</div>' +
+      chartHead(tools) +
       chartSvg(points, chartRange, tools, W) +
       chartControls(tools) +
       '<div class="sub">' +
       chartSource(chartRange) +
       '</div>';
+    priceSumInto();
     wireChartButtons(box);
     applyScene();
   }
@@ -3115,7 +4041,19 @@
      signer prompt (D's moneyAction) is the one fingerprint; a plain prompt here opened no key and only doubled it
      (finger, slide, finger again). It stays after the slide: the safe key lives 15 s from that prompt.
      Sample: the plain confirm first. The slide charges the background; when it completes, one pulse runs. ---- */
-  function armSlide(btn, title, text, danger, label, kind, action) {
+  /* a slide that pays an address: the whole address shows in groups of 4 (Sample: in the confirm
+     step too) */
+  function armToSlide(to, btn, title, text, danger, label, kind, action) {
+    armSlide(btn, title, text, danger, label, kind, action, to);
+  }
+  function slideNote(s, to) {
+    var n = document.createElement('div');
+    n.className = 'sub mt8';
+    n.textContent = 'To ' + addrGroups(to);
+    s.parentNode.insertBefore(n, s);
+    s.kvNote = n;
+  }
+  function armSlide(btn, title, text, danger, label, kind, action, to) {
     (D.isLive() ? Promise.resolve(true) : confirmAction(title, text, danger)).then(function (yes) {
       if (!yes || !btn.parentNode) return;
       var s = document.createElement('div');
@@ -3129,6 +4067,8 @@
       s.innerHTML = '<i tabindex="0"></i><span>' + esc(label) + '</span>';
       s.kvBtn = btn;
       btn.parentNode.replaceChild(s, btn);
+      /* Live has no confirm step: the address stands above the slide */
+      if (to && D.isLive()) slideNote(s, to);
       ui.drag = 0;
       applyScene();
       slider(
@@ -3165,14 +4105,26 @@
   function resetSlide(root) {
     var s = root && root.querySelector ? root.querySelector('.slide') : null;
     if (!s || !s.kvBtn || !s.parentNode) return;
+    if (s.kvNote) s.kvNote.remove();
     s.parentNode.replaceChild(s.kvBtn, s);
     ui.drag = 0;
     applyScene();
   }
   /* the slide goes back to its button when the user edits what was confirmed */
+  /* the slide pays what was armed: if To or the amount changed since (a payee chip, a scan),
+     it refuses and springs back */
+  function draftMoved(el, to, n) {
+    var d = ui.draft;
+    var same = String(d.to).toLowerCase() === String(to).toLowerCase();
+    if (same && amountOf(d.amt) === n) return false;
+    resetSlide(el);
+    setText(el, '[data-e]', 'The payment changed. Check it and slide again.');
+    return true;
+  }
   function disarm(root) {
     var s = root.querySelector('.slide[data-armed]');
     if (!s || !s.kvBtn) return;
+    if (s.kvNote) s.kvNote.remove();
     s.parentNode.replaceChild(s.kvBtn, s);
     ui.drag = 0;
     applyScene();
@@ -3216,200 +4168,132 @@
     el.addEventListener('input', check);
   }
 
-  /* ---- screens ---- */
-  function treeSmooth(pts) {
-    /* Catmull-Rom through the points, as cubic curves */
-    var d = 'M' + pts[0][0].toFixed(1) + ' ' + pts[0][1].toFixed(1);
-    for (var j = 0; j < pts.length - 1; j++) {
-      var p0 = pts[Math.max(0, j - 1)],
-        p1 = pts[j],
-        p2 = pts[j + 1],
-        p3 = pts[Math.min(pts.length - 1, j + 2)];
-      d +=
-        'C' +
-        (p1[0] + (p2[0] - p0[0]) / 6).toFixed(1) +
-        ' ' +
-        (p1[1] + (p2[1] - p0[1]) / 6).toFixed(1) +
-        ' ' +
-        (p2[0] - (p3[0] - p1[0]) / 6).toFixed(1) +
-        ' ' +
-        (p2[1] - (p3[1] - p1[1]) / 6).toFixed(1) +
-        ' ' +
-        p2[0].toFixed(1) +
-        ' ' +
-        p2[1].toFixed(1);
-    }
-    return d;
+  /* The guard's servers: the phone takes a change only right after a fresh signer prompt, so the
+     prompt comes only when the value changed, and the value is read back. */
+  function saveNodes(el) {
+    var v = el.querySelector('[data-nodes]').value.trim();
+    if (v === D.getSetting('guard_nodes')) return Promise.resolve(true);
+    return D.confirmFresh('Change the alert servers').then(function (yes) {
+      if (yes) D.setSetting('guard_nodes', v);
+      if (D.getSetting('guard_nodes') === v) return true;
+      refuse('The alert servers could not be changed.');
+      return false;
+    });
   }
-  function treeTendril(T, cx, cy, ex, ey, seed, sign, bow) {
-    /* two paths from the centre to (ex, ey): the weave and its mirror, so neighbours cross and interlace */
-    var dx = ex - cx,
-      dy = ey - cy,
-      len = Math.sqrt(dx * dx + dy * dy) || 1,
-      nx = -dy / len,
-      ny = dx / len,
-      lean = T.curve * (Math.abs(dx) + len * 0.2) * bow;
-    var side = dx ? (dx > 0 ? 1 : -1) : seed % 2 ? 1 : -1,
-      out = [];
-    [1, -1].forEach(function (m) {
-      var pts = [[cx, cy]];
-      for (var t = 0.25; t < 1; t += 0.25) {
-        var wv = m * sign * T.weave * Math.sin(T.weaveTurns * 2 * Math.PI * t + seed * 2.4),
-          lx = lean * Math.sin(Math.PI * t) * side;
-        pts.push([cx + dx * t + nx * wv + lx, cy + dy * t + ny * wv]);
+  /* The guard switch: on is free; off is the phone's own prompt (guardOff), answered through
+     __kvGuardOff with 'ok' (stopped), 'cancel' or 'refused'. The switch shows what is running. */
+  function guardSwitch(on, paint) {
+    var later = function () {
+      paint(!!bridge.guardRunning());
+      setTimeout(function () {
+        paint(!!bridge.guardRunning());
+      }, 900);
+    };
+    if (on) {
+      bridge.guardOn(true);
+      haptic();
+      return later();
+    }
+    if (!bridge.guardOff) {
+      paint(!!bridge.guardRunning());
+      return refuse('Update the app to turn alerts off.');
+    }
+    window.__kvGuardOff = function (st) {
+      window.__kvGuardOff = null;
+      if (st === 'ok') haptic();
+      later();
+    };
+    bridge.guardOff('__kvGuardOff');
+  }
+  /* Settings save. A wider signer window is stored by the phone only right after a fresh signer
+     prompt, so that change asks first and is read back; the same or a narrower one is free. */
+  function signerWin(x) {
+    return x === '' || x == null ? 300 : parseInt(x, 10) || 0;
+  }
+  function saveSettings(v) {
+    var was = signerWin(D.getSetting('signer_window')),
+      want = signerWin(v.signer_window),
+      shots = v.screenshots === 'on' && D.getSetting('screenshots') !== 'on';
+    var ask = Promise.resolve(true);
+    if (want > was) ask = D.confirmFresh('Ask for your fingerprint less often');
+    return ask.then(function (yes) {
+      for (var k in v) {
+        if (k === 'screenshots' && shots) continue;
+        if (k !== 'signer_window' || (yes && want !== was)) D.setSetting(k, v[k]);
       }
-      pts.push([ex, ey]);
-      out.push(treeSmooth(pts));
+      if (signerWin(D.getSetting('signer_window')) !== want) {
+        refuse('The fingerprint setting could not be changed.');
+        return false;
+      }
+      return shots ? allowShots() : true;
     });
-    return out;
   }
-  function treeDraw(T, W, H, cx, cy, hit, list, up) {
-    var s = '';
-    var m = list.length;
-    list.forEach(function (e, j) {
-      var ex = cx + ((j + 0.5) / m - 0.5) * W * (up ? T.branchSpread : T.rootSpread),
-        ey = up ? T.font + 10 : H - T.font - 8,
-        seed = j + (up ? 7 : 0),
-        bow = 1;
-      if (e.small) {
-        ex = cx + ((j + 0.5) / m - 0.5) * W * 0.34;
-        ey = cy - H * 0.2;
-        bow = 1.8;
-      } /* grows out and bends back toward the trunk: you hold their stop */
-      var w = e.role === 'Trusted payee' || e.faint ? T.thin : T.line,
-        p = treeTendril(T, cx, cy, ex, ey, seed, up ? 1 : -1, bow);
-      var open = e.guard ? ' data-go="watcher"' : e.stop ? ' data-stop' : e.i != null ? ' data-i="' + e.i + '"' : '';
-      s +=
-        '<g class="p' +
-        (e.faint ? ' faint' : '') +
-        '"' +
-        open +
-        '>' +
-        '<path class="glowpath" d="' +
-        p[0] +
-        '" stroke-width="' +
-        (w * T.glow).toFixed(1) +
-        '"/>' +
-        '<path class="t2" d="' +
-        p[1] +
-        '" stroke-width="' +
-        (T.thin * 0.8).toFixed(2) +
-        '"/>' +
-        '<path class="t" d="' +
-        p[0] +
-        '" stroke-width="' +
-        w +
-        '"/>';
-      if (!e.faint) s += treeEnd(T, e, ex, ey, up, cx, hit);
-      s += '</g>';
+  function allowShots() {
+    return D.confirmFresh('Allow screenshots').then(function (yes) {
+      if (yes) D.setSetting('screenshots', 'on');
+      if (D.getSetting('screenshots') === 'on') return true;
+      refuse('Screenshots could not be turned on.');
+      return false;
     });
-    return s;
   }
-  function treeEnd(T, e, ex, ey, up, cx, hit) {
-    var s = '';
-    var ly = e.small ? ey + 3.5 : up ? ey - 6 : ey + T.font + 3,
-      anchor = e.small ? (ex < cx ? 'end' : 'start') : 'middle',
-      lx = e.small ? ex + (ex < cx ? -7 : 7) : ex;
-    s +=
-      '<circle class="end' +
-      (e.stop ? ' hollow' : '') +
-      '" cx="' +
-      ex.toFixed(1) +
-      '" cy="' +
-      ey.toFixed(1) +
-      '" r="' +
-      (e.stop ? T.dot * 0.7 : T.dot * 0.45).toFixed(1) +
-      '"/>' +
-      '<text class="lbl" x="' +
-      lx.toFixed(1) +
-      '" y="' +
-      ly.toFixed(1) +
-      '" text-anchor="' +
-      anchor +
-      '" font-size="' +
-      T.font +
-      '">' +
-      esc(String(e.name || '').slice(0, 10)) +
-      '</text>' +
-      '<circle class="hit" cx="' +
-      ex.toFixed(1) +
-      '" cy="' +
-      ey.toFixed(1) +
-      '" r="' +
-      hit +
-      '"/>';
-    return s;
-  }
-  /* the People tree: owner at the centre, guardians as roots, heir/guard/payees as branches, sponsored and allowance as small branches bending back */
-  function peopleTree(people, state) {
-    var T = PEOPLE_TREE,
-      W = T.w,
-      H = T.h,
-      cx = W / 2,
-      cy = H * T.trunk,
-      s = '',
-      hit = T.dot * 3;
-    people = people || [];
-    state = state || {};
-    var guards = [],
-      branches = [],
-      smalls = [];
-    people.forEach(function (q, i) {
-      var e = { name: q.name, i: i, role: q.role };
-      if (q.role === 'Guardian') guards.push(e);
-      else if (q.role === 'Heir' || q.role === 'Trusted payee') branches.push(e);
-      else smalls.push(e);
-    });
-    var named = people.filter(function (q) {
-      return q.role === 'Guardian';
-    }).length;
-    var extra =
-      typeof state.stopKeys === 'number'
-        ? Math.max(0, state.stopKeys - 1 - named)
-        : 0; /* stop keys past your own that no person is named for */
-    for (var k = 0; k < extra; k++) guards.push({ name: 'Stop key', stop: true });
-    var empty = !people.length && !extra;
-    if (!empty && (D.isLive() || D.getSetting('watch_phone') !== 'off'))
-      branches.splice(branches.length && branches[0].role === 'Heir' ? 1 : 0, 0, { name: 'Guard', guard: true });
-    if (empty) {
-      guards.push({ faint: true });
-      branches.push({ faint: true });
+  /* After a stop the account opens again under a new watch code: the guardian and heir need it */
+  function reopensAfterStop() {
+    try {
+      return !!(D.state.stopped || JSON.parse(D.getSetting('rules_move') || '{}').out);
+    } catch (e) {
+      return !!D.state.stopped;
     }
-    smalls.forEach(function (e) {
-      e.small = true;
-    });
-    s += treeDraw(T, W, H, cx, cy, hit, guards, false);
-    s += treeDraw(T, W, H, cx, cy, hit, branches, true);
-    s += treeDraw(T, W, H, cx, cy, hit, smalls, true);
-    s +=
-      '<circle class="you" cx="' +
-      cx +
-      '" cy="' +
-      cy +
-      '" r="' +
-      T.dot +
-      '"/><text class="lbl" x="' +
-      (cx + T.dot + 5) +
-      '" y="' +
-      (cy + 3.5) +
-      '" font-size="' +
-      T.font +
-      '">You</text>';
-    return (
-      '<div class="tree" data-tree><svg viewBox="0 0 ' +
-      W +
-      ' ' +
-      H +
-      '" aria-hidden="true"><defs><filter id="kvTreeGlow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="' +
-      T.glow +
-      '"/></filter></defs>' +
-      s +
-      '</svg>' +
-      (empty ? '<div class="sub center">Nobody in your circle yet</div>' : '') +
-      '</div>'
+  }
+  function shareNewCode() {
+    if (ui.cur && ui.cur.name === 'lock') {
+      ui.afterLock = 'watchcode'; /* put away meanwhile: it opens after the fingerprint */
+      return;
+    }
+    openSheet(
+      '<div class="label">Your account is open again</div>' +
+        '<div class="line lite mt8">Share your new watch code with your guardian and heir.</div>' +
+        '<button class="pill mt8" data-share>Share my watch code</button><button class="ghost" data-no>Later</button>'
     );
+    sheet.querySelector('[data-share]').onclick = function () {
+      ui.closeSheet();
+      go('watchcode', {});
+    };
   }
 
+  /* ---- screens ---- */
+  /* Home: losing this phone loses the purse and stop button 1, so an account with funds and no
+     guardian
+     or heir would have no way to move after a loss. One quiet row says so (keys.public read once a
+     start). */
+  function homeLoneRow(el, s, main) {
+    var row = el.querySelector('[data-lone]');
+    if (!row) return;
+    if (main && D.isLocal() && !ui.pubAsked) {
+      ui.pubAsked = true; /* People reads it again after a change */
+      D.keysPublic().then(function (r) {
+        if (r && r.ok) {
+          ui.pub = r.public || {};
+          ui.stops = r.stops || null;
+        }
+        if (ui.cur && ui.cur.name === 'home') refresh();
+      });
+    }
+    row.hidden = !(main && s.balance > 0 && !s.stopped && !hasBackstop());
+  }
+  /* a guardian or the paper stop holds a stop button, or an heir is named; not read yet counts as
+     yes (say nothing) */
+  function hasBackstop() {
+    if (!D.isLive()) {
+      return (D.state.helpers || []).some(function (x) {
+        return x && x.role === 'guardian';
+      });
+    }
+    var pb = ui.pub,
+      held = /^(guardian|paper)$/;
+    if (!pb || !D.isLocal()) return true;
+    if (held.test(slotHolder('cancel2_x')) || held.test(slotHolder('cancel3_x'))) return true;
+    return !!(pb.heir_x || pb.heir_address);
+  }
   function homeBalance(el, s, main, inPurse, bal, ph) {
     var rateOk = !D.isLive() || D.priceIsLive('day'),
       inMoney =
@@ -3423,14 +4307,12 @@
       '[data-usd]',
       inPurse ? 'KAS in your purse, not yet in the account' : bal == null ? '' : inMoney ? fmt(bal) + ' KAS' : rateOk ? under(bal) : ''
     );
-    setText(
+    setHtml(
       el,
       '[data-purse-line]',
       main && !inPurse && s.purse > 0
-        ? 'Purse: ' +
-            fmt(s.purse) +
-            ' KAS outside the account.' +
-            (s.unopened || s.stopped || (D.isLocal() && s.rulesNext) ? '' : ' Tap to add it.')
+        ? '<span class="lab">Purse:</span> ' + esc(fmt(s.purse) + ' KAS outside the account.' +
+            (s.unopened || s.stopped || (D.isLocal() && s.rulesNext) ? '' : ' Tap to add it.'))
         : ''
     );
     el.querySelector('[data-tour]').hidden = !(D.isLive() && D.getSetting('toured') !== '1' && ph !== 'locked');
@@ -3438,28 +4320,36 @@
   }
   function homeLimitLine(s, main, other, ph) {
     var line;
-    if (!main) line = other.limit ? other.limit + ' KAS a day on the spot.' : 'No covenant: payments leave at once. Protect it any time.';
+    if (!main) line = other.limit ? other.limit + ' KAS a day available immediately.' :
+      'No covenant: payments are sent immediately, without limits. You can add one at any time.';
     /* the phase is the main account's; another account always shows its own line */ else if (ph === 'locked') line = '';
     else if (ph === 'oldRules') line = s.oldRulesNotice;
     /* a record this app version cannot read; the engine's plain sentence, nothing alarming */ else if (ph === 'rulesNext')
       line = rulesLine(); /* saved, on their way, or ready to finish */
-    else if (ph === 'noKeys') line = 'This phone has no keys yet. Make them, then put money in.';
-    else if (ph === 'unopened') line = 'Not open yet. Put KAS in the purse, then open the account.';
-    else if (ph === 'stopped') line = 'Stopped. Everything is in your vault.';
+    else if (ph === 'noKeys') line =
+      'Your account is not set up yet. Complete setup, then add funds.';
+    else if (ph === 'unopened') line =
+      'Account not yet open. Add KAS to your purse, then open the account.';
+    else if (ph === 'stopped') line = 'Emergency stop active. All funds are in your vault.';
     else if (ph === 'stale') line = 'Updating…'; /* the last numbers it saw, until the engine answers */
-    else if (s.left == null) line = 'Reaching the network…'; /* connecting or open, before the first numbers */
+    /* connecting or open, before the first numbers */
+    else if (s.left == null) line = 'Connecting to the network…';
     else
+      /* one statement per line */
       line =
-        'You can still send ' +
-        fmt(s.left) +
-        ' KAS today without waiting' +
-        (s.refreshSeconds > 0 ? ' (more in ' + (s.refreshSeconds < 60 ? 'under a minute' : dur(s.refreshSeconds)) + ')' : '') +
-        '. Payments larger than ' +
-        fmt(s.limit) +
-        ' KAS wait ' +
-        dur(s.noticeSeconds) +
-        '.'; /* plain words */
+        'Available today: ' + fmt(s.left) + ' KAS' +
+        (s.refreshSeconds > 0 ? '\nMore available in: ' +
+          (s.refreshSeconds < 60 ? 'under a minute' : dur(s.refreshSeconds)) : '') +
+        '\nPayments over ' + fmt(s.limit) + ' KAS wait: ' + dur(s.noticeSeconds);
     return line;
+  }
+  /* each brief line "Label: value": the label in the accent colour */
+  function labelLines(line) {
+    return line.split('\n').map(function (l) {
+      var at = l.indexOf(': ');
+      return at < 0 ? esc(l) : '<span class="lab">' + esc(l.slice(0, at + 1)) + '</span>' +
+        esc(l.slice(at + 1));
+    }).join('\n');
   }
   function homeGuardState(s, main, other) {
     return main
@@ -3477,6 +4367,17 @@
           }
         : null;
   }
+  /* Heir Unlock's colour: five steps, calm ink to stop red, as the period runs out (h0..h4) */
+  function heirTone() {
+    var sh = heirShare();
+    return 'h' + (sh == null ? 0 : Math.min(4, Math.floor(sh * 5)));
+  }
+  /* Home: the Heir Unlock line while the countdown is known (the red box takes over at the end) */
+  function heirNotice(el, hl, hred) {
+    var n = el.querySelector('[data-heir]');
+    n.className = 'notice heirline ' + heirTone();
+    n.textContent = ''; /* the countdown lives in the Heir pip, not atop Home */
+  }
   function homeAlarm(el, s, main) {
     var al = main ? D.alertToShow() : null,
       quiet = main && !al && D.guardQuiet(),
@@ -3488,13 +4389,17 @@
         esc(al.text) +
         '</div><div class="alarm-acts">' +
         (s.stopped ? '' : '<button class="alarm-stop" data-go="stop">Emergency stop</button>') +
-        '<button class="alarm-ack" data-ack>I did this</button></div>'
+        '<button class="alarm-ack" data-ack>This was me</button></div>'
       : (hred
           ? '<div class="alarm-text">' +
             (hl > 0 ? 'Your heir can claim in ' + esc(dur(hl)) + '.' : 'Your heir can claim now.') +
-            ' Make any payment to restart the clock.</div><div class="alarm-acts"><button class="alarm-ack" data-go="heirclock">See the clock</button></div>'
-          : '') + (quiet ? '<div class="alarm-text">' + 'The guard has gone quiet. Check the Guard switch under Watcher.' + '</div>' : '');
-    setText(el, '[data-heir]', hl != null && !hred && heirAmber() ? 'Your heir can claim in ' + dur(hl) + '. Tap to see the clock.' : '');
+            ' Any payment from this account restarts the countdown.</div><div class="alarm-acts"><button class="alarm-ack" data-go="heirclock">See the ' +
+            'clock</button></div>'
+          : '') + (quiet ? '<div class="alarm-text">' +
+            'Alerts on this phone have stopped. Turn them back on in Settings > Keys > ' +
+              'Alerts on this phone.' +
+            '</div>' : '');
+    heirNotice(el, hl, hred);
     if (box.dataset.h !== ah) {
       box.dataset.h = ah;
       box.innerHTML = ah;
@@ -3528,35 +4433,147 @@
     haptic();
     back();
   }
-  function scanFrame(v, cv, cx) {
-    var sc = Math.min(1, 640 / v.videoWidth);
-    cv.width = Math.round(v.videoWidth * sc);
-    cv.height = Math.round(v.videoHeight * sc);
-    cx.drawImage(v, 0, 0, cv.width, cv.height); /* a small frame: enough for a code, light on memory */
-    var img = cx.getImageData(0, 0, cv.width, cv.height),
-      q = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-    return q;
+  /* one look per tick, in turn: [whole frame?, longest side in px].
+     A long code's tiny squares need the centre at 1080; a code filmed off another
+     phone's screen often reads only from a smaller, smoothed copy (the moire averages out);
+     the whole frame catches a code held off centre */
+  var SCAN_TRIES = [
+    [0, 1080],
+    [1, 1280],
+    [0, 720],
+    [0, 480],
+    [1, 800],
+  ];
+  function scanFrame(v, cv, cx, n) {
+    var t = SCAN_TRIES[n % SCAN_TRIES.length],
+      vw = v.videoWidth,
+      vh = v.videoHeight,
+      side = Math.min(vw, vh),
+      sw = t[0] ? vw : side,
+      sh = t[0] ? vh : side,
+      o = Math.min(1, t[1] / Math.max(sw, sh));
+    cv.width = Math.round(sw * o);
+    cv.height = Math.round(sh * o);
+    cx.imageSmoothingEnabled = true;
+    cx.imageSmoothingQuality = 'high';
+    cx.drawImage(v, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, cv.width, cv.height);
+    var img = cx.getImageData(0, 0, cv.width, cv.height);
+    return jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+  }
+  /* the phone's own code reader (its camera app's), when this WebView has it; else null */
+  function nativeReader() {
+    try {
+      var B = window.BarcodeDetector;
+      return B ? new B({ formats: ['qr_code'] }) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  /* one look by the phone's reader, never two at once; if it fails once, jsQR alone from then on */
+  function nativeLook(v, st, found) {
+    if (!v.videoWidth || !st.reader || st.reading) return;
+    st.reading = true;
+    st.reader.detect(v).then(
+      function (r) {
+        st.reading = false;
+        if (r && r[0] && r[0].rawValue) found(r[0].rawValue);
+      },
+      function () {
+        st.reading = false;
+        st.reader = null;
+      }
+    );
+  }
+  /* the back camera at 1920x1080 for Scan; got(stream) once it runs, if Scan is still open */
+  function openCamera(say, got) {
+    var md = navigator.mediaDevices;
+    if (!md || !md.getUserMedia) return say('No camera here.');
+    var want = { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } };
+    md.getUserMedia({ video: want }).then(
+      function (s) {
+        if (!ui.cur || ui.cur.name !== 'scan')
+          return s.getTracks().forEach(function (t) {
+            t.stop();
+          });
+        keepFocus(s);
+        if (KVScene.sleep) KVScene.sleep(true); /* the scene rests only while the camera runs */
+        if (!window.jsQR) say('This app cannot read codes from the camera.');
+        got(s);
+      },
+      function () {
+        say('The camera was refused. Allow it for KVault in the phone\u2019s settings.');
+        if (KVScene.sleep) KVScene.sleep(false);
+      }
+    );
+  }
+  /* keep the camera focusing on its own (a close code is soft without it); not every camera can */
+  function keepFocus(s) {
+    try {
+      var t = s.getVideoTracks()[0],
+        c = t && t.getCapabilities ? t.getCapabilities() : {};
+      if (c.focusMode && c.focusMode.indexOf('continuous') >= 0)
+        t.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(function () {});
+    } catch (e) {
+      /* fixed focus: the look still runs */
+    }
+  }
+  /* Send's Max: everything in the purse, or what the account can send at once today */
+  function sendMax(d, amt) {
+    var s = D.state,
+      ab = acct(),
+      left = ui.acct === 'main' ? s.left : ab.left,
+      bal = ab.balance != null ? ab.balance : Infinity,
+      v = d.src === 'purse' ? s.purse : Math.min(bal, left != null ? left : Infinity);
+    if (typeof v === 'number' && isFinite(v) && v > 0) {
+      v = Math.floor(v * 100) / 100;
+      amt.value = v > 0 ? plainNum(v) : ''; /* under 0.01: empty = everything */
+      amt.oninput();
+    }
+  }
+  /* Send's payee chips: a chip fills To and disarms the slide */
+  function wireSendPayees(el, d, to) {
+    [].forEach.call(el.querySelectorAll('[data-c]'), function (b) {
+      b.onclick = function () {
+        disarm(el); /* a payee changes what the slide would pay */
+        sendPayees().forEach(function (c) {
+          if (c[0] === b.dataset.c) {
+            d.to = c[1];
+            d.label = c[0];
+            to.value = c[0];
+          }
+        });
+        [].forEach.call(el.querySelectorAll('[data-c]'), function (x) {
+          x.classList.toggle('on', x === b);
+        });
+      };
+    });
+  }
+  /* the slide's line for a send: the whole address, then when it goes */
+  function sendLine(to, waits) {
+    var wait = 'Exceeds the amount left today: it waits ' + dur(D.state.noticeSeconds);
+    return 'To ' + addrGroups(to) + '. ' + (waits ? wait + ' and can be stopped.' : 'Goes now.');
   }
   function sendOk(el, d, btn) {
-    var n = parseFloat(d.amt) || 0,
+    var n = amountOf(d.amt),
       name = d.label || d.to,
       mustWait = onlyTrusted() && !trustedTo(d);
     if (!d.to) {
-      setText(el, '[data-e]', 'Who is it for? Enter an address or pick a name.');
+      setText(el, '[data-e]', 'Enter a recipient address or choose a payee.');
       return;
     }
     if (!D.canMove()) {
       setText(el, '[data-e]', 'Not connected to the network yet. Try again in a moment.');
       return;
     }
+    if (isNaN(n)) {
+      setText(el, '[data-e]', AMOUNT_BAD);
+      return;
+    }
     if (d.src === 'purse') {
       sendFromPurse(el, d, btn, n, name);
       return;
     }
-    if (n <= 0) {
-      setText(el, '[data-e]', 'Enter an amount.');
-      return;
-    }
+    if (n <= 0) return void setText(el, '[data-e]', 'Enter an amount.');
     var addr = d.to,
       label = d.label;
     var waits = !D.fitsLimit(n) || mustWait,
@@ -3568,14 +4585,16 @@
     /* a warning before a second payment. A large payment while one is waiting goes in line behind it; a payment while the last one is still in its minute lets that one go now. */
     var warn = sendWarn(waits, qd, og, st0);
     var slide = function () {
-      armSlide(
+      armToSlide(
+        addr,
         self,
         'Send ' + fmt(n) + ' KAS to ' + who,
-        waits ? 'More than what is left today: it waits ' + dur(D.state.noticeSeconds) + ' and can be pulled back.' : 'Goes now.',
+        sendLine(addr, waits),
         false,
         'Slide to send',
         'send',
         function () {
+          if (draftMoved(el, addr, n)) return;
           go('waiting', { job: 'send', to: addr, label: label, kas: n, wait: mustWait }, { replace: true });
         }
       );
@@ -3608,20 +4627,22 @@
       setText(el, '[data-e]', 'Your purse holds ' + fmt(have) + ' KAS.');
       return;
     }
-    armSlide(
+    armToSlide(
+      pto,
       pself,
       'Send ' + (n > 0 ? fmt(n) + ' KAS' : 'everything in your purse') + ' to ' + pwho,
-      'From your purse. Goes now, no notice period.',
+      'To ' + addrGroups(pto) + '. From your purse. Goes now, no notice period.',
       false,
       'Slide to send',
       'send',
       function () {
+        if (draftMoved(el, pto, n)) return;
         pself.disabled = true; /* [data-ok] is gone once the slide replaced it; the captured button stays */
         D.pursePay(pto, n).then(function (r) {
           pself.disabled = false;
           if (!r.ok) {
             resetSlide(el);
-            setText(el, '[data-e]', r.error || 'That did not go through. Nothing was sent.');
+            setText(el, '[data-e]', r.error || 'The payment failed. No funds were sent.');
             return;
           }
           haptic();
@@ -3636,32 +4657,32 @@
     var warn =
       waits && qd && D.isLive()
         ? [
-            'One is already waiting',
+            'A payment is already pending',
             'Finish or stop the waiting withdrawal first.',
             null,
           ] /* the vault takes one withdrawal at a time; no queue in Live */
         : waits && qd
           ? [
-              'One is already waiting',
+              'A payment is already pending',
               fmt(qd.amount) +
                 ' KAS to ' +
                 qd.to +
                 ' is still in its notice period, ' +
                 dur(qd.secondsLeft) +
-                ' left. This payment waits in line behind it: its own ' +
+                ' left. This payment is queued behind it: its own ' +
                 dur(st0.noticeSeconds) +
                 ' starts once that one has left, so it arrives in about ' +
                 dur(qd.secondsLeft + st0.noticeSeconds) +
                 '. Both can still be stopped.',
-              'Wait in line',
+              'Queue this payment',
             ]
           : !waits && og && og.secondsLeft > 0
             ? [
-                'Your last payment is still leaving',
+                'Your previous payment is still processing',
                 fmt(og.amount) +
                   ' KAS to ' +
                   og.to +
-                  ' is in its minute to change your mind. Sending another lets it go now; this one gets the minute instead.',
+                  ' is still in its one-minute cancellation window. Sending another releases it now, and this payment starts its own window.',
                 'Send both',
               ]
             : null;
@@ -3679,7 +4700,7 @@
         armSlide(
           sb,
           'Move all your money to your vault',
-          'You will need your vault seed to use it again.',
+          'You will need your vault seeds to access these funds again.',
           true,
           'Slide to stop',
           'stop',
@@ -3729,12 +4750,110 @@
         }, me.lockHold);
       };
   }
+  /* Pending: what waits and what can be done about it, as [body, acts] */
+  function pendingHtml(s, q) {
+    var body, acts;
+    var to = q.to || 'an address your alerts saw',
+      seen = q.amount == null && !q.to; /* a withdrawal only the guard saw */
+    body =
+      (q.amount == null ? '' : '<div class="big">' + bigKas(q.amount) + '</div>') +
+      '<div class="sub">To ' +
+      esc(to.length > 30 ? to.slice(0, 28) + '…' : to) +
+      ', asked by ' +
+      esc(q.who || 'not known') +
+      '</div>' +
+      (seen ?
+        '<div class="sub">Caught by your alerts. Details are not yet available on this ' +
+          'phone.</div>' : '') +
+      (s.queue && s.queue.length
+        ? '<div class="sub">In line behind it: ' +
+          s.queue
+            .map(function (x) {
+              return fmt(x.amount) + ' KAS to ' + esc(x.to);
+            })
+            .join(', ') +
+          '</div>'
+        : '');
+    acts =
+      (q.secondsLeft > 0 || seen || !D.isLive() ? '' :
+        '<button class="pill" data-finish>Finish</button>') +
+      '<div class="twobtn"><button class="pill" data-decline>Decline it</button><button class="pill" data-let>Approve</button></div>' +
+      '<button class="pill danger" data-stop>Stop everything</button>' /* the stop itself, not a way to the stop screen; its own row so the slide has room */ +
+      '<div class="sub">The emergency stop moves all funds, including this withdrawal, into your vault. Only your vault seeds can release them.</div>' +
+      (D.isLive() ? '' : '<button class="ghost" data-skip>Skip ahead</button>');
+    return [body, acts];
+  }
+  /* Heir clock: the countdown, what it means and the warning when it nears */
+  function heirClockBody(left, total, sh) {
+    var body;
+    var warn =
+      left == null || sh == null
+        ? ''
+        : heirRed()
+          ? '<div class="line red">' +
+            (left > 0 ? 'Your heir can claim in ' + esc(dur(left)) + '.' :
+              'Your heir can claim now.') +
+            ' Any payment from this account restarts the countdown.</div>'
+          : heirAmber()
+            ? '<div class="line amber">Approaching: ' + esc(dur(left)) + ' left.</div>'
+            : '';
+    body =
+      '<div class="big ' + heirTone() + '">' +
+      (left == null ? '\u2014' : heirBig(left)) +
+      '</div>' +
+      '<div class="sub">' +
+      (left == null
+        ? 'How long is left is not known yet.'
+        : left > 0
+          ? 'left before your heir can claim'
+          : 'The inactivity period has run out.') +
+      '</div>' +
+      '<div class="line">Your heir can claim this account after it hears nothing from you for ' +
+      esc(typeof total === 'number' && total > 0 ? dur(total) : 'the inactivity period set on it') +
+      '. Any payment, top-up or stop restarts the clock.</div>' +
+      warn;
+    return body;
+  }
+  /* Open the account from the purse: the rules dials (mainnet) or the stored ones (reopening) */
+  function fundOpen(el, ok, n, re, an) {
+    var dials = re
+      ? null
+      : D.isMainnet()
+        ? {
+            cap_kas: ui.liveRules.limit,
+            delay: Math.round(ui.liveRules.notice * 36000),
+            window: Math.round(ui.liveRules.window * 36000),
+          }
+        : null; /* DAA units at 10 a second */
+    var reopen = !!D.state.stopped; /* a stopped account opens again: a new watch code */
+    D.fund(n, dials, an || undefined).then(function (r) {
+      ok.disabled = false;
+      ok.textContent = re ? 'Open the account again' : an ? 'Open account ' + an :
+        'Open the account';
+      if (!r.ok) {
+        resetSlide(el);
+        setText(el, '[data-e]', r.error);
+        return;
+      }
+      haptic();
+      ui.acct = 'main';
+      if (an)
+        D.setAccount(an).then(function () {
+          go('home', {}, { root: true });
+        });
+      else {
+        go('home', {}, { root: true }); /* Home shows the account just opened */
+        if (reopen) shareNewCode();
+      }
+    });
+  }
   function takeOutSlide(el, ok, btn, n, to) {
     var what = n > 0 ? fmt(n) + ' KAS' : 'everything';
-    armSlide(
+    armToSlide(
+      to,
       btn,
       'Take ' + what + ' out of your vault',
-      to ? 'To ' + shortAddr(to) + '.' : 'Into your purse.',
+      to ? 'To ' + addrGroups(to) + '.' : 'Into your purse.',
       false,
       'Slide to move it',
       'send',
@@ -3753,6 +4872,27 @@
         });
       }
     );
+  }
+  /* a new step slides in from the side it came from */
+  function walkSlide(box, dir) {
+    box.classList.add(dir > 0 ? 'fromright' : 'fromleft');
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        box.classList.remove('fromright', 'fromleft');
+      });
+    });
+  }
+  /* keys just made: a new account opens How it works first (once), then its covenant */
+  function keysDone() {
+    if (D.getSetting('toured') === '1') return go('keysmade', {}, { replace: true });
+    go('howitworks', { intro: true, then: 'keysmade' }, { replace: true });
+  }
+  /* the walk's Back / Next, and Done (or Open my account) on the last step */
+  function walkNavHtml(p) {
+    var last = ui.step >= STEPS.length - 1;
+    return (ui.step ? '<button class="pill" data-prev>Back</button>' : '') + (last
+      ? '<button class="pill" data-done>' + (p.intro ? 'Open my account' : 'Done') + '</button>'
+      : '<button class="pill" data-next>Next</button>');
   }
   function walkStepHtml(s) {
     return (
@@ -3787,10 +4927,11 @@
   }
   function takeOutWordsSlide(el, ok, btn, p, a, b) {
     var what = p.kas > 0 ? fmt(p.kas) + ' KAS' : 'everything';
-    armSlide(
+    armToSlide(
+      p.to,
       btn,
       'Take ' + what + ' out of your vault',
-      p.to ? 'To ' + shortAddr(p.to) + '.' : 'Into your purse.',
+      p.to ? 'To ' + addrGroups(p.to) + '.' : 'Into your purse.',
       false,
       'Slide to move it',
       'send',
@@ -3832,22 +4973,1021 @@
       setText(el, '[data-e]', r.error);
     }
   }
+  /* ---- the paper stop (docs/PAPER_STOP.md): an emergency stop button written on paper as 24
+     words. They show once, are checked, and are never stored; "Use a paper stop" types
+     them on any phone, keys or not. ---- */
+  var PAPER_WHAT =
+    'A paper stop is an emergency stop button written on paper as 24 words. ' +
+    'If you lose this phone, type the words on any phone to stop your account and move everything ' +
+    'to your vault, which any two of your three vault seeds open.';
+  var PAPER_APPLY =
+    'Update now adds it to your account at once. Then print the code to keep with your stop words.';
+  var PAPER_KEEP =
+    'Write these down on paper. Keep them in a different place from your vault seeds: ' +
+    'together they open your account and your vault.';
+  var PAPER_FIND = 'First the code printed with your stop words: scan it or paste it.';
+  /* the engine walks the account's history (up to 3 minutes, Engine 12): say so once */
+  var PAPER_LOOK =
+    "Checking your account's history. This can take up to 3 minutes: keep this screen open.";
+  /* paper.check's meaning comes from the engine's stage alone: nothing is inferred here */
+  var PAPER_GONE = 'Already stopped: the funds are in your vault.';
+  /* a long-stopped account's history may no longer be on the network: the take-out still works */
+  var PAPER_HINT = 'If you know this account was stopped, take your funds out with two ' +
+    'vault seeds. A paper stop printed before your last rules update no longer works: use the ' +
+    'newest paper, or two vault seeds.';
+  var PAPER_ENDED = 'This account already ended. Nothing is left in it to stop.';
+  var PAPER_OLD =
+    "This paper's code is out of date. Use a newer code (a guardian's phone has one).";
+  var PAPER_SENT = 'Sent. Waiting for the network to show it.';
+  /* the engine's own words: one keyless call per 2 s */
+  var PAPER_WAIT = 'Please wait a moment and try again.';
+  var PAPER_SLOT =
+    'Your paper stop takes the place of one emergency stop button. Choose which one. ' +
+    'If someone held it, they can no longer stop this account.';
+  /* a lost phone, or a fingerprint added or removed (that clears the card, stop 1 and the purse) */
+  var LOST_LINE =
+    "Don't change your phone's fingerprints or lose this phone: no one could move these funds.";
+  /* what every Kaspa node sees (the setup line and Settings > About > Privacy) */
+  var NODES_LINE =
+    "Kaspa network nodes see your account's addresses and payments, like any Kaspa app.";
+  /* Settings > About > Privacy, in short (the full text is docs/store/PRIVACY.md) */
+  var PRIVACY = [
+    'KVault runs no servers and receives nothing from this app: not your balance, your ' +
+      'payments, your addresses, your vault seeds or your IP address. There is no account with us, ' +
+      'no analytics, no ads and no crash reports.',
+    NODES_LINE +
+      ' The app finds a public node through the Kaspa community\u2019s node finder; it ' +
+      'and the node see your IP address, and the node sees the addresses of your account, purse ' +
+      'and vault and every payment you send. Payments are public and permanent on the Kaspa ' +
+      'network. Some public nodes answer without encryption.',
+    'The dollar price comes from CoinGecko over an encrypted connection. The request names only ' +
+      'Kaspa, the dollar and a number of days, never anything about you.',
+    'Link codes and watch codes go from phone to phone on the screen, never through us. Anyone ' +
+      'holding your watch code can see your balance and waiting withdrawals.',
+    'Your card, purse and emergency stop are sealed on this phone behind your fingerprint. ' +
+      'Nothing is copied to a cloud backup: your paper vault seeds are the backup.',
+    'The app sends no email, no text messages and no push messages through any service. The ' +
+      'alerts are made on this phone.',
+  ];
+  var PAPER_SHOWN =
+    '<div class="err">These words were shown already. ' +
+    'To make new ones, open Make a paper stop again.</div>';
+  /* one fingerprint; the words stay in page memory until read back and stored (paper.confirm) */
+  function paperMake(el, mk, slot) {
+    mk.disabled = true;
+    setText(el, '[data-e]', '');
+    setHtml(el, '[data-pbox]', '');
+    D.paperMake(slot).then(function (r) {
+      mk.disabled = false;
+      var w = r && r.ok && r.words;
+      if (!w || w.length !== 24)
+        return paperRefused(el, mk, (r && r.error) || 'The paper stop could not be made.');
+      ui.paper = w.slice();
+      r.words = null;
+      ui.paperReview = null; /* paper.confirm answers the review */
+      go('papershow', {}, { replace: true });
+    });
+  }
+  /* both free buttons hold guardians: People. The engine cannot tell which button is free, or
+     the owner's choice was refused: the owner chooses (again). */
+  function paperRefused(el, mk, e) {
+    var unsure = /cannot tell whether/i.test(e);
+    setText(el, '[data-e]', unsure ? '' : e);
+    if (/Remove a guardian first/i.test(e)) return paperPeopleBtn(el);
+    if (unsure || /slot/i.test(e)) paperSlotAsk(el, mk);
+  }
+  /* the buttons keys.public does not name a guardian's, under the warning; the tap is the slot */
+  function paperSlotAsk(el, mk) {
+    D.keysPublic().then(function (k) {
+      if (k && k.ok) {
+        ui.pub = k.public || {};
+        ui.stops = k.stops || null;
+      }
+      var free = [2, 3].filter(function (n) {
+        return slotHolder(n === 3 ? 'cancel3_x' : 'cancel2_x') !== 'guardian';
+      });
+      if (!free.length) return paperPeopleBtn(el);
+      var btns = free.map(function (n) {
+        return '<button class="ghost" data-slot="' + n + '">Use Emergency Stop ' + n +
+          '</button><p class="sub">' + esc(paperSlotSay(n)) + '</p>';
+      });
+      setHtml(el, '[data-pbox]', '<p class="sub">' + esc(PAPER_SLOT) + '</p>' + btns.join(''));
+      [].forEach.call(el.querySelectorAll('[data-slot]'), function (b) {
+        b.onclick = function () {
+          paperMake(el, mk, +b.dataset.slot);
+        };
+      });
+    });
+  }
+  /* what choosing button n replaces, in one plain sentence. The engine's own word comes first:
+     'unknown' (docs/PAPER_STOP.md: it may be an old guardian) never reads as "nobody". */
+  function paperSlotSay(n) {
+    var k = n === 3 ? 'cancel3_x' : 'cancel2_x',
+      s = (ui.stops || []).filter(function (t) {
+        return t && t.which === n;
+      })[0],
+      holder = s && s.holder === 'unknown' ? 'unknown' : slotHolder(k),
+      x = (ui.pub || {})[k],
+      who = holder === 'unknown' && x && D.helperNames()[x];
+    if (holder === 'paper') return 'Replaces your old paper stop. Its words stop working.';
+    if (holder === 'you') return 'A spare copy of your own stop. Nobody else holds it.';
+    if (holder === 'unheld') return 'Nobody holds this button now.';
+    if (who) return 'Replaces ' + who + "'s Emergency Stop " + n + ': ' + who +
+      ' can no longer stop this account.';
+    return 'If a guardian holds this button from before, they lose it.';
+  }
+  /* both free buttons hold guardians: the owner removes one first, on People */
+  function paperPeopleBtn(el) {
+    setHtml(el, '[data-pbox]', '<button class="ghost" data-people>Go to People</button>');
+    el.querySelector('[data-people]').onclick = function () {
+      go('people', {}, { root: true });
+    };
+  }
+  /* three words read back from paper, at random places */
+  function paperAsk() {
+    var out = [];
+    for (var k = 0; k < 60 && out.length < 3; k++) {
+      var n = Math.floor(Math.random() * 24);
+      if (out.indexOf(n) < 0) out.push(n);
+    }
+    return out.length === 3 ? out : [2, 10, 19];
+  }
+  function paperCheckRun(el) {
+    var w = ui.paper;
+    if (!w) return back();
+    var ask = paperAsk(),
+      at = 0;
+    function next() {
+      if (at === ask.length) return paperChecked();
+      var n = ask[at],
+        right = w[n],
+        opts = [right, w[(n + 7) % 24], w[(n + 15) % 24]].sort();
+      setText(el, '[data-q]', 'Paper stop, check ' + (at + 1) + ' of 3');
+      setText(el, '[data-w]', 'Word ' + (n + 1));
+      el.querySelector('[data-pick]').innerHTML = opts
+        .map(function (x) {
+          return '<button>' + esc(x) + '</button>';
+        })
+        .join('');
+      [].forEach.call(el.querySelectorAll('[data-pick] button'), function (b) {
+        b.onclick = function () {
+          if (b.textContent !== right)
+            return setText(el, '.sub', 'That word does not match. Please check your paper copy.');
+          at++;
+          next();
+        };
+      });
+    }
+    next();
+  }
+  function paperChecked() {
+    go('paperstop', { step: 'apply' }, { replace: true }); /* its after sends the words on */
+  }
+  /* the words read back go to paper.confirm after one more fingerprint; it stores the change and
+     answers the review lines (rule_words). Only then are the words gone from this phone. */
+  function paperConfirm(el, btn) {
+    if (!ui.paper && ui.paperReview) return paperReview(ui.paperReview);
+    if (!ui.paper) return go('paperstop', {}, { replace: true });
+    btn.disabled = true;
+    setText(el, '[data-e]', '');
+    setHtml(el, '[data-pbox]', '');
+    D.paperConfirm(ui.paper).then(function (r) {
+      btn.disabled = false;
+      if (r && r.ok) {
+        ui.paper = null;
+        ui.paperReview = r;
+        return paperReview(r);
+      }
+      var e = (r && r.error) || 'The paper stop could not be added. Nothing has changed.';
+      setText(el, '[data-e]', e);
+      if (/new paper stop|just made/i.test(e)) paperAgainBtn(el);
+    });
+  }
+  /* nothing waits to be stored, or not these words: new words, from the start */
+  function paperAgainBtn(el) {
+    ui.paper = null;
+    setHtml(el, '[data-pbox]', '<button class="ghost" data-again>Make new stop words</button>');
+    el.querySelector('[data-again]').onclick = function () {
+      go('paperstop', {}, { replace: true });
+    };
+  }
+  /* the stored change goes in with Update now, like a guardian change; the code to print comes
+     after the reopen. An answer in rules.change's shape gets the usual review; a bare one gets
+     Update now alone. */
+  function paperReview(r) {
+    var rw = r.rule_words && r.rule_words.length ? r.rule_words : null,
+      n = r.slot === 3 ? 3 : 2,
+      lines = rw || ['Add your paper stop as Emergency Stop ' + n + '.'];
+    if (r.route) return rulesReviewSheet(lines, r, true);
+    openSheet(
+      '<div class="label">Change the rules</div><div class="line mt8">' + esc(lines[0]) + '</div>' +
+        '<div class="line">Update now: takes effect now.</div><div class="err" data-serr></div>' +
+        '<button class="pill" data-now>Update now</button><button class="ghost" data-no>Not now</button>'
+    );
+    var nw = sheet.querySelector('[data-now]');
+    nw.onclick = function () {
+      nowSlide(nw, true);
+    };
+  }
+  /* Home's papers row: red while the printed stop code is out of date (an old paper stop stops
+     nothing after Update now), quiet while any paper is still to do, hidden when all are done */
+  function paperDueRow(el) {
+    var b = el.querySelector('[data-paper]');
+    if (!b || !D.isLocal() || D.state.noKeys) return;
+    D.paperState().then(function (st) {
+      var rows = paperRowsFor(st),
+        c = papersCount(rows),
+        old = rows.some(function (r) {
+          return r.s === 'old';
+        });
+      b.className = old ? 'notice red' : 'notice quiet';
+      b.textContent = old ? 'Your paper stop is out of date. Print the new code.' :
+        'Your papers: ' + c[0] + ' of ' + c[1] + ' done';
+      b.hidden = !old && c[0] === c[1];
+      b.onclick = function () {
+        go(old ? 'paperprint' : 'papers', { from: 'home' });
+      };
+    });
+  }
+  /* ---- Your papers: every paper a person needs, its state, and the screen that makes it ---- */
+  var PAPER_STATE = { done: ['Done', 'go'], todo: ['To do', ''], old: ['Out of date', 'old'],
+    opt: ['Optional', ''] };
+  var PAPERS_OLD = 'Your rules changed, so the code printed on your paper stop no longer works. ' +
+    'Print the new code and throw the old paper away.';
+  var SEEDS_NOT_KEPT = 'This phone did not keep a copy of your vault seeds. Write them down ' +
+    'now and keep the papers safe.';
+  var SEED_NO_COPY = 'This phone has no copy to check it against. Find your paper and make sure ' +
+    'all 24 words are there and easy to read.';
+  var PAPER_ASK = {
+    o: ['Does your heir have their heir seed on paper?', 'Their heir seed lives on their own ' +
+      'phone: under their link code, Show my heir seed. Ask them to write it down.'],
+    p: ['Are your papers in separate places?', 'Keep the three vault seeds in three places, so ' +
+      'one fire or one thief never finds two. The stop paper can stay with you.'],
+  };
+  /* all three vault seeds done (the person said so before deleting the phone's copy) or not
+     (new keys, new seeds) */
+  function seedMarks(on) {
+    ['s1', 's2', 's3'].forEach(function (t) {
+      D.paperMark(t, on);
+    });
+  }
+  function markRow(m, id, t, d) {
+    return { id: id, t: t, s: m.indexOf(id) >= 0 ? 'done' : 'todo', d: d };
+  }
+  function stopPaperRow(st) {
+    var say = !st.has ? ['opt', 'Not made. An emergency stop you can use from any phone.'] :
+      !st.due ? ['done', 'Your 24 stop words and the printed code are up to date.'] :
+      st.printed ? ['old', 'Print the new code. The old one stopped working when your ' +
+        'rules changed.'] :
+      ['todo', 'Print the code that goes with your 24 stop words.'];
+    return { id: 'stop', t: 'Emergency stop paper', s: say[0], d: say[1] };
+  }
+  function paperRowsFor(st) {
+    var m = D.paperMarks(),
+      pub = st.pub || {},
+      hk = pub.heir_x || pub.heir_address,
+      rows = [1, 2, 3].map(function (n) {
+        return markRow(m, 's' + n, 'Vault seed ' + n, m.indexOf('s' + n) >= 0 ?
+          'Written on paper and read back.' : 'Write it down, then read it back.');
+      });
+    rows.push(stopPaperRow(st));
+    if (hk) rows.push(markRow(m, 'o', 'Heir seed: ' + (D.helperNames()[hk] || 'your heir'),
+      'Your heir keeps their own heir seed. Ask them to write it down.'));
+    if (watchedList().some(function (w) {
+      return w.roles && w.roles.heir;
+    }))
+      rows.push(markRow(m, 'h', 'Your heir seed',
+        'Lets you claim an account you are heir to if this phone is lost.'));
+    rows.push(markRow(m, 'p', 'Kept in separate places',
+      'Never two vault seeds together. The stop paper can stay with you.'));
+    return rows;
+  }
+  /* [done, counted]: an optional row (no paper stop made) is not counted */
+  function papersCount(rows) {
+    var need = rows.filter(function (r) {
+      return r.s !== 'opt';
+    });
+    return [need.filter(function (r) {
+      return r.s === 'done';
+    }).length, need.length];
+  }
+  function paperRowHtml(r) {
+    var s = PAPER_STATE[r.s];
+    return '<button class="item" data-paperrow="' + r.id + '"><span><span class="t">' + esc(r.t) +
+      '</span><span class="d">' + esc(r.d) + '</span></span><span class="r ' + s[1] + '">' +
+      s[0] + '</span></button>';
+  }
+  function papersAgain() {
+    var t = ui.stack[ui.stack.length - 1];
+    if (t && t.name === 'papers') show(t.name, t.params);
+  }
+  /* a paper the phone cannot check: the person says it is done (Yes) or not yet (No) */
+  function papersAsk(id, title, say) {
+    openSheet('<div class="label">Your papers</div><div class="line mt8">' + esc(title) +
+      '</div><div class="sub">' + esc(say) + '</div><button class="pill" data-yes>Yes, it is ' +
+      'done</button><button class="ghost" data-no>Not yet</button>');
+    [['[data-yes]', true], ['[data-no]', false]].forEach(function (k) {
+      sheet.querySelector(k[0]).onclick = function () {
+        ui.closeSheet();
+        D.paperMark(id, k[1]);
+        papersAgain();
+      };
+    });
+  }
+  /* a vault seed: from the sealed copy, show it and read it back; with no copy, ask */
+  function seedRecheck(el, n) {
+    D.sheets().then(function (r) {
+      if (r.ok && r.sheets && r.sheets[n]) {
+        ui.sheets = r.sheets;
+        return go('sheet', { n: n, one: true });
+      }
+      if (/deleted from this phone/i.test(r.error || ''))
+        return papersAsk('s' + (n + 1), 'Is vault seed ' + (n + 1) + ' on paper?', SEED_NO_COPY);
+      setText(el, '[data-e]', r.error || 'The vault seeds could not be shown.');
+    });
+  }
+  function paperRowGo(el, id) {
+    setText(el, '[data-e]', '');
+    if (/^s[123]$/.test(id)) return seedRecheck(el, +id.charAt(1) - 1);
+    if (id === 'stop') return go(ui.paperSt && ui.paperSt.has ? 'paperprint' : 'paperstop',
+      { from: 'papers' });
+    if (id !== 'h') return papersAsk(id, PAPER_ASK[id][0], PAPER_ASK[id][1]);
+    D.heirWords().then(function (r) {
+      if (!r.ok) return setText(el, '[data-e]', r.error || 'The heir seed could not be shown.');
+      ui.heirWords = r.heir_words || null;
+      go('heirsheet', { mark: true });
+    });
+  }
+  function wirePapers(el, p) {
+    el.querySelector('[data-done]').onclick = function () {
+      if (p.after === 'setup') return keysDone();
+      go('home', {}, { root: true });
+      if (p.share) shareNewCode();
+    };
+    D.paperState().then(function (st) {
+      var rows = paperRowsFor(st),
+        c = papersCount(rows);
+      ui.paperSt = st;
+      setText(el, '[data-count]', c[0] + ' of ' + c[1] + ' done');
+      el.querySelector('[data-old]').hidden = !rows.some(function (r) {
+        return r.s === 'old';
+      });
+      setHtml(el, '[data-rows]', rows.map(paperRowHtml).join(''));
+      [].forEach.call(el.querySelectorAll('[data-paperrow]'), function (b) {
+        b.onclick = function () {
+          paperRowGo(el, b.dataset.paperrow);
+        };
+      });
+    });
+  }
+  function paperInputs() {
+    var h = '';
+    for (var i = 1; i <= 24; i++)
+      h +=
+        '<div><i>' + i + '</i><input data-pw size="8" autocapitalize="none" autocomplete="off" ' +
+        'autocorrect="off" spellcheck="false" aria-label="Word ' + i + '"></div>';
+    return '<div class="words">' + h + '</div>';
+  }
+  /* the printed code first (it names the account, and survives the camera), then the words */
+  function wirePaperUse(el) {
+    var code = el.querySelector('[data-code]');
+    code.value = ui.paperCode || '';
+    ui.paperCode = ''; /* the code is public; it only rides through the camera screen */
+    el.querySelector('[data-scan]').onclick = function () {
+      ui.onScan = function (text) {
+        ui.paperCode = String(text || '');
+        back();
+      };
+      go('scan', { what: 'answer' });
+    };
+    el.querySelector('[data-check]').onclick = function () {
+      paperFind(el, code.value);
+    };
+    el.querySelector('[data-stop]').onclick = function () {
+      paperStopSlide(el, this);
+    };
+    wordPicker(el, '[data-pw]');
+    if (code.value) paperFind(el, code.value);
+  }
+  /* stop and seed words the keyboard does not learn: after 3 letters the list words that start
+     so show as taps (a tap fills the word; a word box moves on to the next). No paste. */
+  function wordPicker(el, sel) {
+    var box = el.querySelector('[data-wp]'),
+      ins = el.querySelectorAll(sel),
+      list = bip39List();
+    if (!box) return;
+    box.onmousedown = function (e) {
+      e.preventDefault(); /* the word box keeps its focus and its keyboard */
+    };
+    [].forEach.call(ins, function (inp, i) {
+      inp.onpaste = function (e) {
+        e.preventDefault();
+      };
+      inp.oninput = function () {
+        wordHints(box, list, inp, ins[i + 1]);
+      };
+    });
+  }
+  function wordHints(box, list, inp, next) {
+    var part = /(\S*)$/.exec(inp.value)[1].toLowerCase(),
+      found = [];
+    for (var k = 0; part.length >= 3 && k < list.length && found.length < 4; k++)
+      if (list[k].indexOf(part) === 0) found.push(list[k]);
+    box.hidden = !found.length;
+    box.innerHTML = found
+      .map(function (w, n) {
+        return '<button type="button"' + (n ? '' : ' class="on"') + '>' + esc(w) + '</button>';
+      })
+      .join('');
+    [].forEach.call(box.querySelectorAll('button'), function (b) {
+      b.onclick = function () {
+        var area = inp.tagName === 'TEXTAREA';
+        inp.value = inp.value.replace(/\S*$/, b.textContent) + (area ? ' ' : '');
+        box.hidden = true;
+        (area || !next ? inp : next).focus();
+      };
+    });
+  }
+  function paperFind(el, text) {
+    var c = String(text || '').trim();
+    if (!c) return setText(el, '[data-e]', 'Scan or paste the printed code.');
+    setText(el, '[data-e]', '');
+    setText(el, '[data-say]', PAPER_LOOK);
+    D.paperCheck(c).then(function (r) {
+      var no = paperCheckSays(r);
+      setText(el, '[data-ids]', paperIdsLine(r, 'Check this matches your paper: '));
+      if (no) {
+        setText(el, '[data-say]', PAPER_FIND);
+        setText(el, '[data-check]', 'Try again');
+        return setText(el, '[data-e]', no);
+      }
+      el.kvPaper = c;
+      setText(el, '[data-say]', paperFoundLine(r));
+      el.querySelector('[data-find]').hidden = true;
+      el.querySelector('[data-words]').hidden = false;
+      el.querySelector('[data-stop]').hidden = false;
+    });
+  }
+  /* stopped only on the engine's stage "stopped"; a moved account is an out-of-date code */
+  function paperCheckSays(r) {
+    if (r.ok && r.stage === 'stopped') return PAPER_GONE;
+    if (r.ok && r.stage === 'ended') return PAPER_ENDED;
+    if (r.ok && r.live !== false) return '';
+    var e = (!r.ok && r.error) || 'The account could not be found.';
+    if (/history could not be checked/i.test(e)) return e + ' ' + PAPER_HINT;
+    return /account has moved/i.test(e) ? PAPER_OLD : e;
+  }
+  /* the account the printed code names, to compare with the paper: its code and its vault */
+  function paperIdsLine(r, lead) {
+    var c = String((r && r.code) || ''),
+      v = String((r && r.vault_address) || '');
+    if (!/^[0-9a-f]{8}$/i.test(c)) return '';
+    var vault = /^kaspa(test)?:[a-z0-9]{20,100}$/.test(v) ? '. Your vault: ' + v : '';
+    return lead + c + vault + '.';
+  }
+  /* the same two from the watch code itself, to write beside the printed code */
+  function paperSheetIds(code) {
+    var j = null;
+    try {
+      j = JSON.parse(code);
+    } catch (e) {
+      j = null;
+    }
+    if (!j || typeof j !== 'object') return '';
+    var ids = { code: String(j.public_sha256 || '').slice(0, 8),
+      vault_address: (j.public && j.public.cold_address) || '' };
+    return paperIdsLine(ids, 'Write this on the paper too: account code ');
+  }
+  function paperFoundLine(r) {
+    var l = 'We found your account: ' + fmt(+r.kas || 0) + ' KAS.';
+    if (r.stage === 'waiting')
+      l += ' A withdrawal is waiting on this account. Stopping also stops it.';
+    return l + ' Now type your 24 stop words.';
+  }
+  /* which word number is wrong, never the word itself */
+  function paperWordsError(el) {
+    var list = bip39List(), /* the same fail-closed list as the vault seed check */
+      ins = el.querySelectorAll('[data-pw]');
+    if (list.length !== 2048) return 'The word list is missing. Update the app.'; /* fail closed */
+    if (ins.length !== 24) return 'Please enter all 24 words.';
+    for (var i = 0; i < 24; i++) {
+      var w = ins[i].value.trim().toLowerCase();
+      if (!w) return 'Word ' + (i + 1) + ' is missing.';
+      if (list.indexOf(w) < 0)
+        return 'Word ' + (i + 1) + ' is not on the word list. Please check your paper.';
+    }
+    return '';
+  }
+  /* the words go straight from the boxes into the one stop call; the boxes are emptied at once */
+  function paperStopSlide(el, btn) {
+    var bad = paperWordsError(el);
+    setText(el, '[data-e]', bad);
+    if (bad) return;
+    var say = 'Slide to stop and move everything to your vault',
+      title = 'Stop my account';
+    armSlide(btn, title, 'Everything moves to your vault.', true, say, 'stop', function () {
+      var ins = el.querySelectorAll('[data-pw]'),
+        sent = D.paperStop(
+          [].map.call(ins, function (inp) {
+            return inp.value.trim().toLowerCase();
+          }),
+          el.kvPaper
+        );
+      [].forEach.call(ins, function (inp) {
+        inp.value = '';
+      });
+      sent.then(function (x) {
+        paperStopDone(el, x);
+      });
+    });
+  }
+  function paperStopDone(el, x) {
+    if (x && x.ok) {
+      haptic();
+      var done = { kas: +x.kas || 0, sent: x.confirmed === false,
+        ids: paperIdsLine(x, 'Account code ') };
+      return go('paperdone', done, { replace: true });
+    }
+    resetSlide(el);
+    setText(el, '[data-ids]', paperIdsLine(x || {}, 'Check this matches your paper: '));
+    var e = (x && x.error) || 'The stop did not go through. No funds were moved.';
+    setText(el, '[data-e]', e === PAPER_WAIT ? e : e + ' Type your words again to try once more.');
+  }
+  /* ---- take funds out with two vault seeds: no fingerprint, the seeds are the authority.
+     The seeds stay in their boxes until the one call, then the boxes are emptied at once ---- */
+  var OUT_FIND = 'First the code of your account: scan it or paste it.';
+  var OUT_SENT = 'Sent. Waiting for the network to confirm it.';
+  var OUT_ADDR = /^kaspa(test)?:[a-z0-9]{20,100}$/;
+  var OUT_UNCHECKED = 'We found your vault, but not the account\'s history. Check the code and ' +
+    'vault below match your paper, then type two of your three vault seeds.';
+  function seedBox(n) {
+    return '<label class="field"><span>Vault seed ' + n + '</span><textarea data-vs ' +
+      'autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false">' +
+      '</textarea></label>';
+  }
+  /* the purse is offered only on a phone with keys whose purse address is known */
+  function outPurse() {
+    var a = String(D.state.purseAddress || '');
+    return !D.state.noKeys && OUT_ADDR.test(a) ? a : '';
+  }
+  function paperOutHtml() {
+    return (
+      topbar() +
+      '<div class="label">Two vault seeds</div><h1 class="head">Take your funds out with two vault seeds.</h1>' +
+      '<p class="line" data-say>' + OUT_FIND + '</p><p class="addr" data-ids></p>' +
+      '<div data-find><label class="field"><span>The account code</span>' +
+      '<textarea data-code autocapitalize="none" spellcheck="false"></textarea></label>' +
+      '<div class="twobtn"><button class="pill" data-scan>Scan the code</button>' +
+      '<button class="pill" data-check>Find my account</button></div></div>' +
+      '<div data-seeds hidden>' + seedBox(1) + seedBox(2) +
+      '<div class="chips" data-wp hidden></div>' +
+      (outPurse() ? '<button class="ghost" data-purse>Send to this phone\'s purse</button>' : '') +
+      '<label class="field"><span>Send the funds to this address</span><input data-to ' +
+      'autocapitalize="none" autocomplete="off" spellcheck="false"></label></div>' +
+      '<div data-rev hidden><p class="line">From your vault:</p><p class="addr" data-rv></p>' +
+      '<p class="line">To:</p><p class="addr" data-rt></p></div>' +
+      '<div class="err" data-e></div><div class="push"></div>' +
+      '<button class="pill" data-next hidden>Review</button>' +
+      '<button class="pill" data-out hidden>Take my funds out</button>' +
+      '<button class="ghost" data-edit hidden>Change</button>'
+    );
+  }
+  function wirePaperOut(el) {
+    var code = el.querySelector('[data-code]'),
+      pb = el.querySelector('[data-purse]');
+    code.value = ui.paperCode || '';
+    ui.paperCode = ''; /* the code is public; it only rides through the camera screen */
+    el.querySelector('[data-scan]').onclick = function () {
+      ui.onScan = function (text) {
+        ui.paperCode = String(text || '');
+        back();
+      };
+      go('scan', { what: 'answer' });
+    };
+    el.querySelector('[data-check]').onclick = function () {
+      paperOutFind(el, code.value);
+    };
+    if (pb)
+      pb.onclick = function () {
+        el.querySelector('[data-to]').value = outPurse();
+      };
+    el.querySelector('[data-next]').onclick = function () {
+      if (!el.kvBusy) paperOutReview(el);
+    };
+    el.querySelector('[data-edit]').onclick = function () {
+      if (el.kvBusy) return;
+      resetSlide(el);
+      paperOutClear(el); /* the vault seeds are typed again, never shown back */
+      paperOutStep(el, 'seeds');
+    };
+    el.querySelector('[data-out]').onclick = function () {
+      if (!el.kvBusy) paperOutSlide(el, this);
+    };
+    wordPicker(el, '[data-vs]');
+    if (code.value) paperOutFind(el, code.value);
+  }
+  function paperOutStep(el, step) {
+    el.querySelector('[data-find]').hidden = step !== 'find';
+    el.querySelector('[data-seeds]').hidden = step !== 'seeds';
+    el.querySelector('[data-next]').hidden = step !== 'seeds';
+    el.querySelector('[data-rev]').hidden = step !== 'review';
+    el.querySelector('[data-out]').hidden = step !== 'review';
+    el.querySelector('[data-edit]').hidden = step !== 'review';
+  }
+  /* the code names the account and its vault; a stopped account is the usual case here. The
+     take-out reads the vault's own coins, so it goes on whenever the vault address came back,
+     even when the account's history could not be checked (a long-stopped account) */
+  function paperOutFind(el, text) {
+    var c = String(text || '').trim();
+    if (!c) return setText(el, '[data-e]', 'Scan or paste the account code.');
+    setText(el, '[data-e]', '');
+    setText(el, '[data-say]', PAPER_LOOK);
+    D.paperCheck(c).then(function (r) {
+      if (!OUT_ADDR.test(String(r.vault_address || ''))) {
+        setText(el, '[data-say]', OUT_FIND);
+        setText(el, '[data-check]', 'Try again');
+        return setText(el, '[data-e]', (!r.ok && r.error) || 'The account could not be found.');
+      }
+      el.kvCode = c;
+      el.kvVault = r.vault_address;
+      setText(el, '[data-say]', r.ok ? 'We found your account. Now type two of your three ' +
+        'vault seeds.' : OUT_UNCHECKED);
+      setText(el, '[data-ids]', paperIdsLine(r, 'Check this matches your paper: '));
+      paperOutStep(el, 'seeds');
+    });
+  }
+  /* which seed and which word number is wrong, never the word itself */
+  function seedWordsBad(ws, list) {
+    if (ws.length !== 24) return 'please enter all 24 words.';
+    for (var i = 0; i < 24; i++)
+      if (list.indexOf(ws[i]) < 0) return 'word ' + (i + 1) + ' is not on the word list.';
+    return '';
+  }
+  /* the two seeds as strings, or the reason they are refused (a string) */
+  function paperOutSeeds(el) {
+    var list = bip39List(), /* the same fail-closed list as the vault seed check */
+      ins = el.querySelectorAll('[data-vs]'),
+      out = [];
+    if (list.length !== 2048) return 'The word list is missing. Update the app.';
+    for (var i = 0; i < 2; i++) {
+      var ws = ins[i].value.trim().toLowerCase().split(/\s+/).filter(Boolean),
+        bad = seedWordsBad(ws, list);
+      if (bad) return 'Vault seed ' + (i + 1) + ': ' + bad;
+      out.push(ws.join(' '));
+    }
+    if (out[0] !== out[1]) return out;
+    return 'Both entries are the same vault seed. Please type two different vault seeds.';
+  }
+  function paperOutReview(el) {
+    var s = paperOutSeeds(el),
+      to = el.querySelector('[data-to]').value.trim();
+    if (typeof s === 'string') return setText(el, '[data-e]', s);
+    s.length = 0; /* checked only; the call reads the boxes again */
+    if (!to) return setText(el, '[data-e]', 'Enter the address the funds should go to.');
+    if (!OUT_ADDR.test(to))
+      return setText(el, '[data-e]',
+        'That address is not right for this network. Check it and try again.');
+    setText(el, '[data-e]', '');
+    setText(el, '[data-rv]', el.kvVault);
+    setText(el, '[data-rt]', to === outPurse() ? to + ' (this phone\'s purse)' : to);
+    el.kvTo = to;
+    paperOutStep(el, 'review');
+  }
+  function paperOutSlide(el, btn) {
+    var to = el.kvTo;
+    armToSlide(to, btn, 'Take your funds out', 'From your vault to ' + to + '.', false,
+      'Slide to take your funds out', 'send', function () {
+        if (el.kvBusy) return;
+        el.kvBusy = true; /* one take-out at a time: Change, Review and the button wait */
+        el.querySelector('[data-edit]').hidden = true;
+        var s = paperOutSeeds(el),
+          purse = to === outPurse();
+        paperOutClear(el);
+        if (typeof s === 'string') return paperOutDone(el, { ok: false, error: s }, to);
+        /* this phone's purse: `to` left out, never null */
+        D.paperTakeout(s, el.kvCode, purse ? '' : to).then(function (x) {
+          paperOutDone(el, x, to);
+        });
+      });
+  }
+  function paperOutClear(el) {
+    [].forEach.call(el.querySelectorAll('[data-vs]'), function (t) {
+      t.value = '';
+    });
+    setHtml(el, '[data-wp]', '');
+  }
+  function paperOutDone(el, x, to) {
+    el.kvBusy = false;
+    if (x && x.ok) {
+      haptic();
+      var done = { kas: +x.kas || 0, sent: x.confirmed === false, to: String(x.to || to) };
+      return go('paperoutdone', done, { replace: true });
+    }
+    resetSlide(el);
+    paperOutStep(el, 'seeds');
+    var e = (x && x.error) || 'The funds could not be moved. Nothing was sent.';
+    var again = ' Type your vault seeds again to try once more.';
+    setText(el, '[data-e]', e === PAPER_WAIT ? e : e + again);
+  }
+  /* a watched account's code, to take its funds out with two vault seeds from any phone */
+  function wireWatchedCode(el, id) {
+    var code = '';
+    el.querySelector('[data-wcode]').onclick = function () {
+      D.watchedCode(id).then(function (r) {
+        code = (r && r.ok && r.watch_code) || '';
+        if (!code) return setText(el, '[data-e]', (r && r.error) || 'The code could not be made.');
+        var svg = KVQR.svg(code);
+        if (svg) setHtml(el, '[data-wq]', svg);
+        el.querySelector('[data-wqbox]').hidden = !svg;
+        el.querySelector('[data-wcopy]').hidden = false;
+        setText(el, '[data-e]', '');
+      });
+    };
+    el.querySelector('[data-wcopy]').onclick = function () {
+      if (!code || !bridge || !bridge.copy) return;
+      bridge.copy(code);
+      haptic();
+      setText(el, '[data-e]', 'Copied.');
+    };
+  }
+  /* Coins: the account's one coin, then the purse's (Sample: Everyday's) coins from
+     D.coinsInfo: how many, the total, what combining costs and what is left after */
+  function coinRow(t, d, kas) {
+    return '<div class="item"><span><span class="t">' + esc(t) + '</span><span class="d">' +
+      esc(d) + '</span></span><span class="r">' + fmt(kas) + ' KAS</span></div>';
+  }
+  function coinsList(c) {
+    var big = c.amounts.slice().sort(function (a, b) {
+        return b - a;
+      }),
+      shown = big.slice(0, 8).map(function (x) {
+      return fmt(x);
+    });
+    if (c.count > 8) shown.push('and ' + (c.count - 8) + ' more');
+    return c.count + (c.count === 1 ? ' coin' : ' coins') +
+      (c.count ? ': ' + shown.join(', ') : '');
+  }
+  function coinsSay(c) {
+    if (!c) return 'Counting your coins\u2026';
+    if (!c.ok) return c.error || 'Your coins could not be counted. Try again in a moment.';
+    if (!c.count) return 'Your purse is empty.';
+    if (c.count < 2) return 'Nothing to combine.';
+    if (c.fee == null || c.total - c.fee <= c.fee)
+      return 'These coins cannot be combined in one step.';
+    var line = 'Combining ' + c.count + ' coins into one costs about ' + fmt(c.fee) +
+      ' KAS. After: one coin of ' + fmt(c.total - c.fee) + ' KAS.';
+    return D.isLive() ? line + ' Combining is coming in an update.' : line;
+  }
+  function coinsPaint(el, c) {
+    var s = D.state,
+      name = D.isLive() ? 'Purse' : s.everyday && s.everyday.name,
+      rows = coinRow(s.account || 'Your account', 'One coin. Your rules keep it that way.',
+        s.balance);
+    if (!name) c = { ok: false, error: 'Nothing to combine.' }; /* Sample, no Everyday */
+    if (c && c.ok && c.count) rows += coinRow(name, coinsList(c), c.total);
+    setHtml(el, '[data-l]', rows);
+    setText(el, '[data-say]', coinsSay(c));
+    var b = el.querySelector('[data-ok]');
+    if (b) b.disabled = D.isLive() || !c || !c.ok || c.count < 2 || c.fee == null ||
+      c.total - c.fee <= c.fee;
+  }
+  /* share text: the phone's share sheet (Bridge.share, Engine 12), else the browser's, else
+     copy it with a plain line in [sel]. Android's WebView has no navigator.share. */
+  function shareText(el, sel, t) {
+    try {
+      if (bridge && bridge.share) return bridge.share(String(t).slice(0, 8000));
+    } catch (e) {
+      /* no share sheet on this phone: fall through to copy */
+    }
+    if (navigator.share) return navigator.share({ text: t }).catch(function () {});
+    var done = function () {
+      setText(el, sel, 'Copied. Paste it into a message or an email within a minute.');
+    };
+    if (bridge && bridge.copy) {
+      bridge.copy(t); /* Bridge.copy clears the clipboard after a minute */
+      return done();
+    }
+    (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(done,
+      function () {
+        setText(el, sel, 'This phone could not share it.');
+      });
+  }
+  /* the statement as plain text: one movement per line, then the totals the screen shows */
+  /* KAS a statement line paid out (0 for anything else): the screen and the shared text agree */
+  /* a row's amount: the engine's kas (paid, received, fund), else Sample's text */
+  function rowKas(a) {
+    if (typeof a.kas === 'number') return a.kas;
+    var m = /([\d.,]+) KAS/.exec(a.text);
+    return a.kind === 'paid' && m ? parseFloat(m[1].replace(/,/g, '')) : 0;
+  }
+  function sameMonth(at, now) {
+    var d = new Date(at * 1000);
+    return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+  }
+  /* the statement: once the engine dates its lines (`at`), this month's dated rows plus the
+     older undated ones, and only dated rows count; no dates on Live = Recent activity, no
+     totals. In = received + fund (the opening deposit is money in), Out = paid */
+  function statementData() {
+    var now = new Date(),
+      h = D.state.history || [],
+      dated = h.some(function (a) {
+        return typeof a.at === 'number';
+      }),
+      d = { month: dated || !D.isLive(), out: 0, inn: 0, rows: [] };
+    h.forEach(function (a) {
+      var has = typeof a.at === 'number';
+      if (has && !sameMonth(a.at, now)) return;
+      var when = has ? alertWhen(a.at) : a.when || (dated ? 'Date not recorded' : '');
+      d.rows.push({ a: a, when: when });
+      if (dated && !has) return;
+      if (a.kind === 'paid') d.out += rowKas(a);
+      else if (a.kind === 'received' || a.kind === 'fund') d.inn += rowKas(a);
+    });
+    return d;
+  }
+  function statementTotals(d) {
+    var bal = 'Balance now ' + fmt(D.state.balance) + ' KAS.';
+    if (!d.month) return bal;
+    return 'In this month: ' + fmt(d.inn) + ' KAS. Out this month: ' + fmt(d.out) +
+      ' KAS' + (D.isLive() ? '' : ', ' + money(d.out)) + '. ' + bal;
+  }
+  function statementText() {
+    var d = statementData(),
+      lines = d.rows.map(function (r) {
+        return (r.when ? r.when + ': ' : '') + r.a.text;
+      });
+    return ['KVault statement, ' + (D.state.account || 'your account') + ', ' +
+      (d.month ? 'this month' : 'recent activity')]
+      .concat(lines.length ? lines : ['Nothing yet.'])
+      .concat([statementTotals(d)])
+      .join('\n');
+  }
+  function statementRowHtml(r) {
+    var a = r.a,
+      v = rowKas(a),
+      inn = a.kind === 'received' || a.kind === 'fund',
+      sign = a.kind === 'paid' ? '\u2212' : inn ? '+' : '';
+    return '<div class="item"><span><span class="t">' + esc(a.text) +
+      '</span><span class="d">' + esc(r.when) + '</span></span><span class="r">' +
+      (sign && v ? sign + fmt(v) : '') + '</span></div>';
+  }
+  /* a code's text (the same the picture holds), to send by message when their camera cannot scan */
+  function copyCode(el, code) {
+    if (!code) return;
+    if (bridge && bridge.copy) {
+      bridge.copy(code);
+      haptic();
+      return setText(el, '[data-e]', 'Copied. Paste it into a message within a minute.');
+    }
+    (navigator.clipboard ? navigator.clipboard.writeText(code) : Promise.reject()).then(
+      function () {
+        setText(el, '[data-e]', 'Copied.');
+      },
+      function () {
+        setText(el, '[data-e]', 'The code could not be copied.');
+      }
+    );
+  }
+  /* a broken camera: the same code, pasted, goes down the same path as a scanned one */
+  function wirePaste(el, done, say) {
+    var box = el.querySelector('[data-paste]');
+    function go1() {
+      var t = String(box.value || '').trim().slice(0, 4000);
+      if (!t) return say('Paste the code first.');
+      done(t);
+    }
+    el.querySelector('[data-pastego]').onclick = go1;
+    /* a paste goes in by itself; the code's own check refuses junk in plain words */
+    box.addEventListener('paste', function () {
+      setTimeout(go1, 0);
+    });
+  }
+  /* the lock screen's PIN field: six digits are checked against the panic PIN (hashed); a match
+     opens the duress view, anything else says no in the words of an ordinary wrong PIN */
+  /* wrong PINs: five free, then a wait doubling from 30 s, up to an hour (until app restart) */
+  function pinMiss(el) {
+    ui.pinFails = (ui.pinFails || 0) + 1;
+    var n = ui.pinFails - 5;
+    if (n >= 0) ui.pinUntil = Date.now() + Math.min(3600, 30 * Math.pow(2, Math.min(n, 7))) * 1000;
+    setText(el, '[data-e]',
+      'Not your PIN. Use your fingerprint, or the PIN in the phone\u2019s own prompt.');
+  }
+  function lockPin(el, pinIn) {
+    return function () {
+      var v = pinIn.value.replace(/\D/g, '');
+      if (v.length < 6) return;
+      pinIn.value = '';
+      var wait = Math.ceil(((ui.pinUntil || 0) - Date.now()) / 1000);
+      if (wait > 0) return setText(el, '[data-e]', 'Too many tries. Wait ' + wait + ' seconds.');
+      D.panicMatch(v).then(function (yes) {
+        if (ui.el !== el || !ui.cur || ui.cur.name !== 'lock') return;
+        if (!yes) return pinMiss(el);
+        ui.pinFails = 0;
+        D.setDuress(true);
+        ui.duress = true;
+        ui.afterLock = null;
+        go('duress', {}, { root: true });
+      });
+    };
+  }
+  /* the duress view's one screen: the purse as if it were all there is (balance, Send, Receive) */
+  function duressHtml() {
+    var a = String(D.state.purseAddress || '');
+    return (
+      '<div class="top"><span class="label">KVault</span></div><div class="push"></div>' +
+      '<div class="big" data-bal>' + esc(D.state.purse != null ? fmt(D.state.purse) : '\u2026') +
+      '</div><div class="line">KAS available</div><div class="err" data-e></div>' +
+      '<div class="push"></div><button class="pill" data-go="pursepay">Send</button>' +
+      '<button class="ghost" data-showqr>Receive</button><div class="qrbox" data-qrbox hidden>' +
+      '<div class="qr" data-qr>' + (a ? KVQR.svg(a) : '') + '</div><div class="sub" data-addr>' +
+      esc(a) + '</div></div>'
+    );
+  }
+  function duressAfter(el) {
+    el.querySelector('[data-showqr]').onclick = function () {
+      el.querySelector('[data-qrbox]').hidden = false;
+      this.hidden = true;
+    };
+    D.funding().then(function (r) {
+      if (!r || !r.ok || ui.el !== el) return;
+      if (typeof r.kas === 'number') setText(el, '[data-bal]', fmt(r.kas));
+      if (!D.state.purseAddress && r.address) {
+        el.querySelector('[data-qr]').innerHTML = KVQR.svg(r.address);
+        setText(el, '[data-addr]', r.address);
+      }
+    });
+  }
+  /* a PIN anyone would try first: one digit six times, or a straight run up or down */
+  function panicWeak(v) {
+    return /^(\d)\1{5}$/.test(v) || '0123456789'.indexOf(v) >= 0 || '9876543210'.indexOf(v) >= 0;
+  }
+  /* the panic PIN screen: type it, type it again, then a fresh fingerprint keeps it (hashed) */
+  function panicPinAfter(el) {
+    var first = '',
+      inp = el.querySelector('[data-p]');
+    function err(t) {
+      inp.value = '';
+      setText(el, '[data-e]', t);
+    }
+    function keep(v) {
+      confirmAction('Set your panic PIN', '').then(function (yes) {
+        if (!yes) return err('Your fingerprint is needed to set it.');
+        D.panicSet(v).then(function (ok) {
+          if (!ok) return err('This phone cannot keep a panic PIN safely.');
+          go('settings', {}, { replace: true });
+        });
+      });
+    }
+    el.querySelector('[data-ok]').onclick = function () {
+      var v = inp.value.replace(/\D/g, '');
+      if (v.length !== 6) return err('Six digits.');
+      if (!first && panicWeak(v)) return err('Choose a PIN that is harder to guess.');
+      if (!first) {
+        first = v;
+        inp.value = '';
+        setText(el, '[data-pl]', 'Type it again');
+        return setText(el, '[data-e]', '');
+      }
+      if (v !== first) {
+        first = '';
+        setText(el, '[data-pl]', 'Choose a PIN, 6 digits');
+        return err('The two PINs did not match. Start again.');
+      }
+      keep(v);
+    };
+    var off = el.querySelector('[data-off]');
+    if (off)
+      off.onclick = function () {
+        confirmAction('Remove your panic PIN', '').then(function (yes) {
+          if (!yes) return;
+          D.panicClear();
+          go('settings', {}, { replace: true });
+        });
+      };
+  }
   var SCR = {
+    /* the duress view, opened by the panic PIN on the lock screen: the purse only. No tabs, no
+       menu; go() keeps every other screen out and the data layer refuses every other action. */
+    duress: {
+      money: true,
+      html: duressHtml,
+      after: duressAfter,
+    },
     /* 0. Lock: the door in front of an account that exists */
     lock: {
       money: true,
       scene: function () {
-        return { mode: 'safe', snap: true };
-      } /* the seal on the unlock screen, formed on arrival */,
+        return { mode: 'safe', snap: true, mark: 'k' };
+      } /* the seal on the unlock screen: our K, traced in fast on arrival */,
       html: function () {
         return (
-          '<div class="top"><span class="label">KaspaVault</span>' +
+          '<div class="top"><span class="label">KVault</span>' +
           (D.isLive() ? '' : tag()) +
           '</div><div class="push"></div>' +
           '<button class="sealtap" data-ok aria-label="Open"></button>' /* a glowing centre button, nothing prompts until it is touched */ /* no name, no line; touching the centre of the seal opens */ +
-          (D.isLive()
-            ? ''
-            : '<button class="ghost small" data-pin>Use a PIN</button><label class="field" data-pinbox hidden><span>PIN</span><input data-pinv inputmode="numeric" maxlength="6" autocomplete="off" aria-label="PIN"></label><div class="err" data-e></div>')
+          '<button class="ghost small" data-pin>Use a PIN</button><label class="field" data-pinbox ' +
+          'hidden><span>PIN</span><input data-pinv inputmode="numeric" maxlength="6" ' +
+          'autocomplete="off" aria-label="PIN"></label><div class="err" data-e></div>'
         );
       },
       after: function (el) {
@@ -3859,32 +5999,17 @@
             pinBtn.hidden = true;
             pinIn.focus();
           };
-        if (pinIn)
-          pinIn.oninput = function () {
-            /* the panic PIN opens a quiet app: Everyday only, savings out of sight */
-            var v = pinIn.value.replace(/\D/g, ''),
-              panic = D.getSetting('panic_pin');
-            if (v.length < 4) return;
-            if (panic && v === panic) {
-              ui.quiet = true;
-              ui.acct = 'everyday';
-              pinIn.value = '';
-              go('home', {}, { root: true });
-              return;
-            }
-            if (v.length >= (panic ? panic.length : 6)) {
-              pinIn.value = '';
-              setText(el, '[data-e]', 'Not your PIN. Use your fingerprint, or the PIN in the phone’s own prompt.');
-            }
-          };
+        if (pinIn) pinIn.oninput = lockPin(el, pinIn);
         el.querySelector('[data-ok]').onclick = function () {
           var p =
             D.isLive() && D.phase() === 'locked'
               ? D.retryUnlock()
-              : confirmAction('Unlock KaspaVault', ''); /* one fingerprint, then straight to Home, never a second lock */
+              : confirmAction('Unlock KVault', ''); /* one fingerprint, then Home */
           p.then(function (yes) {
             if (!yes) return;
-            ui.quiet = false;
+            /* the phone's prompt takes the phone's own PIN too, which whoever forced the app
+               open may know: the duress view ends only when the app is closed and started again */
+            if (ui.duress) return go('duress', {}, { root: true });
             go('home', {}, { root: true });
             if (ui.afterLock) {
               go(ui.afterLock, {});
@@ -3892,25 +6017,30 @@
             }
           });
         };
-        if (bridge && !document.hidden)
+        if (bridge && shown())
           setTimeout(function () {
-            if (ui.cur && ui.cur.name === 'lock' && !ui.bio) el.querySelector('[data-ok]').click();
+            if (ui.cur && ui.cur.name === 'lock' && !ui.bio &&
+              shown()) el.querySelector('[data-ok]').click();
           }, 350); /* the prompt opens by itself (no bar) */
       },
       live: function () {},
     },
     /* 1. Welcome */
     welcome: {
+      sample: true /* needs demo.js: go() sends Live Home */,
       money: true,
       html: function () {
         return (
-          '<div class="label">KaspaVault</div><div class="push"></div><h1 class="head">Your money, with a stop in your pocket.</h1>' +
-          '<button class="pill" data-go="words" data-params=\'{"mode":"wallet"}\'>Create a new wallet</button>' +
-          '<button class="ghost" data-go="restore">I have a recovery seed</button><button class="ghost" data-go="invite">I was invited</button>'
+          '<div class="label">KVault</div><div class="push"></div><h1 class="head">Savings with a daily limit and an emergency stop.</h1>' +
+          '<button class="pill" data-go="words" data-params=\'{"mode":"wallet"}\'>Open a new account</button>' +
+          '<button class="ghost" data-go="restore">Restore with my recovery seed</button><button class="ghost" data-go="invite">I was invited</button>' +
+          '<button class="ghost" data-go="paperuse">Use a paper stop</button>' +
+          '<button class="ghost" data-go="paperout">Take funds out with two vault seeds</button>'
         );
       },
     },
     words: {
+      sample: true /* needs demo.js: go() sends Live Home */,
       locked: false,
       html: function (p) {
         var safe = p.mode === 'safe';
@@ -3920,8 +6050,8 @@
           (safe ? 'Your vault seed' : 'Your recovery seed') +
           '</h1><p class="line">' +
           (safe
-            ? 'Write these on paper. They open your vault, and they stay off this phone.'
-            : 'Write these on paper. They bring your wallet back on a new phone.') +
+            ? 'Write these on paper. They open your vault.'
+            : 'Write these words on paper. They restore your account on a new phone.') +
           ' You will see them once.</p>' +
           '<div class="words" data-words></div><div class="sub" data-veil>Confirm with your fingerprint to see them.</div><div class="push"></div>' +
           '<button class="pill" data-go="wordcheck" data-params=\'' +
@@ -3948,6 +6078,7 @@
       },
     },
     wordcheck: {
+      sample: true /* needs demo.js: go() sends Live Home */,
       html: function () {
         return (
           topbar(tag()) +
@@ -3983,7 +6114,7 @@
               if (b.textContent === right) {
                 at++;
                 next();
-              } else setText(el, '.sub', 'Not that one. Check your paper.');
+              } else setText(el, '.sub', 'That word does not match. Please check your paper copy.');
             };
           });
         }
@@ -3991,10 +6122,12 @@
       },
     },
     restore: {
+      sample: true /* needs demo.js: go() sends Live Home */,
       html: function () {
         return (
           topbar(tag()) +
-          '<h1 class="head">Bring your wallet back</h1><label class="field"><span>Your 24-word recovery seed</span><textarea data-w autocapitalize="none" spellcheck="false"></textarea></label><div class="err" data-e></div><div class="push"></div>' +
+          '<h1 class="head">Restore your account</h1><label class="field"><span>Your 24-word recovery seed</span><textarea data-w autocapitalize="none" ' +
+          'spellcheck="false"></textarea></label><div class="err" data-e></div><div class="push"></div>' +
           '<button class="pill" data-ok>Bring it back</button><button class="ghost" data-fill>Use the sample seed</button>'
         );
       },
@@ -4005,7 +6138,7 @@
         };
         el.querySelector('[data-ok]').onclick = function () {
           if (w.value.trim().split(/\s+/).length !== 24) {
-            setText(el, '[data-e]', 'That is not 24 words yet.');
+            setText(el, '[data-e]', 'Please enter all 24 words.');
             return;
           }
           D.setSetting('welcomed', '1');
@@ -4025,12 +6158,22 @@
         return (
           '<div class="top"><button class="acctbtn" data-pick aria-label="Change account"><span data-acct-name></span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4"/></svg></button>' +
           '<span class="topright"><button class="bell" data-go="alerts" aria-label="Alerts"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3a5 5 0 0 0-5 5v3l-1.5 2.5h13L15 11V8a5 5 0 0 0-5-5zM8 16a2 2 0 0 0 4 0"/></svg></button><button class="menu" data-menu aria-label="Menu"><i></i><i></i><i></i></button></span></div>' +
-          '<div class="alarm" data-alarm hidden></div><button class="notice" data-tour hidden>New here? Show me around.</button><button class="notice quiet" data-notice></button><button class="notice amber" data-heir></button>' +
+          '<div class="alarm" data-alarm hidden></div><button class="notice" data-tour hidden>New to KVault? Take the tour.</button><button ' +
+          'class="notice quiet" data-notice></button><button class="notice amber" data-heir></button>' +
+          '<button class="notice" data-paper hidden></button>' +
           '<div class="err" data-e></div><div class="push"></div>' +
-          '<div class="big" data-bal></div><button class="denom" data-swap aria-label="Show in the other unit"><span data-usd></span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2v10M2 9l3 3 3-3M11 14V4M8 7l3-3 3 3"/></svg></button><div class="line" data-limit></div><button class="notice quiet" data-purse-line></button>' +
+          '<div class="big" data-bal></div><button class="denom" data-swap aria-label="Show in the other unit">' +
+          '<span data-usd></span><svg viewBox="0 0 16 16" aria-hidden="true">' +
+          '<path d="M5 2v10M2 9l3 3 3-3M11 14V4M8 7l3-3 3 3"/></svg></button>' +
+          '<div class="line lines" data-limit></div><button class="notice quiet" data-purse-line></button>' +
           '<button class="sealtap" data-unlock hidden aria-label="Open"></button>' /* the seal itself is the button */ +
           '<div class="guards" data-guards></div>' +
+          '<div class="sub" data-lone hidden>If you lose this phone, only a guardian can move this ' +
+          'account to your vault. <span data-lonemore hidden>' + esc(LOST_LINE) + ' </span>' +
+          '<button class="readmore" data-lonex>Read more</button> ' +
+          '<button class="ghost" data-go="people">Add a guardian</button></div>' +
           '<button class="pill" data-rulesfin hidden>Finish updating my rules</button>' +
+          '<div class="list" data-watched></div>' /* accounts this phone helps */ +
           '<div class="log" data-log></div>' +
           '<div class="row" data-row></div>'
         );
@@ -4044,6 +6187,18 @@
         };
         el.querySelector('[data-bal]').onclick = swap;
         el.querySelector('[data-swap]').onclick = swap;
+        el.querySelector('[data-lonex]').onclick = function () {
+          var m = el.querySelector('[data-lonemore]');
+          m.hidden = !m.hidden; /* the guardian note folded to its first line; Read more opens it */
+          this.textContent = m.hidden ? 'Read more' : 'Show less';
+        };
+        el.querySelector('[data-watched]').addEventListener('click', function (e) {
+          var b = e.target.closest('[data-wx]');
+          if (!b) return;
+          ui.wOpen = ui.wOpen || {};
+          ui.wOpen[b.dataset.wx] = !ui.wOpen[b.dataset.wx];
+          refresh();
+        });
         el.querySelector('[data-pick]').onclick = openAccounts;
         el.querySelector('[data-menu]').onclick = openMenu;
         el.querySelector('[data-notice]').onclick = function () {
@@ -4070,9 +6225,9 @@
         el.querySelector('[data-rulesfin]').onclick = function () {
           rulesFinishSlide(this);
         };
+        paperDueRow(el);
       },
       live: function (el) {
-        if (ui.quiet && D.state.everyday) ui.acct = 'everyday'; /* quiet (panic PIN): only Everyday shows */
         var s = D.state,
           main = ui.acct === 'main',
           other = null,
@@ -4100,7 +6255,14 @@
         var line;
         var unopened = main && !!s.unopened; /* keys made, nothing in the covenant yet */
         line = homeLimitLine(s, main, other, ph);
-        setText(el, '[data-limit]', line);
+        var brief = /^Available today: /.test(line),
+          cut = line.indexOf('\n');
+        /* the brief folds to its first line; the purse line opens with it */
+        if (brief)
+          setHtml(el, '[data-limit]', foldHead('brief', labelLines(cut < 0 ? line : line.slice(0, cut)), 'bare') +
+            (foldOpen('brief') && cut >= 0 ? labelLines(line.slice(cut)) : ''));
+        else setText(el, '[data-limit]', line);
+        el.querySelector('[data-purse-line]').hidden = brief && !foldOpen('brief');
         var lock = el.querySelector('[data-unlock]');
         lock.hidden = !(ph === 'locked' && main);
         lock.onclick = function () {
@@ -4109,21 +6271,23 @@
         el.classList.toggle('sealed', ph === 'locked' && main); /* while sealed: no account name, no balance, no bars; the seal alone */
         /* the pips come from the engine's status (stop_keys, heir, sheets); until it has answered they stay dim */
         setHtml(el, '[data-guards]', guardsHtml(homeGuardState(s, main, other)));
+        homeLoneRow(el, s, main && ph !== 'locked');
         var p = s.pending,
           banner = !!(p && !p.dismissed); /* not yet acknowledged: the bell's dot is red */
-        setHtml(el, '[data-log]', logHtml(3));
+        setHtml(el, '[data-log]', homeLogHtml());
+        setHtml(el, '[data-watched]', D.isLocal() && main ? homeHelpedHtml() : '');
+        if (D.isLocal()) D.watchTick();
         setText(el, '[data-notice]', ui.notice || ''); /* the phone's one-time notice; empty hides the row */
         setText(el, '[data-e]', s.error);
         var bell = el.querySelector('.bell');
-        bell.classList.toggle('has', !!p || !!s.outgoing); /* lit while anything waits, acknowledged or not */
-        bell.classList.toggle('loud', banner);
+        bellLight(bell, !!p || !!s.outgoing, banner, main);
         /* the watcher's word: red for a withdrawal or lineage break not yet owned up to, amber when the guard is silent.
            The stop button opens the usual stop screen (slide, then fingerprint); "I did this" hides this one alert only. */
         homeAlarm(el, s, main);
-        var r = ui.quiet ? '' : '<button data-go="safe">Your vault</button>';
-        if (main && s.noKeys) r = '<button data-go="makekeys">Make my keys</button>';
+        var r = '';
+        var pw = '<button data-go="paperuse">Use a paper stop</button>';
+        if (main && s.noKeys) r = '<button data-go="makekeys">Make my keys</button>' + pw;
         else if (unopened) r = '<button data-go="receive">Put money in</button><button data-go="fundacct">Open the account</button>';
-        else if (main && !s.stopped) r += '<button class="s" data-go="stop">Stop</button>';
         setHtml(el, '[data-row]', r);
         var rf = el.querySelector('[data-rulesfin]');
         if (rf) rf.hidden = !(main && D.rulesReady());
@@ -4163,7 +6327,8 @@
           '</div><h1 class="head">Move money in</h1><p class="line">From Everyday. You have ' +
           fmt(e.balance) +
           ' KAS there.</p>' +
-          '<label class="field"><span>Amount</span><div class="amount"><input data-a inputmode="decimal" aria-label="Amount" placeholder="0"><span>KAS</span></div></label><div class="push"></div>' +
+          '<label class="field"><span>Amount</span><div class="amount"><input data-a inputmode="decimal" aria-label="Amount" ' +
+          'placeholder="0"><span>KAS</span></div></label><div class="err" data-e></div><div class="push"></div>' +
           '<button class="pill" data-ok>Move it in</button><button class="ghost" data-skip>Later</button>'
         );
       },
@@ -4184,7 +6349,9 @@
           setTimeout(explainScreen, 700); /* a new account opens with its Home explained */
         }
         el.querySelector('[data-ok]').onclick = function () {
-          done(parseFloat(el.querySelector('[data-a]').value) || 0);
+          var n = amountOf(el.querySelector('[data-a]').value);
+          if (isNaN(n)) return setText(el, '[data-e]', AMOUNT_BAD);
+          done(n);
         };
         el.querySelector('[data-skip]').onclick = function () {
           done(0);
@@ -4236,11 +6403,14 @@
           '<div class="top"><span class="label">KAS price</span>' +
           tag() +
           menuBtn() +
-          '</div><div class="chart" data-chart></div><div class="push"></div><div class="sub mt8">The price of one KAS in dollars. Your money is counted in KAS; its dollar value moves with this line.</div>'
+          '</div><div class="psum" data-psum></div><div class="chart" data-chart></div>' +
+          '<div data-supply></div><div class="push"></div>' +
+          '<div class="sub mt8">The price of one KAS in dollars. Your money is counted in KAS; its dollar value moves with this line.</div>'
         );
       },
       after: function (el) {
         chartInto(el.querySelector('[data-chart]'));
+        supplyInto(el.querySelector('[data-supply]'));
       },
     },
     /* the camera reads a Kaspa address code into the Send screen. The phone grants only our page the camera, video only. */
@@ -4251,10 +6421,15 @@
         return (
           topbar(tag()) +
           '<div class="label">' +
-          (ans ? 'Scan the answer' : 'Scan') +
-          '</div><div class="scanbox"><video data-v autoplay playsinline muted></video><i class="scanframe"></i></div><div class="sub center" data-say>' +
-          (ans ? 'Point the camera at the code your offline device shows.' : 'Point the camera at a Kaspa address code.') +
-          '</div><div class="push"></div>' +
+          esc(p.step || (ans ? 'Scan the answer' : 'Scan')) +
+          '</div>' + (p.head ? '<h1 class="head">' + esc(p.head) + '</h1>' : '') +
+          '<div class="scanbox"><video data-v autoplay playsinline muted></video><i class="scanframe"></i></div><div class="sub center" data-say>' +
+          esc(p.say || (ans ? 'Point the camera at the code on the other phone.' :
+            'Point the camera at a Kaspa address code.')) +
+          '</div><label class="field"><span>No camera? Paste the code here</span>' +
+          '<textarea data-paste maxlength="4000" autocomplete="off" spellcheck="false"></textarea></label>' +
+          '<button class="ghost" data-pastego>Paste the code instead</button>' +
+          '<div class="push"></div>' +
           (ans && !D.isLive() ? '<button class="ghost" data-sample>Use a sample answer</button>' : '')
         );
       },
@@ -4264,11 +6439,13 @@
           sb.onclick = function () {
             done('sample-answer');
           };
+        wirePaste(el, done, say);
         var v = el.querySelector('[data-v]'),
           stream = null,
           stop = false,
           cv = document.createElement('canvas'),
-          cx = cv.getContext('2d', { willReadFrequently: true });
+          cx = cv.getContext('2d', { willReadFrequently: true }),
+          nat = { reader: nativeReader(), reading: false, looks: 0 };
         function say(t) {
           setText(el, '[data-say]', t);
         }
@@ -4283,7 +6460,7 @@
           if (KVScene.sleep) KVScene.sleep(false);
         }
         function done(text) {
-          scanDone(p, text, say, off);
+          if (!stop) scanDone(p, text, say, off); /* a late reader answer after we left: dropped */
         }
         function tick() {
           if (stop) return;
@@ -4291,39 +6468,22 @@
             off();
             return;
           }
+          nativeLook(v, nat, done);
           if (v.videoWidth && window.jsQR) {
-            var q = scanFrame(v, cv, cx);
+            var q = scanFrame(v, cv, cx, nat.looks++);
             if (q && q.data) {
               done(q.data);
               if (stop) return;
             }
           }
-          setTimeout(tick, 150);
+          setTimeout(tick, 160); /* each look a different size: a full turn in under a second */
         }
         function start() {
-          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            say('No camera here.');
-            return;
-          }
-          navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } } }).then(
-            function (s) {
-              if (!ui.cur || ui.cur.name !== 'scan') {
-                s.getTracks().forEach(function (t) {
-                  t.stop();
-                });
-                return;
-              }
-              stream = s;
-              v.srcObject = s;
-              if (KVScene.sleep) KVScene.sleep(true);
-              /* the scene rests only while the camera really runs */ if (!window.jsQR) say('This app cannot read codes from the camera.');
-              tick();
-            },
-            function () {
-              say('The camera was refused. Allow it for KaspaVault in the phone\u2019s settings.');
-              if (KVScene.sleep) KVScene.sleep(false);
-            }
-          );
+          openCamera(say, function (s) {
+            stream = s;
+            v.srcObject = s;
+            tick();
+          });
         }
         window.KV_camera = function (ok) {
           if (ok) start();
@@ -4341,7 +6501,7 @@
       tab: 'send',
       scene: function () {
         var s = D.state,
-          n = parseFloat(ui.draft.amt) || 0,
+          n = amountOf(ui.draft.amt) || 0,
           pct = s.limit ? (((s.left || 0) - n) / s.limit) * 100 : 100;
         if (s.stopped) return {};
         return { mode: 'sending', left: n > 0 && !D.fitsLimit(n) ? 30 : pct }; /* the Send tab shows its shape: diamonds leaving the core */
@@ -4367,7 +6527,9 @@
                   '>' +
                   ps
                     .map(function (c) {
-                      return '<button data-c="' + c[0] + '"' + (d.label === c[0] ? ' class="on"' : '') + '>' + c[0] + '</button>';
+                      var nm = esc(c[0]),
+                        on = d.label === c[0] ? ' class="on"' : '';
+                      return '<button data-c="' + nm + '"' + on + '>' + nm + '</button>';
                     })
                     .join('') +
                   (live ? '' : '<button data-addnote>Note</button>') +
@@ -4413,20 +6575,8 @@
           d.note = note.value;
         };
         el.querySelector('[data-max]').onclick = function () {
-          /* Max = everything in the purse, or what the account can send on the spot today */
-          var s = D.state,
-            ab = acct(),
-            v =
-              d.src === 'purse'
-                ? s.purse
-                : Math.min(
-                    ab.balance != null ? ab.balance : Infinity,
-                    ui.acct === 'main' ? (s.left != null ? s.left : Infinity) : ab.left != null ? ab.left : Infinity
-                  );
-          if (typeof v === 'number' && isFinite(v) && v > 0) {
-            amt.value = String(Math.floor(v * 100) / 100);
-            amt.oninput();
-          }
+          /* Max = everything in the purse, or what the account can send immediately today */
+          sendMax(d, amt);
         };
         wireSeg(el, '[data-src]', function (b) {
           disarm(el);
@@ -4444,27 +6594,14 @@
             el.querySelector('[data-notef]').hidden = false;
             note.focus();
           };
-        [].forEach.call(el.querySelectorAll('[data-c]'), function (b) {
-          b.onclick = function () {
-            sendPayees().forEach(function (c) {
-              if (c[0] === b.dataset.c) {
-                d.to = c[1];
-                d.label = c[0];
-                to.value = c[0];
-              }
-            });
-            [].forEach.call(el.querySelectorAll('[data-c]'), function (x) {
-              x.classList.toggle('on', x === b);
-            });
-          };
-        });
+        wireSendPayees(el, d, to);
         el.querySelector('[data-ok]').onclick = function () {
           sendOk(el, d, this);
         };
       },
       live: function (el) {
         var s = D.state,
-          n = parseFloat(ui.draft.amt) || 0,
+          n = amountOf(ui.draft.amt) || 0,
           say = '',
           btn = el.querySelector('[data-ok]'),
           d = ui.draft,
@@ -4503,7 +6640,7 @@
             el,
             '[data-balline]',
             (ab.balance == null ? '' : fmt(ab.balance) + ' KAS in ' + (ui.acct === 'main' ? s.account : ab.name)) +
-              (lf != null && ab.limit ? ', ' + fmt(lf) + ' on the spot today' : '')
+              (lf != null && ab.limit ? ', ' + fmt(lf) + ' available immediately today' : '')
           );
         }
         /* pasted address check: the start and end to compare with where it was copied from (a clipboard swap changes both) */
@@ -4527,6 +6664,8 @@
     waiting: {
       money: true,
       locked: true,
+      /* no glass: one clean full-screen animation while money moves (half glass cut it in two) */
+      bare: true,
       scene: function (p) {
         return p.job === 'stop' ? { mode: 'stopped', k: 0.9, slow: true } : p.job === 'send' ? { mode: 'send', left: 30 } : {};
       },
@@ -4543,16 +6682,21 @@
           '<div class="push"></div><div class="breath"></div><h1 class="head">' +
           title +
           '</h1><p class="sub">' +
-          (D.isLive() ? 'This takes about half a minute. You can leave this screen open.' : 'One moment.') +
+          (D.isLive() ? 'This takes about 30 seconds. Please keep this screen open.' :
+            'One moment.') +
           '</p>'
         );
       },
       after: function (el, p) {
+        var reopen = p.job === 'rules' && reopensAfterStop();
         if (p.job === 'rules')
           return (p.now ? D.updateNow(rulesStep(el)) : D.finishRules(rulesStep(el))).then(function (r) {
             if (r.ok) {
               haptic();
-              return go('home', {}, { root: true });
+              if (p.paper) return go('papers', { share: reopen }, { root: true });
+              if (ui.guide) return go('watchcode', { guide: ui.guide }, { root: true });
+              go('home', {}, { root: true });
+              return reopen && shareNewCode();
             }
             setHtml(
               el,
@@ -4576,7 +6720,7 @@
           });
         D.send(p.to, p.kas, p.label, p.wait).then(function (r) {
           if (!r.ok) {
-            ui.draft.err = r.error || 'That did not go through. Nothing was sent.';
+            ui.draft.err = r.error || 'The payment failed. No funds were sent.';
             return go('send', {}, { replace: true });
           }
           var d = ui.draft;
@@ -4625,7 +6769,8 @@
             : p.kind === 'queued'
               ? 'It waits in line: its notice period starts when the one before it has left.'
               : p.kind === 'pending'
-                ? 'It lands in ' + dur(s.pending ? s.pending.secondsLeft : s.noticeSeconds) + ' unless you stop it.'
+                ? 'Arrives in ' + dur(s.pending ? s.pending.secondsLeft : s.noticeSeconds) +
+                  ' unless you stop it.'
                 : fmt(s.left) + ' KAS left today.'
         );
       },
@@ -4706,8 +6851,7 @@
         };
         el.querySelector('[data-share]').onclick = function () {
           glow(el.querySelector('[data-share]'));
-          if (A && navigator.share) navigator.share({ text: A }).catch(function () {});
-          else setText(el, '[data-e]', 'Sharing opens on the phone.');
+          if (A) shareText(el, '[data-e]', A);
         };
       },
     },
@@ -4744,34 +6888,13 @@
         me.was = q ? q.secondsLeft : null;
         me.seenAt = now;
         if (!q) {
-          body = '<h1 class="head">' + (me.lockAt && now - me.lockAt < me.lockHold ? 'It has landed' : 'Nothing is waiting') + '</h1>';
+          body = '<h1 class="head">' + (me.lockAt && now - me.lockAt < me.lockHold ? 'Completed' :
+            'Nothing is waiting') + '</h1>';
           acts = '';
         } else {
-          var to = q.to || 'an address the guard saw',
-            seen = q.amount == null && !q.to; /* a withdrawal only the guard saw */
-          body =
-            (q.amount == null ? '' : '<div class="big">' + bigKas(q.amount) + '</div>') +
-            '<div class="sub">To ' +
-            esc(to.length > 30 ? to.slice(0, 28) + '…' : to) +
-            ', asked by ' +
-            esc(q.who || 'not known') +
-            '</div>' +
-            (seen ? '<div class="sub">The guard reported it. The engine on this phone has no details yet.</div>' : '') +
-            (s.queue && s.queue.length
-              ? '<div class="sub">In line behind it: ' +
-                s.queue
-                  .map(function (x) {
-                    return fmt(x.amount) + ' KAS to ' + esc(x.to);
-                  })
-                  .join(', ') +
-                '</div>'
-              : '');
-          acts =
-            (q.secondsLeft > 0 || seen || !D.isLive() ? '' : '<button class="pill" data-finish>Finish</button>') +
-            '<div class="twobtn"><button class="pill" data-decline>Decline it</button><button class="pill" data-let>Approve</button></div>' +
-            '<button class="pill danger" data-stop>Stop everything</button>' /* the stop itself, not a way to the stop screen; its own row so the slide has room */ +
-            '<div class="sub">Stop everything moves all of this account into your vault, this withdrawal included. Only your vault seed takes it out.</div>' +
-            (D.isLive() ? '' : '<button class="ghost" data-skip>Skip ahead</button>');
+          var h = pendingHtml(s, q);
+          body = h[0];
+          acts = h[1];
         }
         var b = setHtml(el, '[data-body]', body),
           a = setHtml(el, '[data-acts]', acts);
@@ -4807,7 +6930,7 @@
       html: function () {
         return (
           topbar(D.isLive() ? '' : tag()) +
-          '<div class="label">Your heir</div><div class="push"></div><div data-body></div><div data-acts></div>'
+          '<div class="label">Heir Unlock</div><div class="push"></div><div data-body></div><div data-acts></div>'
         );
       },
       live: function (el) {
@@ -4819,36 +6942,14 @@
           acts;
         if (!s.heir) {
           body =
-            '<h1 class="head">No heir named</h1><div class="line">An heir can take what is in this account if it hears nothing from you for the silence you set. Never what is in your vault: only your vault seed opens it.</div>';
+            '<h1 class="head">No heir named</h1><div class="line">An heir can claim what is in ' +
+              'this account if it hears nothing from you for the inactivity period you set. ' +
+              'Never what is in your vault: only your vault seed opens it.</div>';
           acts = D.isLive()
             ? '<button class="pill" data-heir-set>Name an heir</button>'
             : '<button class="pill" data-heir-add>Name an heir</button>'; /* heir.set on this phone */
         } else {
-          var warn =
-            left == null || sh == null
-              ? ''
-              : heirRed()
-                ? '<div class="line red">' +
-                  (left > 0 ? 'Your heir can claim in ' + esc(dur(left)) + '.' : 'Your heir can claim now.') +
-                  ' Make any payment to restart the clock.</div>'
-                : heirAmber()
-                  ? '<div class="line amber">Approaching: ' + esc(dur(left)) + ' left.</div>'
-                  : '';
-          body =
-            '<div class="big">' +
-            (left == null ? '\u2014' : heirBig(left)) +
-            '</div>' +
-            '<div class="sub">' +
-            (left == null
-              ? 'How long is left is not known yet.'
-              : left > 0
-                ? 'left before your heir can claim'
-                : 'The silence has run out.') +
-            '</div>' +
-            '<div class="line">Your heir can claim this account after it hears nothing from you for ' +
-            esc(typeof total === 'number' && total > 0 ? dur(total) : 'the silence set on it') +
-            '. Any payment, top-up or stop restarts the clock.</div>' +
-            warn;
+          body = heirClockBody(left, total, sh);
           acts = D.isLive()
             ? '<div class="sub">' +
               'Any payment or top-up from this phone restarts it.</div><button class="ghost" data-heir-set>Change the heir</button>'
@@ -4904,7 +7005,7 @@
           armSlide(
             this,
             'Move all your money to your vault',
-            'You will need your vault seed to use it again.',
+            'You will need your vault seeds to access these funds again.',
             true,
             'Slide to stop',
             'stop',
@@ -4922,7 +7023,7 @@
             fmt(D.state.balance) +
             ' KAS in ' +
             D.state.account +
-            ' into your vault. You will need your vault seed to use it again.'
+            ' into your vault. You will need your vault seeds to access these funds again.'
         );
       },
     },
@@ -4932,7 +7033,10 @@
         return { mode: 'stopped', k: 1, slow: true };
       },
       html: function () {
-        return '<div class="label">Stopped</div><div class="push"></div><div class="big" data-b></div><div class="sub">In your vault</div><div class="line">Nobody can spend this from a phone. Only your vault seed takes it out.</div><button class="pill" data-go="safe">Open your vault</button><button class="ghost" data-home>Home</button>';
+        return '<div class="label">Stopped</div><div class="push"></div><div class="big" data-b>' +
+          '</div><div class="sub">In your vault</div><div class="line">No phone can spend these ' +
+          'funds. Only your vault seeds can release them.</div><button class="pill" ' +
+          'data-go="safe">Open your vault</button><button class="ghost" data-home>Home</button>';
       },
       after: function (el) {
         el.querySelector('[data-home]').onclick = function () {
@@ -4948,14 +7052,18 @@
     /* 8. Safe */
     safe: {
       money: true,
+      tab: 'safe',
       scene: function () {
         return { mode: 'locked' };
       } /* the hexagons on the vault */,
       html: function () {
         return (
           topbar() +
-          '<div class="label">Your vault</div><div class="push"></div><div class="big" data-b></div><div class="sub" data-usd></div>' +
-          '<div class="line mt8">Nothing on this phone can spend it. Only your vault seed takes money out: from your offline device, or typed from paper.</div><div class="list" data-stops></div><div class="push"></div>' +
+          '<div class="label">Vault</div><div class="push"></div><div class="big" data-b></div><div class="sub" data-usd></div>' +
+          '<div class="line mt8">Three vault seeds; any two of them open it.</div>' +
+          (D.isLocal() ? '<button class="ghost" data-go="showsheets">Show my seeds</button>' : '') +
+          '<div class="list" data-stops></div><div class="push"></div>' +
+          '<button class="pill danger" data-go="stop" data-vstop hidden>Emergency stop</button>' +
           '<button class="pill" data-go="takeout">Take money out</button>'
         );
       },
@@ -4964,6 +7072,9 @@
           b = setHtml(el, '[data-b]', bigKas(s.safe));
         fit(b);
         setText(el, '[data-usd]', s.safe == null ? '' : under(s.safe));
+        /* the emergency stop lives here (moved off Home): main account, open, not stopped */
+        el.querySelector('[data-vstop]').hidden = !(ui.acct === 'main' && !s.stopped && !s.noKeys &&
+          !s.unopened);
         var stops = D.isLive()
           ? s.history.filter(function (h) {
               return /stop/i.test(h.text);
@@ -5010,7 +7121,9 @@
           if (have >= 1.05) amt.placeholder = 'All of it: ' + fmt(Math.floor((have - 1) * 100) / 100);
         });
         ok.onclick = function () {
-          var n = parseFloat(amt.value) || Math.floor((have - 1) * 100) / 100;
+          var n = amountOf(amt.value);
+          if (isNaN(n)) return setText(el, '[data-e]', AMOUNT_BAD);
+          if (!n) n = Math.floor((have - 1) * 100) / 100;
           if (n <= 0) {
             setText(el, '[data-e]', 'Type an amount.');
             return;
@@ -5044,7 +7157,7 @@
       html: function () {
         if (D.isLocal()) {
           var body =
-            '<div class="line">Your vault opens with any two of your three sheets, typed from paper. Nothing on this phone can open it alone.</div>' +
+            '<div class="line">Your vault opens with any two of your three vault seeds, typed from paper. Nothing on this phone can open it alone.</div>' +
             '<div class="sub">In your vault: ' +
             fmt(D.state.safe) +
             ' KAS.</div>' +
@@ -5055,13 +7168,14 @@
             topbar() +
             '<h1 class="head">Take money out</h1>' +
             body +
-            '<div class="err" data-e></div><div class="push"></div><button class="pill" data-ok>Next: your sheets</button>'
+            '<div class="err" data-e></div><div class="push"></div><button class="pill" data-ok>Next: your seeds</button>'
           );
         }
         return (
           topbar(tag()) +
-          '<h1 class="head">Take money out</h1><div class="line">Your vault opens with your vault seed. Your offline device signs for you, or you type the 24 words from paper.</div><div class="push"></div>' +
-          '<button class="pill" data-go="airgap">Use my offline device</button><button class="ghost" data-go="takeoutwords">Type the words from paper</button>'
+          '<h1 class="head">Take money out</h1><div class="line">Your vault opens with two of your three vault seeds, typed from paper.</div><div ' +
+          'class="push"></div>' +
+          '<button class="pill" data-go="takeoutwords">Type the words from paper</button>'
         );
       },
       after: function (el) {
@@ -5076,9 +7190,10 @@
           box.hidden = b.dataset.v !== 'other';
         });
         ok.onclick = function () {
-          var n = parseFloat(el.querySelector('[data-amt]').value) || 0,
+          var n = amountOf(el.querySelector('[data-amt]').value),
             other = el.querySelector('[data-to] .on').dataset.v === 'other',
             to = other ? el.querySelector('[data-addr]').value.trim().toLowerCase() : '';
+          if (isNaN(n)) return setText(el, '[data-e]', AMOUNT_BAD);
           if (other && !isKaspaAddress(to)) {
             setText(el, '[data-e]', 'That is not a Kaspa address.');
             return;
@@ -5097,63 +7212,6 @@
         };
       },
     },
-    /* air gap: the phone shows the request as a code, the offline device signs it, the phone scans the answer. Sample plays it through; Live uses testnet-client airgap (request.hex / response.json). */
-    airgap: {
-      money: true,
-      scene: function () {
-        return { mode: 'locked' };
-      },
-      html: function () {
-        var req = 'kvreq:' + (D.state.safe || 0) + ':' + Date.now().toString(36);
-        return (
-          topbar(tag()) +
-          '<div class="label">Step 1 of 2</div><h1 class="head">Show this to your offline device</h1><div class="qrbox"><div class="qr">' +
-          KVQR.svg(req) +
-          '</div></div>' +
-          '<div class="sub center mt8">The request only: ' +
-          fmt(D.state.safe) +
-          ' KAS back into your account. No words, no keys.</div><div class="push"></div><button class="pill" data-ok>Scan its answer</button>'
-        );
-      },
-      after: function (el) {
-        el.querySelector('[data-ok]').onclick = function () {
-          ui.onScan = function (text) {
-            go('airgapdone', { text: text }, { replace: true });
-          };
-          go('scan', { what: 'answer' });
-        };
-      },
-    },
-    airgapdone: {
-      money: true,
-      scene: function () {
-        return { mode: 'locked', heat: ui.drag };
-      },
-      html: function () {
-        return (
-          topbar(tag()) +
-          '<div class="label">Step 2 of 2</div><h1 class="head">Signed by your offline device</h1><div class="line">' +
-          fmt(D.state.safe) +
-          ' KAS goes back into your account.</div><div class="push"></div><button class="pill" data-ok>Move it</button>'
-        );
-      },
-      after: function (el) {
-        el.querySelector('[data-ok]').onclick = function () {
-          armSlide(
-            this,
-            'Take ' + fmt(D.state.safe) + ' KAS out of your vault',
-            'Back into your account.',
-            false,
-            'Slide to move it',
-            'send',
-            function () {
-              D.takeOutOfSafe();
-              go('home', {}, { root: true });
-            }
-          );
-        };
-      },
-    },
     takeoutwords: {
       money: true,
       scene: function () {
@@ -5163,9 +7221,12 @@
         if (D.isLocal())
           return (
             topbar() +
-            '<h1 class="head">Two of your sheets</h1><p class="sub">Type any two of the three sheets you wrote down, 24 words each. They are used once and not kept.</p>' +
-            '<label class="field"><span>First sheet</span><textarea data-w1 autocapitalize="none" autocomplete="off" spellcheck="false"></textarea></label>' +
-            '<label class="field"><span>Second sheet</span><textarea data-w2 autocapitalize="none" autocomplete="off" spellcheck="false"></textarea></label>' +
+            '<h1 class="head">Two of your seeds</h1><p class="sub">Type any two of the three seeds you wrote down, 24 words each. They are used once and not ' +
+            'kept.</p>' +
+            '<label class="field"><span>First seed</span><textarea data-w1 autocapitalize="none" autocomplete="off" autocorrect="off" ' +
+            'spellcheck="false"></textarea></label>' +
+            '<label class="field"><span>Second seed</span><textarea data-w2 autocapitalize="none" autocomplete="off" autocorrect="off" ' +
+            'spellcheck="false"></textarea></label><div class="chips" data-wp hidden></div>' +
             '<div class="err" data-e></div><div class="push"></div><button class="pill" data-ok>Move it</button>'
           );
         return (
@@ -5176,28 +7237,33 @@
       },
       after: function (el, p) {
         if (D.isLocal()) {
-          var list = String(window.KV_BIP39 || '').split(/\s+/),
+          var list = bip39List(),
             ok = el.querySelector('[data-ok]');
+          wordPicker(el, '[data-w1],[data-w2]');
           function sheet(sel) {
             var ws = el.querySelector(sel).value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-            if (ws.length !== 24) return 'That is not 24 words yet.';
+            if (list.length !== 2048) return 'The word list is missing. Update the app.'; /* fail closed */
+            if (ws.length !== 24) return 'Please enter all 24 words.';
             for (var i = 0; i < 24; i++)
-              if (list.length > 100 && list.indexOf(ws[i]) < 0) return 'Word ' + (i + 1) + ' is not on the list: ' + ws[i];
+              /* never echo a seed word */
+              if (list.indexOf(ws[i]) < 0) return 'Word ' + (i + 1) +
+                ' is not on the list.';
             return ws.join(' ');
           }
           ok.onclick = function () {
             var a = sheet('[data-w1]'),
               b = sheet('[data-w2]');
             if (a.indexOf(' ') < 0 || a.split(' ').length !== 24) {
-              setText(el, '[data-e]', 'First sheet: ' + a);
+              setText(el, '[data-e]', 'First seed: ' + a);
               return;
             }
             if (b.indexOf(' ') < 0 || b.split(' ').length !== 24) {
-              setText(el, '[data-e]', 'Second sheet: ' + b);
+              setText(el, '[data-e]', 'Second seed: ' + b);
               return;
             }
             if (a === b) {
-              setText(el, '[data-e]', 'Those are the same sheet. Type two different ones.');
+              setText(el, '[data-e]',
+                'Both entries are the same seed. Please enter two different seeds.');
               return;
             }
             takeOutWordsSlide(el, ok, this, p, a, b);
@@ -5210,7 +7276,7 @@
         };
         el.querySelector('[data-ok]').onclick = function () {
           if (w.value.trim().split(/\s+/).length !== 24) {
-            setText(el, '[data-e]', 'That is not 24 words yet.');
+            setText(el, '[data-e]', 'Please enter all 24 words.');
             return;
           }
           armSlide(
@@ -5236,157 +7302,232 @@
       scene: function () {
         return { mode: 'people' };
       } /* no drawn tree; the scene's own lines take the Celtic tree-of-life weave (scene.js peoplePt) */,
-      html: function () {
-        var tree =
-          '<div class="treegap"></div>'; /* room for the weave above the list; peopleTree (the drawn SVG) is kept in the file but no longer shown */
+      /* Sample and live alike; Sample rows are demo.js D.state.helpers and D.state.watched */
+      html: peopleLiveHtml,
+      after: wirePeopleLive,
+      live: livePeopleLive,
+    },
+    /* guardians and heirs (docs/PEOPLE_SCREENS.md): the helper's link code, heir sheet, the owner's watch code, a watched account */
+    linkcode: {
+      tab: 'people',
+      html: function (p) {
         return (
-          '<div class="top"><span class="label">People</span>' +
-          tag() +
-          menuBtn() +
-          '</div>' +
-          tree +
-          '<div class="list" data-l></div><button class="pill" data-go="addperson">Add someone</button>'
+          topbar() +
+          '<div class="label">' + (p.guide ? 'Step 1 of 3 \u00b7 You show' : 'Your link code') +
+          '</div><h1 class="head">' + (p.guide ? 'Show this to the person you protect.' :
+            'Share this code with the account holder.') + '</h1>' +
+          '<p class="line">They scan it on their phone and choose your role: guardian, heir, or both. It contains nothing secret.</p>' +
+          '<div class="qrbox"><div class="qr big" data-qr></div></div><div class="sub center" data-ln></div>' +
+          '<button class="ghost" data-copycode hidden>Copy the code</button><div class="err" data-e></div><div class="push"></div>' +
+          '<button class="pill" data-make hidden>Make my link code</button>' +
+          (p.guide ? '<p class="sub center" data-nx hidden>Once they have added you, ' +
+            'they show you ' +
+            'their code. Tap below when they are ready.</p><button class="pill" data-next hidden>' +
+            'Next: scan their code</button>' : '') +
+          '<button class="ghost" data-hw hidden>Show my heir seed</button>'
         );
       },
       after: function (el) {
-        el.addEventListener('click', function (e) {
-          /* an end of the tree opens what that person's row opens; the guard end carries data-go, the owner opens nothing */
-          var g = e.target.closest('[data-tree] [data-i],[data-tree] [data-stop]');
-          if (!g) return;
-          if (g.hasAttribute('data-stop')) {
-            openDial('stops');
-            return;
-          }
-          var q = ui.people[+g.dataset.i];
-          if (!q) return;
-          if (q.role === 'Heir') {
-            go('heirclock', {});
-            return;
-          }
-          nameSheet('Rename ' + q.name, q.name, function (v) {
-            q.note = q.note.split(q.name).join(v);
-            q.name = v;
-            refresh();
+        var nx = el.querySelector('[data-next]');
+        if (nx) nx.onclick = scanWatch;
+        var mk = el.querySelector('[data-make]'),
+          hw = el.querySelector('[data-hw]'),
+          cc = el.querySelector('[data-copycode]');
+        mk.onclick = function () {
+          openMakeLink(el);
+        };
+        hw.onclick = function () {
+          D.heirWords().then(function (r) {
+            if (!r.ok) return setText(el, '[data-e]', r.error ||
+              'The heir seed could not be shown.');
+            ui.heirWords = r.heir_words || null;
+            go('heirsheet', {});
           });
-        });
-        el.querySelector('[data-l]').addEventListener('click', function (e) {
-          var ed = e.target.closest('[data-edit]');
-          if (ed) {
-            var q0 = ui.people[+ed.dataset.edit];
-            if (q0)
-              nameSheet('Rename ' + q0.name, q0.name, function (v) {
-                q0.note = q0.note.split(q0.name).join(v);
-                q0.name = v;
-                refresh();
-              });
+        };
+        D.linkCode().then(function (r) {
+          if (!r.ok) {
+            setText(el, '[data-e]', 'This phone has no link code yet.');
+            mk.hidden = false;
+            openMakeLink(el);
             return;
           }
-          var b = e.target.closest('[data-rm]');
-          if (!b) return;
-          var q = ui.people[+b.dataset.rm];
-          if (!q) return;
-          function drop() {
-            ui.people.splice(+b.dataset.rm, 1);
-            if (
-              q.role === 'Heir' &&
-              !D.isLive() &&
-              !ui.people.some(function (x) {
-                return x.role === 'Heir';
-              })
-            )
-              D.state.heir = false;
-            refresh();
-          }
-          if (q.role === 'Guardian' || q.role === 'Heir') {
-            /* a guardian or an heir is a rule in the coin, so removing one is a change of the rules */
-            if (D.isLocal()) {
-              if (q.role === 'Heir') openHeirSheet();
-              else openKeysFact('Guardians');
-              return;
-            } /* on this phone the heir is heir.set, guardians are part of the keys */
-            openChangeRules(
-              'Remove ' + q.name + ' as ' + (q.role === 'Guardian' ? 'a guardian' : 'your heir'),
-              q.role === 'Guardian'
-                ? 'Their copy of your emergency stop stops working.'
-                : 'They can no longer take this account after a silence.',
-              drop
-            );
-            return;
-          }
-          confirmAction(
-            'Remove ' + q.name,
-            q.role === 'Trusted payee'
-              ? 'Payments to them follow the usual rules again.'
-              : 'They lose the account you set up for them; the money in it comes back to you.'
-          ).then(function (yes) {
-            if (yes) drop();
-          });
+          if (!r.code || !KVQR.svg(r.code)) return setText(el, '[data-e]', 'The code could not be drawn. Try again.');
+          setHtml(el, '[data-qr]', KVQR.svg(r.code));
+          setText(el, '[data-ln]', r.name || '');
+          if (nx) nx.hidden = el.querySelector('[data-nx]').hidden = false;
+          hw.hidden = false;
+          cc.hidden = false;
+          cc.onclick = function () {
+            copyCode(el, r.code);
+          };
         });
-      },
-      live: function (el) {
-        var t = el.querySelector('[data-tree]');
-        if (t) {
-          var th = peopleTree(ui.people, D.state);
-          if (t.dataset.h !== th) {
-            t.outerHTML = th;
-            el.querySelector('[data-tree]').dataset.h = th;
-          }
-        } /* redrawn on a rename or a removal */
-        setHtml(
-          el,
-          '[data-l]',
-          ui.people
-            .map(function (p, i) {
-              var heir = p.role === 'Heir',
-                hl = heir ? heirLeft() : null; /* the heir row opens the heir clock (no rename there) */
-              return (
-                '<div class="item"><button class="rowmain" ' +
-                (heir ? 'data-go="heirclock"' : 'data-edit="' + i + '"') +
-                '><span><span class="t">' +
-                esc(p.name) +
-                '</span><span class="d">' +
-                esc(p.role + '. ' + p.note + (hl != null ? ' ' + dur(hl) + ' left on the clock.' : '')) +
-                '</span></span></button><button class="r go" data-rm="' +
-                i +
-                '">Remove</button></div>'
-              );
-            })
-            .join('') || '<div class="sub">Nobody yet.</div>'
-        );
       },
     },
-    addperson: {
+    heirsheet: {
+      tab: 'people',
+      money: true,
+      locked: false,
+      html: function () {
+        var w = ui.heirWords;
+        return (
+          topbar() +
+          '<div class="label">Your heir seed</div><h1 class="head">Write these on paper.</h1>' +
+          '<p class="line">These 24 words are your heir seed. If this phone is lost, they are the only way to claim an account you are heir to. Keep them ' +
+          'somewhere safe, never a photo.</p>' +
+          (w ? wordsHtml(w) :
+            '<div class="err">These words were shown already. "Show my heir seed" under your ' +
+              'link code shows them again.</div>') +
+          '<div class="push"></div>' +
+          (w ? '<button class="pill" data-ok>I wrote them down</button>' : '')
+        );
+      },
+      after: function (el, p) {
+        var b = el.querySelector('[data-ok]');
+        if (b)
+          b.onclick = function () {
+            go('heircheck', { first: !!p.first }, { replace: true });
+          };
+      },
+    },
+    heircheck: {
+      tab: 'people',
+      money: true,
+      html: function () {
+        return (
+          topbar() +
+          '<div class="label" data-q></div><h1 class="head" data-w></h1><div class="sub">Tap the right word</div><div class="list pick" data-pick></div><div class="push"></div>'
+        );
+      },
+      after: function (el, p) {
+        var sh = ui.heirWords;
+        if (!sh) return back();
+        var ask = [3, 11, 20],
+          at = 0;
+        function next() {
+          if (at === ask.length) {
+            ui.heirWords = null; /* read back: the words are gone from this page */
+            D.paperMark('h');
+            return p.first ? go('linkcode', {}, { replace: true }) : back();
+          }
+          var n = ask[at],
+            right = sh[n];
+          setText(el, '[data-q]', 'Heir seed, check ' + (at + 1) + ' of 3');
+          setText(el, '[data-w]', 'Word ' + (n + 1));
+          el.querySelector('[data-pick]').innerHTML = [right, sh[(n + 7) % 24], sh[(n + 15) % 24]]
+            .sort()
+            .map(function (w) {
+              return '<button>' + esc(w) + '</button>';
+            })
+            .join('');
+          [].forEach.call(el.querySelectorAll('[data-pick] button'), function (b) {
+            b.onclick = function () {
+              if (b.textContent !== right) return setText(el, '.sub',
+                'That word does not match. Please check your paper copy.');
+              at++;
+              next();
+            };
+          });
+        }
+        next();
+      },
+    },
+    watchcode: {
+      tab: 'people',
+      html: function (p) {
+        return (
+          topbar() +
+          '<div class="label">' + (p.guide ? 'Step 3 of 3 \u00b7 You show' : 'Your watch code') +
+          '</div><h1 class="head">' + (p.guide ? 'Now let ' + esc(p.guide) + ' scan this.' :
+            'Share this code with your guardians.') + '</h1>' +
+          '<p class="line">' + (p.guide ? 'This code lets their phone see your account. ' +
+            'It cannot move funds.' : 'Their phone then sees this account: what is in it, ' +
+            'any waiting withdrawal and the heir clock. It cannot move money. ' +
+            'Show it again after you change who helps you.') + '</p>' +
+          '<label class="field"><span>Your name, as they will see it</span><input data-on maxlength="40"></label><button class="pill" data-show>Show the code</button>' +
+          '<div class="qrbox" data-box hidden><div class="qr big" data-qr></div></div>' +
+          '<button class="ghost" data-copycode hidden>Copy the code</button><div class="err" data-e></div>' +
+          (p.guide ? '<button class="pill" data-done>Done</button>' : '')
+        );
+      },
+      after: function (el, p) {
+        var inp = el.querySelector('[data-on]'),
+          code = '';
+        if (p.guide) {
+          ui.guide = null; /* the guided add ends here */
+          el.querySelector('[data-done]').onclick = function () {
+            go('people', {}, { root: true });
+          };
+        }
+        /* the same text the picture holds, to send by message when their camera cannot scan */
+        el.querySelector('[data-copycode]').onclick = function () {
+          copyCode(el, code);
+        };
+        D.linkCode().then(function (r) {
+          if (r.ok && r.name && !inp.value) inp.value = r.name;
+          /* step 3 shows the code at once */
+          if (p.guide && inp.value) el.querySelector('[data-show]').click();
+        });
+        el.querySelector('[data-show]').onclick = function () {
+          var v = inp.value.trim();
+          if (!v) return setText(el, '[data-e]', 'Type your name.');
+          setText(el, '[data-e]', '');
+          D.watchCode(v).then(function (r) {
+            if (!r.ok) return setText(el, '[data-e]', r.error);
+            if (!r.code || !KVQR.svg(r.code)) return setText(el, '[data-e]', 'The code could not be drawn. Try again.');
+            code = r.code;
+            setHtml(el, '[data-qr]', KVQR.svg(r.code));
+            el.querySelector('[data-box]').hidden = false;
+            el.querySelector('[data-copycode]').hidden = false;
+          });
+        };
+      },
+    },
+    watched: {
       tab: 'people',
       html: function () {
-        function opt(k, t, d) {
-          return (
-            '<button class="item" data-go="persondetail" data-params=\'{"kind":"' +
-            k +
-            '"}\'><span><span class="t">' +
-            t +
-            '</span><span class="d">' +
-            d +
-            '</span></span></button>'
-          );
-        }
         return (
-          topbar(tag()) +
-          '<h1 class="head">Add someone</h1><div class="list">' +
-          opt('Sponsored', 'Sponsor a newcomer', 'They spend from it. You hold the emergency stop until they take it over.') +
-          opt('Guardian', 'Add a guardian', 'You spend as before. They hold a copy of your emergency stop.') +
-          opt('Allowance', 'Give an allowance', 'They spend up to a limit you choose. You hold the stop.') +
-          opt(
-            'Heir',
-            'Name an heir',
-            'After a silence you set, they can take what is in this account. Never what is in your vault: only your vault seed opens that.'
-          ) +
-          opt(
-            'Payee',
-            'Add a trusted payee',
-            'Someone you pay often. With "Only trusted payees on the spot" on, payments to anyone else wait.'
-          ) +
-          '</div>'
+          topbar() +
+          '<div class="label" data-wn></div><h1 class="head" data-wk></h1><p class="line lines" data-wl></p><p class="sub role" data-wr></p>' +
+          '<div class="err" data-e></div><div class="push"></div><div data-wb></div>' +
+          '<div class="qrbox" data-wqbox hidden><div class="qr big" data-wq></div></div>' +
+          '<button class="pill" data-wcopy hidden>Copy the code</button>' +
+          '<button class="ghost" data-wcode>Show this account\'s code</button>' +
+          '<button class="ghost" data-forget>Forget this account</button>'
         );
+      },
+      after: function (el, p) {
+        function cur() {
+          return watchedList().filter(function (w) {
+            return w.id === p.id;
+          })[0];
+        }
+        el.querySelector('[data-wb]').addEventListener('click', function (e) {
+          var b = e.target.closest('[data-ws],[data-wd],[data-wc]');
+          var w = cur();
+          if (b && w) watchedMove(el, b, w, b.hasAttribute('data-ws') ? 'ws' : b.hasAttribute('data-wd') ? 'wd' : 'wc');
+        });
+        el.querySelector('[data-forget]').onclick = function () {
+          var w = cur();
+          confirmAction('Forget ' + watchedName(w), 'This phone stops watching it. Their rules do not change.').then(function (yes) {
+            if (!yes) return;
+            D.watchForget(p.id).then(function (r) {
+              if (!r.ok) return setText(el, '[data-e]', r.error);
+              go('people', {}, { root: true });
+            });
+          });
+        };
+        D.loadWatched();
+        wireWatchedCode(el, p.id);
+      },
+      live: function (el, p) {
+        var w = watchedList().filter(function (x) {
+          return x.id === p.id;
+        })[0];
+        setText(el, '[data-wn]', watchedName(w));
+        setText(el, '[data-wk]', w && w.st && w.st.kas != null ? fmt(w.st.kas) + ' KAS' : '');
+        setText(el, '[data-wl]', w ? watchedLine(w) : 'Reading the account…');
+        setText(el, '[data-wr]', w ? rolesWord(w.roles) : '');
+        if (!el.querySelector('.slide')) setHtml(el, '[data-wb]', watchedButtons(w)); /* never redraw under a slide in progress */
       },
     },
     persondetail: {
@@ -5408,7 +7549,10 @@
             ? '<label class="field"><span>Their address</span><input data-a placeholder="kaspa:…" autocapitalize="none" spellcheck="false"></label>'
             : '') +
           (p.kind === 'Heir'
-            ? '<div class="dial"><div class="h"><span>Silence before they can take it</span><b data-l>6 months</b></div><input type="range" aria-label="Months of silence" data-r min="1" max="24" step="1" value="6"></div><div class="sub">Silence means no payment from this account for that long. Every payment you make restarts it.</div>'
+            ? '<div class="dial"><div class="h"><span>Inactivity period before they can claim ' +
+              'it</span><b data-l>6 months</b></div><input type="range" aria-label="Months of ' +
+              'inactivity" data-r min="1" max="24" step="1" value="6"></div><div class="sub">' +
+              'Inactivity means no payment from this account for that long. Every payment you make restarts it.</div>'
             : '') +
           (p.kind === 'Guardian' || p.kind === 'Heir' || p.kind === 'Payee'
             ? ''
@@ -5434,7 +7578,7 @@
               setText(el, '[data-e]', 'That is not a Kaspa address.');
               return;
             }
-            ui.people.push({ name: n, role: 'Trusted payee', note: 'Payments to ' + addr.slice(0, 14) + '… go on the spot.', addr: addr });
+            ui.people.push({ name: n, role: 'Trusted payee', note: 'Payments to ' + addr.slice(0, 14) + '… are paid immediately.', addr: addr });
             D.addHistory('Added ' + n + ' as a trusted payee', 'people');
             go('people', {}, { replace: true });
             return;
@@ -5445,7 +7589,8 @@
               : p.kind === 'Guardian'
                 ? n + ' holds a copy of your emergency stop.'
                 : p.kind === 'Heir'
-                  ? 'After ' + r.value + ' months of silence, ' + n + ' can take what is in this account.'
+                  ? 'After ' + r.value + ' months of inactivity, ' + n +
+                    ' can claim what is in this account.'
                   : 'They spend up to ' + (r ? r.value : 50) + ' KAS a day. You hold the stop.';
           function link() {
             ui.people.push({ name: n, role: p.kind, note: note });
@@ -5487,9 +7632,9 @@
       },
       after: function (el, p) {
         el.querySelector('[data-share]').onclick = function () {
-          var t = 'Join me on KaspaVault: kaspavault.app/join/sample-' + encodeURIComponent(p.name.toLowerCase());
-          if (navigator.share) navigator.share({ text: t }).catch(function () {});
-          else setText(el, '[data-e]', 'Sharing opens on the phone.');
+          var t = 'Join me on KVault: kaspavault.app/join/sample-' +
+            encodeURIComponent(p.name.toLowerCase());
+          shareText(el, '[data-e]', t);
         };
         el.querySelector('[data-done]').onclick = function () {
           go('people', {}, { replace: true });
@@ -5499,6 +7644,7 @@
 
     /* 10. Invite link flow (the newcomer's side) */
     invite: {
+      sample: true /* needs demo.js: go() sends Live Home */,
       html: function () {
         return (
           topbar(tag()) +
@@ -5539,7 +7685,8 @@
         });
       },
       live: function (el) {
-        setHtml(el, '[data-l]', logHtml(200) || '<div class="sub">Nothing yet.</div>');
+        setHtml(el, '[data-l]', logHtml(200, true) || '<div class="sub">Nothing yet.</div>');
+        alertsMark();
       },
     },
 
@@ -5547,6 +7694,7 @@
     coins: {
       tab: 'settings',
       money: true,
+      dark: true /* a Settings page that moves nothing on Live yet */,
       html: function () {
         return (
           topbar(tag()) +
@@ -5554,44 +7702,17 @@
         );
       },
       live: function (el) {
-        var s = D.state,
-          c = s.coins || [];
-        var rows =
-          '<div class="item"><span><span class="t">' +
-          esc(s.account || 'Your account') +
-          '</span><span class="d">One coin. Your rules keep it that way.</span></span><span class="r">' +
-          fmt(s.balance) +
-          ' KAS</span></div>';
-        if (s.everyday)
-          rows +=
-            '<div class="item"><span><span class="t">' +
-            esc(s.everyday.name) +
-            '</span><span class="d">' +
-            c.length +
-            (c.length === 1 ? ' coin: ' : ' coins: ') +
-            c
-              .map(function (x) {
-                return fmt(x);
-              })
-              .join(', ') +
-            '</span></span><span class="r">' +
-            fmt(s.everyday.balance) +
-            ' KAS</span></div>';
-        setHtml(el, '[data-l]', rows);
-        var fee = c.length > 1 ? Math.round(c.length * 0.4) / 100 : 0;
-        setText(
-          el,
-          '[data-say]',
-          D.isLive()
-            ? 'Combining coins is not part of this app on a live account.'
-            : c.length > 1
-              ? 'Combining ' + c.length + ' coins costs about ' + fee + ' KAS, under a cent.'
-              : 'Nothing to combine.'
-        );
-        var b = el.querySelector('[data-ok]');
-        if (b) b.disabled = c.length < 2;
+        coinsPaint(el, ui.coins);
       },
       after: function (el) {
+        var tag = (ui.coinsTag = {}); /* only the latest visit's answer is kept */
+        ui.coins = null;
+        coinsPaint(el, null);
+        D.coinsInfo().then(function (c) {
+          if (ui.coinsTag !== tag) return;
+          ui.coins = c;
+          if (el.isConnected) coinsPaint(el, c);
+        });
         el.querySelector('[data-ok]').onclick = function () {
           armSlide(
             this,
@@ -5612,24 +7733,59 @@
         };
       },
     },
-    /* the watcher (all in one): the phone watches while it is on; a second watcher covers the rest */
+    /* who can stop this account and who is heir; changes go through People, behind a warning */
+    guardians: {
+      tab: 'settings',
+      html: function () {
+        return (
+          topbar() +
+          '<h1 class="head">Guardians</h1><p class="line">People who can stop this account for ' +
+          'you, and your heir. A stop only ever sends your money to your own vault.</p>' +
+          '<div class="list" data-gl></div><div class="push"></div>' +
+          '<button class="ghost" data-change>Change guardians or heir</button>'
+        );
+      },
+      after: function (el) {
+        guardiansPaint(el);
+        el.querySelector('[data-change]').onclick = guardiansWarn;
+        if (!D.isLocal()) return;
+        D.keysPublic().then(function (r) {
+          if (!r || !r.ok)
+            return setHtml(el, '[data-gl]', '<div class="sub">Your guardians could not be ' +
+              'read. Try again in a moment.</div>');
+          ui.pub = r.public || {};
+          ui.stops = r.stops || null;
+          guardiansPaint(el);
+        });
+      },
+    },
+    /* the watcher (all in one): this phone watches while on; a second one covers the rest */
     watcher: {
       tab: 'settings',
       html: function () {
         return (
           topbar(tag()) +
-          '<h1 class="head">The guard</h1><p class="line">The guard watches your money on the Kaspa network and raises the alert when a withdrawal is asked for or something is not right. This phone guards while it is on. For the hours it is off, or if it is lost, a second guard is wise: it holds no keys, only your addresses.' +
-          (D.isLocal() && (D.state.accounts || []).length > 1 ? ' The guard watches account 1.' : '') +
+          '<h1 class="head">Alerts on this phone</h1>' +
+          '<p class="line">This phone watches your money ' +
+          'on the Kaspa network and raises an alert when a withdrawal is asked for or ' +
+          'something is not right. It watches while it is on. For the hours it is off, or if ' +
+          'it is lost, a second phone watching is wise: it holds no keys, only your addresses.' +
+          (D.isLocal() && (D.state.accounts || []).length > 1 ? ' It watches account 1.' : '') +
           '</p><div class="list">' +
           (D.isLocal()
-            ? '<div class="item"><span class="t">Guard from this phone</span><span class="seg" data-guard><button data-v="1">On</button><button data-v="0">Off</button></span></div>'
-            : toggleRow('watch_phone', 'Guard from this phone')) +
-          row('seconddevice', 'Set up a second guard', 'A second phone or tablet') +
+            ? '<div class="item"><span class="t">Watch from this phone</span>' +
+              '<span class="seg" data-guard><button data-v="1">On</button>' +
+              '<button data-v="0">Off</button></span></div>'
+            : toggleRow('watch_phone', 'Watch from this phone')) +
+          row('seconddevice', 'Set up a second phone', 'A second phone or tablet watches too') +
           '</div>' +
           (D.isLocal()
             ? '<label class="field"><span>Second node, optional</span><input data-nodes autocapitalize="none" spellcheck="false" placeholder="wss://…" value="' +
               esc(D.getSetting('guard_nodes')) +
-              '"></label><div class="sub" data-gsay></div>'
+              '"></label><div class="sub">If you leave this empty, the app picks a second ' +
+              'encrypted ' +
+              'public node for you. Only encrypted (wss://) connections are allowed.</div>' +
+              '<div class="sub" data-gsay></div>'
             : '')
         );
       },
@@ -5644,64 +7800,44 @@
             el,
             '[data-gsay]',
             on
-              ? 'The guard is on. A small notice stays in the shade while it watches.'
-              : 'The guard is off. Nothing watches your money while the app is closed.'
+              ? 'Alerts are on. A small notification stays in your notification bar while it ' +
+                'runs.'
+              : 'Alerts are off. Nothing watches your money while the app is closed.'
           );
         }
         paint(!!bridge.guardRunning());
         [].forEach.call(seg.children, function (b) {
           b.onclick = function () {
             var on = b.dataset.v === '1';
-            D.setSetting('guard_nodes', el.querySelector('[data-nodes]').value.trim());
-            bridge.guardOn(on);
-            haptic();
-            setTimeout(function () {
-              paint(!!bridge.guardRunning());
-            }, 900);
+            saveNodes(el).then(function (ok) {
+              if (ok) guardSwitch(on, paint);
+              else paint(!!bridge.guardRunning());
+            });
           };
         });
       },
     },
-    /* the panic PIN: typed on the unlock screen, the app opens quiet. Sample keeps it in settings; Live would keep it in the phone's secure store. */
+    /* the panic PIN: six digits typed on the lock screen open the duress view (the purse only).
+       Kept hashed with a salt (data.js); setting or removing it takes a fresh fingerprint. */
     panicpin: {
       tab: 'settings',
       html: function () {
-        var set = !!D.getSetting('panic_pin');
+        var set = D.panicIsSet();
         return (
-          topbar(tag()) +
-          '<h1 class="head">Panic PIN</h1><p class="line">A PIN you type on the unlock screen when someone makes you open the app. The app opens showing only your Everyday money; your protected account and your vault stay out of sight, and your guardians get a quiet alert.</p>' +
-          '<label class="field"><span>' +
-          (set ? 'New PIN' : 'Choose a PIN') +
-          ', 4 to 6 digits</span><input data-p inputmode="numeric" maxlength="6" autocomplete="off"></label><div class="err" data-e></div><div class="push"></div>' +
-          '<button class="pill" data-ok>' +
-          (set ? 'Change it' : 'Set it') +
-          '</button>' +
+          topbar(D.isLive() ? '' : tag()) +
+          '<h1 class="head">Panic PIN</h1><p class="line">For a moment when someone makes you open ' +
+          'the app. Type this PIN on the unlock screen instead of using your fingerprint: the app ' +
+          'opens showing only your purse. Your account, your vault, your emergency stops, your ' +
+          'people and your rules stay out of sight, and nothing there can move your account\u2019s ' +
+          'funds. Keep only a small amount in the purse.</p>' +
+          '<label class="field"><span data-pl>' + (set ? 'New PIN' : 'Choose a PIN') +
+          ', 6 digits</span><input data-p inputmode="numeric" maxlength="6" autocomplete="off">' +
+          '</label><div class="err" data-e></div><div class="push"></div>' +
+          '<button class="pill" data-ok>' + (set ? 'Change it' : 'Set it') + '</button>' +
           (set ? '<button class="ghost" data-off>Remove it</button>' : '')
         );
       },
-      after: function (el) {
-        el.querySelector('[data-ok]').onclick = function () {
-          var v = el.querySelector('[data-p]').value.replace(/\D/g, '');
-          if (v.length < 4) {
-            setText(el, '[data-e]', 'Four to six digits.');
-            return;
-          }
-          confirmAction('Set your panic PIN', '').then(function (yes) {
-            if (!yes) return;
-            D.setSetting('panic_pin', v);
-            go('protection', {}, { replace: true });
-          });
-        };
-        var off = el.querySelector('[data-off]');
-        if (off)
-          off.onclick = function () {
-            confirmAction('Remove your panic PIN', '').then(function (yes) {
-              if (!yes) return;
-              D.setSetting('panic_pin', '');
-              go('protection', {}, { replace: true });
-            });
-          };
-      },
+      after: panicPinAfter,
     },
     /* a statement: this month's movements and the total out, shareable as text */
     statements: {
@@ -5709,53 +7845,23 @@
       html: function () {
         return (
           topbar(tag()) +
-          '<h1 class="head">Statement</h1><div class="sub">This month, ' +
-          esc(D.state.account || 'your account') +
-          '</div><div class="list" data-l></div><div class="sub mt8" data-tot></div><div class="push"></div><button class="pill" data-share>Share it</button>'
+          '<h1 class="head">Statement</h1><div class="sub" data-hd></div>' +
+          '<div class="list" data-l></div><div class="sub mt8" data-tot></div>' +
+          '<div class="err" data-e></div><div class="push"></div>' +
+          '<button class="pill" data-share>Share it</button>'
         );
       },
       live: function (el) {
-        var h = D.state.history,
-          out = 0;
-        setHtml(
-          el,
-          '[data-l]',
-          h
-            .map(function (a) {
-              var m = /([\d.,]+) KAS/.exec(a.text),
-                v = m ? parseFloat(m[1].replace(/,/g, '')) : 0;
-              if (a.kind === 'paid') out += v;
-              return (
-                '<div class="item"><span><span class="t">' +
-                esc(a.text) +
-                '</span><span class="d">' +
-                esc(a.when || '') +
-                '</span></span><span class="r">' +
-                (a.kind === 'paid' && v ? '−' + fmt(v) : '') +
-                '</span></div>'
-              );
-            })
-            .join('') || '<div class="sub">Nothing yet.</div>'
-        );
-        setText(
-          el,
-          '[data-tot]',
-          'Out this month: ' + fmt(out) + ' KAS' + (D.isLive() ? '' : ', ' + money(out)) + '. Balance now ' + fmt(D.state.balance) + ' KAS.'
-        );
+        var d = statementData();
+        setText(el, '[data-hd]', (d.month ? 'This month, ' : 'Recent activity, ') +
+          (D.state.account || 'your account'));
+        setHtml(el, '[data-l]', d.rows.map(statementRowHtml).join('') ||
+          '<div class="sub">Nothing yet.</div>');
+        setText(el, '[data-tot]', statementTotals(d));
       },
       after: function (el) {
         el.querySelector('[data-share]').onclick = function () {
-          var t =
-            'KaspaVault statement, ' +
-            (D.state.account || '') +
-            ': ' +
-            D.state.history
-              .map(function (a) {
-                return (a.when ? a.when + ': ' : '') + a.text;
-              })
-              .join('; ');
-          if (navigator.share) navigator.share({ text: t }).catch(function () {});
-          else setText(el, '[data-tot]', 'Sharing opens on the phone.');
+          shareText(el, '[data-e]', statementText());
         };
       },
     },
@@ -5771,13 +7877,15 @@
         var s = acct(),
           g = ui.guards,
           n = noticeOf(s);
-        function rule(key, title, right) {
+        function rule(key, title, right, who) {
           return (
             '<button class="item" data-explain="' +
             key +
             '"><span><span class="t">' +
             title +
-            '</span></span><span class="r">' +
+            '</span>' +
+            (who ? '<span class="d" ' + who + '></span>' : '') +
+            '</span><span class="r">' +
             esc(right) +
             '</span></button>'
           );
@@ -5785,11 +7893,14 @@
         var rules = g
           ? rule('limit', 'Daily limit', fmt(s.limit) + ' KAS') +
             rule('notice', 'Notice period', dur(n)) +
-            rule('stops', 'Emergency stop', g.stops + (g.stops === 1 ? ' button' : ' buttons')) +
+            rule('stops', 'Emergency stop', g.stops + (g.stops === 1 ? ' button' : ' buttons'),
+              'data-whostops') +
             rule(
               'heir',
               'Heir',
-              g.heir ? (ui.acct === 'main' && heirLeft() != null ? 'named, ' + dur(heirLeft()) + ' left' : 'named') : 'none'
+              !g.heir ? 'none' :
+                ui.acct === 'main' && heirLeft() != null ? dur(heirLeft()) + ' left' : 'named',
+              'data-whoheir'
             ) +
             rule('safe', 'Vault', g.sheets === 1 ? '1 seed' : '2 of ' + g.sheets)
           : rule('limit', 'No covenant on this account', 'Protect it');
@@ -5801,14 +7912,14 @@
           (D.isLocal() && g ? '<button class="pill mt8" data-go="changerules">Change the rules</button>' : '') +
           '<div class="label mt20">Who hears about a pending withdrawal</div><div class="list mt0">' +
           toggleRow('alert_me', 'You') +
-          toggleRow('alert_sam', 'Sam', 'Guardian') +
+          hearRows() +
           '</div>' +
           (D.isLive()
             ? ''
             : '<div class="label mt20">More protection</div><div class="list mt0">' +
               toggleRow(
                 'only_trusted',
-                'Only trusted payees on the spot',
+                'Immediate payments to trusted payees only',
                 'Payments to anyone else wait for the notice period, whatever the amount. Add payees under People.',
                 true
               ) +
@@ -5818,7 +7929,6 @@
                 'Check pasted addresses',
                 'Shows the start and end of an address you paste, to compare with where it came from.'
               ) +
-              row('panicpin', 'Panic PIN', 'Opens the app quiet, Everyday only.', D.getSetting('panic_pin') ? 'Set' : 'Not set') +
               '</div>')
         );
       },
@@ -5827,6 +7937,7 @@
           setTimeout(function () {
             if (ui.guards) openDial(p.focus);
           }, 350);
+        if (ui.guards && ui.acct === 'main') wireRulesWho(el);
         var KEYS = ['alert_me', 'alert_sam', 'only_trusted', 'watch_only', 'clip_check'];
         function read() {
           var v = {};
@@ -5894,6 +8005,14 @@
     },
     /* How it works: a walk-through, one idea per step; swipe or Next / Back; each step can open its full story */
     howitworks: {
+      scene: function () {
+        var m = STEP_SCENE[ui.step];
+        if (!m) return {};
+        if (typeof m === 'string') return { mode: m, dim: false };
+        var o = { dim: false };
+        for (var key in m) o[key] = m[key];
+        return o;
+      },
       html: function (p) {
         ui.step = Math.min(STEPS.length - 1, Math.max(0, +p.step || 0));
         D.setSetting('toured', '1'); /* the Home offer goes once the walk has been seen */
@@ -5915,37 +8034,22 @@
         function draw(dir) {
           var s = STEPS[ui.step];
           box.innerHTML = walkStepHtml(s);
-          var pk = STEP_PEEK[ui.step] && peek(STEP_PEEK[ui.step]);
-          if (pk) {
-            var why = box.querySelector('.why');
-            why.parentNode.insertBefore(pk, why.nextSibling);
-            [].forEach.call(pk.querySelectorAll('.big,.clock'), fit);
-          }
+          applyScene(); /* this step's rule shape behind it */
           setText(el, '[data-count]', ui.step + 1 + ' of ' + STEPS.length);
           [].forEach.call(marks.children, function (m, i) {
             m.classList.toggle('on', i <= ui.step);
           });
-          nav.innerHTML =
-            (ui.step ? '<button class="pill" data-prev>Back</button>' : '') +
-            (ui.step < STEPS.length - 1
-              ? '<button class="pill" data-next>Next</button>'
-              : '<button class="pill" data-done>' + (p.intro ? 'Open my account' : 'Done') + '</button>');
+          nav.innerHTML = walkNavHtml(p);
           var dn = nav.querySelector('[data-done]');
           if (dn)
             dn.onclick = function () {
-              if (p.intro) {
+              if (p.then) go(p.then, {}, { replace: true });
+              else if (p.intro) {
                 go('home', {}, { root: true });
                 setTimeout(explainScreen, 700);
               } else back();
             };
-          if (dir) {
-            box.classList.add(dir > 0 ? 'fromright' : 'fromleft');
-            requestAnimationFrame(function () {
-              requestAnimationFrame(function () {
-                box.classList.remove('fromright', 'fromleft');
-              });
-            });
-          }
+          if (dir) walkSlide(box, dir);
         }
         function step(dir) {
           var n = ui.step + dir;
@@ -5992,35 +8096,48 @@
           menuBtn() +
           '</div>' +
           '<div class="label mt8">Money</div><div class="list mt0">' +
-          row('protection', 'Your rules', 'Daily limit, notice period, alerts, trusted payees, panic PIN') +
+          row('protection', 'Your rules', 'Daily limit, notice period, alerts, trusted payees') +
           (live ? '' : row('open', 'Open an account')) +
           row('coins', 'Coins', 'Combine small coins') +
           row('statements', 'Statement') +
           '</div>' +
           '<div class="label mt20">Keys</div><div class="list mt0">' +
           (D.isLocal()
-            ? row('makekeys', 'Make my keys', 'From your offline device\u2019s public file') +
-              row('keysmade', 'Your rule block code', 'And the public file to carry') +
-              row('showsheets', 'Show my sheets', 'Your three vault sheets, after a fingerprint') +
-              row('burnsheets', 'Burn the sheets on this phone', 'Only paper opens the vault after this') +
+            ? (D.state.noKeys ? row('makekeys', 'Make my keys',
+              'On this phone, with one fingerprint') : '') +
+              row('keysmade', 'Covenant code', 'And its public file') +
+              row('papers', 'Your papers', 'Check you have every paper: seeds, stop, heir') +
+              row('showsheets', 'Show my seeds', 'Your three vault seeds, after a fingerprint') +
+              row('resetkeys', 'Lost your vault seeds?',
+                'Starts over with new keys. The old vault cannot be opened without two seeds.') +
+              row('paperstop', 'Make a paper stop', 'An emergency stop button written on paper') +
+              row('paperuse', 'Use a paper stop',
+                'Type its 24 words on any phone to stop an account') +
               row('pursepay', 'Pay from the purse', 'To any address, at once') +
-              row('resetkeys', 'Start fresh keys', 'Once the purse and the account are empty')
+              row('panicpin', 'Panic PIN', 'Opens the app showing only your purse',
+                D.panicIsSet() ? 'Set' : 'Not set') +
+              row('burnsheets', 'Delete the vault seeds on this phone',
+                'Only paper opens the vault after this')
             : '') +
           (D.isLocal()
             ? ''
-            : row('words', 'Recovery drill', 'Check you can still find and read your recovery seed').replace(
+            : row('words', 'Test your recovery seed',
+              'Check you can still find and read your recovery seed').replace(
                 'data-go="words"',
                 'data-go="words" data-params=\'{"mode":"check"}\''
-              ) + row('restore', 'Recover a wallet', 'From your 24-word recovery seed')) +
-          row('watcher', 'The guard', D.isLocal() ? 'This phone watches your money' : 'This phone, and a second one') +
+              ) + row('restore', 'Restore an account', 'From your 24-word recovery seed')) +
+          row('guardians', 'Guardians', 'Who can stop this account, and your heir') +
+          row('watcher', 'Alerts on this phone',
+            D.isLocal() ? 'This phone watches your money' : 'This phone, and a second one') +
           (D.isLocal() ? '' : row('seconddevice', 'Second device')) +
           '</div>' +
           (D.isLocal()
-            ? '<div class="sub" data-fpwarn>Adding a fingerprint to this phone clears your everyday keys; your safe sheets stay.</div>'
+            ? '<div class="sub" data-fpwarn>Adding a fingerprint to this phone clears your ' +
+              'everyday keys; your vault seeds stay.</div>'
             : '') +
           '<div class="label mt20">Help</div><div class="list mt0">' +
           row('howitworks', 'How it works') +
-          row('glossary', 'Library: crypto and Kaspa') +
+          row('glossary', 'Glossary') +
           row('prefs', 'Preferences') +
           row('about', 'About') +
           '</div>'
@@ -6038,7 +8155,7 @@
           '>Dollars</button><button data-v="eur"' +
           (eur ? ' class="on"' : '') +
           '>Euros</button></span></div>' +
-          '<div class="item"><span class="t">Lock when put away</span><span class="seg" data-lock>' +
+          '<div class="item"><span class="t">Lock when you leave the app</span><span class="seg" data-lock>' +
           [
             ['0', 'At once'],
             ['60', '1 min'],
@@ -6074,12 +8191,10 @@
           toggleRow('balance_money', 'Show your balance in dollars', 'Tap the balance on Home to swap any time.', true) +
           toggleRow(
             'send_grace',
-            'A minute to change your mind',
+            'One-minute cancellation window',
             'An on-the-spot send waits a minute on this phone with a Stop. Off, it leaves at once and is final within a second.',
             true
           ) +
-          toggleRow('alert_push', 'Push alerts') +
-          toggleRow('alert_email', 'Email alerts') +
           toggleRow(
             'screenshots',
             'Allow screenshots',
@@ -6094,7 +8209,7 @@
         wireSeg(el, '[data-cur]');
         wireSeg(el, '[data-signer]');
         wireSeg(el, '[data-lock]');
-        var keys = ['balance_money', 'send_grace', 'alert_push', 'alert_email', 'screenshots'];
+        var keys = ['balance_money', 'send_grace', 'screenshots']; /* alert_push: read by nothing */
         function read() {
           var v = {
             currency: el.querySelector('[data-cur] .on').dataset.v,
@@ -6106,14 +8221,11 @@
           });
           return v;
         }
-        stageChanges(el, read, function (v) {
-          for (var k in v) D.setSetting(k, v[k]);
-          return true;
-        });
+        stageChanges(el, read, saveSettings);
       },
     },
-    /* this phone makes and seals its own three keys. The offline device's public file comes by
-       camera or paste; the heir's public key is typed or pasted. One fingerprint seals the keys; the key bytes never reach this page. */
+    /* this phone makes and seals its own three keys after one fingerprint; the key bytes never
+       reach this page. */
     /* Make my keys: two doors, the simple one first. */
     makekeys: {
       tab: 'settings',
@@ -6121,9 +8233,10 @@
       html: function () {
         return (
           topbar() +
-          '<h1 class="head">Make my keys</h1><p class="sub">Your account needs three keys: a card for everyday payments, a stop, and a purse. Pick how they are made.</p>' +
-          '<div class="list mt8"><button class="item" data-phone><span><span class="t">Make everything on this phone</span><span class="d">Recommended. One tap and one fingerprint, then three sheets of words to write down.</span></span></button>' +
-          '<button class="item" data-go="keysdrawer"><span><span class="t">I have a drawer device</span><span class="d">Advanced. The vault half was made on a device that never goes online.</span></span></button></div>' +
+          '<h1 class="head">Make my keys</h1><p class="sub">Your account needs three keys: a card for everyday payments, a stop, and a purse.</p>' +
+          '<p class="sub">' + esc(NODES_LINE) + '</p>' +
+          '<div class="list mt8"><button class="item" data-phone><span><span class="t">Make everything on this phone</span><span class="d">One tap and one ' +
+          'fingerprint, then three vault seeds to write down.</span></span></button></div>' +
           '<div class="err" data-e></div><div class="push"></div>'
         );
       },
@@ -6135,15 +8248,20 @@
           D.makeKeys({ mode: 'phone', heir_x: '', auto_heir: true, hard_limit: false }).then(function (r) {
             /* no heir for now: Change the rules adds one later */
             b.disabled = false;
+            /* the phone has an account */
+            if (r.already_has_keys) return go('home', {}, { root: true });
             if (!r.ok) {
               setText(el, '[data-e]', r.error);
               return;
             }
             haptic();
             if (r.sheets && r.sheets.length) {
+              seedMarks(false);
+              D.paperMark('p', false);
+              ui.seedsKept = r.seeds_kept !== false;
               ui.sheets = r.sheets;
               go('sheet', { n: 0 }, { replace: true });
-            } /* the words live only in this page's memory until read back */ else go('keysmade', {}, { replace: true });
+            } /* the words live only in this page's memory until read back */ else keysDone();
           });
         };
       },
@@ -6157,9 +8275,12 @@
         var sh = ui.sheets && ui.sheets[p.n];
         return (
           topbar() +
-          '<div class="label">Safe sheet ' +
+          '<div class="label">Vault seed ' +
           (p.n + 1) +
-          ' of 3</div><h1 class="head">Write these on paper.</h1><p class="line">Any two of the three sheets open your vault. Keep them in three places, never a photo. Make sure nobody is looking over your shoulder.</p>' +
+          ' of 3</div><h1 class="head">Write these on paper.</h1><p class="line">Any two of the three seeds open your vault. Keep them in three places, ' +
+          'never a photo. Make sure nobody is looking over your shoulder.</p>' +
+          (sh && ui.seedsKept === false ? '<p class="line oldline">' + esc(SEEDS_NOT_KEPT) +
+            '</p>' : '') +
           (sh
             ? '<div class="words">' +
               sh
@@ -6171,7 +8292,8 @@
             : '<div class="err">These words were shown already. If you did not write them down, start over under Settings, Keys.</div>') +
           '<div class="push"></div>' +
           (sh
-            ? '<button class="pill" data-go="sheetcheck" data-params=\'' + JSON.stringify({ n: p.n }) + "'>I wrote them down</button>"
+            ? '<button class="pill" data-go="sheetcheck" data-params=\'' +
+              JSON.stringify({ n: p.n, one: !!p.one }) + "'>I wrote them down</button>"
             : '')
         );
       },
@@ -6195,14 +8317,20 @@
           at = 0;
         function next() {
           if (at === ask.length) {
+            D.paperMark('s' + (p.n + 1));
+            if (p.one) {
+              ui.sheets = null;
+              ui.stack.pop(); /* the seed's words screen too: straight back to Your papers */
+              return back();
+            }
             if (p.n < 2) return go('sheet', { n: p.n + 1 }, { replace: true });
-            ui.sheets = null;
-            return go('keysmade', {}, { replace: true }); /* all three read back: the words are gone from this phone */
+            ui.sheets = null; /* all three read back: the words are gone from this page */
+            return go('papers', { after: 'setup' }, { replace: true });
           }
           var n = ask[at],
             right = sh[n],
             opts = [right, sh[(n + 7) % 24], sh[(n + 15) % 24]].sort();
-          setText(el, '[data-q]', 'Sheet ' + (p.n + 1) + ', check ' + (at + 1) + ' of 3');
+          setText(el, '[data-q]', 'Vault seed ' + (p.n + 1) + ', check ' + (at + 1) + ' of 3');
           setText(el, '[data-w]', 'Word ' + (n + 1));
           el.querySelector('[data-pick]').innerHTML = opts
             .map(function (w) {
@@ -6214,139 +8342,218 @@
               if (b.textContent === right) {
                 at++;
                 next();
-              } else setText(el, '.sub', 'Not that one. Check your paper.');
+              } else setText(el, '.sub', 'That word does not match. Please check your paper copy.');
             };
           });
         }
         next();
       },
     },
-    /* The drawer-device tutorial: one step per page */
-    offlinehow: {
+    /* Your papers: the backup checklist (Settings, Home's papers row, after setup, after
+       Update now) */
+    papers: {
       tab: 'settings',
+      money: true,
       html: function (p) {
-        var i = p.step || 0,
-          s = OFFLINE_STEPS[i];
         return (
           topbar() +
-          '<div class="label">Step ' +
-          (i + 1) +
-          ' of ' +
-          OFFLINE_STEPS.length +
-          '</div><h1 class="head">' +
-          esc(s[0]) +
-          '</h1><p class="line">' +
-          esc(s[1]) +
-          '</p><div class="push"></div>' +
-          '<div class="twobtn">' +
-          (i > 0 ? '<button class="ghost" data-prev>Back</button>' : '') +
-          '<button class="pill" data-next>' +
-          (i + 1 < OFFLINE_STEPS.length ? 'Next' : 'Done') +
-          '</button></div>'
+          '<div class="label">Backup</div><h1 class="head">Your papers</h1>' +
+          '<p class="sub" data-count></p><p class="line oldline" data-old hidden>' +
+          esc(PAPERS_OLD) +
+          '</p><div class="list mt8" data-rows></div><div class="err" data-e></div>' +
+          '<div class="push"></div><button class="pill" data-done>' +
+          (p.after === 'setup' ? 'Next' : 'Done') + '</button>'
         );
       },
       after: function (el, p) {
-        var i = p.step || 0,
-          pv = el.querySelector('[data-prev]');
-        if (pv)
-          pv.onclick = function () {
-            go('offlinehow', { step: i - 1 }, { replace: true });
-          };
-        el.querySelector('[data-next]').onclick = function () {
-          if (i + 1 < OFFLINE_STEPS.length) go('offlinehow', { step: i + 1 }, { replace: true });
-          else back();
-        };
+        wirePapers(el, p);
       },
     },
-    keysdrawer: {
+    /* Settings > Paper stop: what it is, then make it; step 'apply' once the words are read back */
+    paperstop: {
+      tab: 'settings',
+      money: true,
+      html: function (p) {
+        var apply = p.step === 'apply';
+        return (
+          topbar() +
+          '<div class="label">Paper stop</div><h1 class="head">' +
+          (apply ? 'Your paper stop is ready.' : 'An emergency stop on paper.') +
+          '</h1><p class="line">' +
+          (apply ? PAPER_APPLY : PAPER_WHAT) +
+          '</p>' +
+          '<div class="err" data-e></div><div class="push"></div>' +
+          (apply
+            ? '<button class="pill" data-apply>Add my paper stop</button>'
+            : '<button class="pill" data-make>Make my paper stop</button>') +
+          '<div data-pbox></div>' +
+          (apply ? '' : '<button class="ghost" data-go="paperuse">Use a paper stop</button>')
+        );
+      },
+      after: function (el) {
+        var ap = el.querySelector('[data-apply]'),
+          mk = el.querySelector('[data-make]');
+        if (ap)
+          ap.onclick = function () {
+            paperConfirm(el, ap);
+          };
+        if (ap && ui.paper) paperConfirm(el, ap); /* straight on from the read-back */
+        if (mk)
+          mk.onclick = function () {
+            paperMake(el, mk);
+          };
+      },
+    },
+    /* the 24 paper stop words, shown once: the engine gave them and the page never stores them */
+    papershow: {
+      tab: 'settings',
+      money: true,
+      locked: false,
+      html: function () {
+        var w = ui.paper;
+        return (
+          topbar() +
+          '<div class="label">Paper stop</div><h1 class="head">Your 24 stop words</h1><p class="line">' +
+          PAPER_KEEP +
+          '</p>' +
+          (w ? wordsHtml(w) : PAPER_SHOWN) +
+          '<div class="push"></div>' +
+          (w ? '<button class="pill" data-wrote>I wrote them down</button>' : '')
+        );
+      },
+      after: function (el) {
+        var b = el.querySelector('[data-wrote]');
+        if (b)
+          b.onclick = function () {
+            go('papercheck', {}, { replace: true });
+          };
+      },
+    },
+    papercheck: {
       tab: 'settings',
       money: true,
       html: function () {
         return (
           topbar() +
-          '<h1 class="head">I have a drawer device</h1><p class="sub">Your drawer device made the vault half. Bring its public file here by camera or paste, name the heir, and this phone makes and seals its own keys. Nothing secret is typed.</p>' +
-          '<button class="ghost small" data-go="offlinehow">How a drawer device is made, step by step</button>' +
-          (D.isLive()
-            ? '<div class="sub">No drawer device? Go back and make everything on this phone' +
-              (D.isMainnet() ? '' : ', or use the test drawer for now') +
-              '.</div>'
-            : '') +
-          '<label class="field"><span>Offline device, public file</span><textarea data-off autocapitalize="none" spellcheck="false" placeholder="{&quot;kind&quot;:&quot;offline-public&quot;, \u2026}"></textarea></label>' +
-          '<button class="ghost small" data-scan>Scan it instead</button>' +
-          '<label class="field"><span>Heir, public key</span><input data-heir autocapitalize="none" spellcheck="false" maxlength="64" placeholder="64 characters, or empty for no heir"></label>' +
-          '<div class="dial"><div class="h"><span>Heir claims without a signature</span></div><span class="seg" data-auto><button data-v="1" class="on">On</button><button data-v="0">Off</button></span></div>' +
-          '<div class="dial"><div class="h"><span>Hard limit</span></div><span class="seg" data-hard><button data-v="0" class="on">Off</button><button data-v="1">On</button></span></div>' +
-          '<div class="sub">On, nothing above the daily limit can ever leave this account, not even with notice.</div>' +
-          '<div class="err" data-e></div><div class="push"></div>' +
-          '<button class="pill" data-ok>Make my keys</button>' +
-          ''
+          '<div class="label" data-q></div><h1 class="head" data-w></h1><div class="sub">Tap the right word</div>' +
+          '<div class="list pick" data-pick></div><div class="push"></div>'
         );
       },
       after: function (el) {
-        var off = el.querySelector('[data-off]'),
-          heir = el.querySelector('[data-heir]'),
-          ok = el.querySelector('[data-ok]');
-        if (ui.keyDraft) {
-          off.value = ui.keyDraft.off;
-          heir.value = ui.keyDraft.heir;
-        }
-        if (ui.scanned) {
-          off.value = ui.scanned;
-          ui.scanned = '';
-        }
-        wireSeg(el, '.seg');
-        function on(sel) {
-          return el.querySelector(sel + ' .on').dataset.v === '1';
-        }
-        el.querySelector('[data-scan]').onclick = function () {
-          ui.keyDraft = { off: off.value, heir: heir.value };
-          ui.onScan = function (text) {
-            ui.scanned = text;
-            go('keysdrawer', {}, { replace: true });
-          };
-          go('scan', { what: 'answer' });
+        paperCheckRun(el);
+      },
+    },
+    /* the watch code to print with the words; showing it records its short hash (paper_shown) */
+    paperprint: {
+      tab: 'settings',
+      money: true,
+      html: function () {
+        return (
+          topbar() +
+          '<div class="label">Print the code</div><h1 class="head">Your paper stop code</h1>' +
+          "<p class=\"line\">Keep this code with your stop words. It shows your account's rules and balance and never moves money.</p>" +
+          '<div class="qrbox" data-box hidden><div class="qr" data-qr></div></div><p class="addr" data-ids></p>' +
+          '<div class="err" data-e></div>' +
+          '<div class="push"></div><button class="pill" data-done>Done</button>'
+        );
+      },
+      after: function (el, p) {
+        el.querySelector('[data-done]').onclick = function () {
+          if (p.from === 'papers') return back();
+          go('home', {}, { root: true });
+          if (p.share) shareNewCode();
         };
-        ok.onclick = function () {
-          var text = off.value.trim(),
-            hx = heir.value.trim().toLowerCase(),
-            j = null;
-          try {
-            j = JSON.parse(text);
-          } catch (e) {}
-          if (!j || j.kind !== 'offline-public') {
-            setText(el, '[data-e]', 'That is not an offline device\u2019s public file.');
-            return;
-          }
-          if (hx && !/^[0-9a-f]{64}$/.test(hx)) {
-            setText(el, '[data-e]', 'The heir\u2019s public key is 64 characters, 0-9 and a-f.');
-            return;
-          }
-          ok.disabled = true;
-          ok.textContent = 'Making\u2026';
-          setText(el, '[data-e]', '');
-          D.makeKeys({ offline_public: text, heir_x: hx, auto_heir: on('[data-auto]'), hard_limit: on('[data-hard]') }).then(function (r) {
-            ok.disabled = false;
-            ok.textContent = 'Make my keys';
-            if (r.ok) {
-              haptic();
-              ui.keyDraft = null;
-              go('keysmade', {}, { replace: true });
-            } else {
-              resetSlide(el);
-              setText(el, '[data-e]', r.error);
-            }
-          });
+        D.paperSheet().then(function (r) {
+          var code = String((r && r.ok && r.watch_code) || '');
+          if (!code || code.length > 2953)
+            return setText(el, '[data-e]', (r && r.error) || 'The code could not be made.');
+          setHtml(el, '[data-qr]', KVQR.svg(code));
+          el.querySelector('[data-box]').hidden = false;
+          setText(el, '[data-ids]', paperSheetIds(code));
+          D.paperShown(code);
+        });
+      },
+    },
+    /* Use a paper stop: no keys on the phone, no fingerprint (the words are the authority) */
+    paperuse: {
+      tab: 'settings',
+      money: true,
+      html: function () {
+        return (
+          topbar() +
+          '<div class="label">Use a paper stop</div><h1 class="head">Stop your account from any phone.</h1>' +
+          '<p class="line" data-say>' +
+          PAPER_FIND +
+          '</p><p class="addr" data-ids></p><div data-find><label class="field"><span>The printed code</span>' +
+          '<textarea data-code autocapitalize="none" spellcheck="false"></textarea></label>' +
+          '<div class="twobtn"><button class="pill" data-scan>Scan the code</button>' +
+          '<button class="pill" data-check>Find my account</button></div></div>' +
+          '<div data-words hidden>' +
+          paperInputs() +
+          '<div class="chips" data-wp hidden></div></div><div class="err" data-e></div><div class="push"></div>' +
+          '<button class="pill" data-stop hidden>Stop my account</button>'
+        );
+      },
+      after: function (el) {
+        wirePaperUse(el);
+      },
+    },
+    paperdone: {
+      money: true,
+      html: function (p) {
+        return (
+          '<div class="push"></div><h1 class="head">' +
+          (p.sent ? PAPER_SENT : 'Your account is stopped.') +
+          '</h1><p class="line">' +
+          fmt(+p.kas || 0) +
+          ' KAS is moving to your vault. Any two of your three vault seeds open it.</p>' +
+          (p.ids ? '<p class="addr">' + esc(p.ids) + '</p>' : '') +
+          '<div class="push"></div>' +
+          '<button class="ghost" data-go="paperout">Take your funds out with two vault seeds</button>' +
+          '<button class="pill" data-done>Done</button>'
+        );
+      },
+      after: function (el) {
+        el.querySelector('[data-done]').onclick = function () {
+          go('home', {}, { root: true });
         };
       },
     },
-    /* The rule block code (the sha of the public block): the offline device shows the same one. The public file can be copied out. */
+    paperout: {
+      tab: 'settings',
+      money: true,
+      html: paperOutHtml,
+      after: function (el) {
+        wirePaperOut(el);
+      },
+    },
+    paperoutdone: {
+      money: true,
+      html: function (p) {
+        return (
+          '<div class="push"></div><h1 class="head">' +
+          (p.sent ? OUT_SENT : 'Your funds are out of the vault.') +
+          '</h1><p class="line">' +
+          fmt(+p.kas || 0) +
+          ' KAS left your vault. It goes to:</p>' +
+          (p.to ? '<p class="addr">' + esc(p.to) + '</p>' : '') +
+          '<div class="push"></div><button class="pill" data-done>Done</button>'
+        );
+      },
+      after: function (el) {
+        el.querySelector('[data-done]').onclick = function () {
+          go('home', {}, { root: true });
+        };
+      },
+    },
+    /* The rule block code (the sha of the public block). The public file can be copied out. */
     keysmade: {
       tab: 'settings',
       money: true,
       html: function () {
         return (
           topbar() +
-          '<h1 class="head">Your rule block</h1><p class="sub">This code names the rules your money will live under. Your offline device shows the same code; if they differ, stop and ask.</p>' +
+          '<h1 class="head">Your covenant</h1><p class="sub">This code names the rules your money will live under.</p>' +
           '<div class="code" data-code>\u2026</div><div class="sub center mt8" data-purse></div><div class="err center" data-e></div><div class="push"></div>' +
           '<div class="twobtn"><button class="pill" data-copy>Copy the public file</button><button class="pill" data-go="receive">Put money in</button></div>'
         );
@@ -6423,7 +8630,8 @@
         var re = reopening(p); /* no dials: the engine applies the stored rules and clears them */
         wireFold(el);
         el.querySelector('[data-max]').onclick = function () {
-          if (have >= 1.05) el.querySelector('[data-amt]').value = String(Math.floor((have - 1) * 100) / 100);
+          if (have >= 1.05) el.querySelector('[data-amt]').value = plainNum(Math.floor((have - 1) *
+            100) / 100);
         };
         ok.disabled = true; /* until the purse is read and holds enough (never silent on an empty purse) */
         readPurse(el, function (r) {
@@ -6435,7 +8643,8 @@
             '[data-purse]',
             enough
               ? 'Your purse holds ' + fmt(have) + ' KAS. What you do not move stays in it.'
-              : 'Your purse holds ' + fmt(have) + ' KAS. Put money in first: send test KAS to this address, then come back.'
+              : 'Your purse holds ' + fmt(have) +
+                ' KAS. Add funds first: send test KAS to this address, then return here.'
           );
           addr.hidden = cp.hidden = enough;
           addr.textContent = r.address;
@@ -6445,7 +8654,8 @@
           copyPurseAddr(el, addr);
         };
         ok.onclick = function () {
-          var n = parseFloat(el.querySelector('[data-amt]').value) || 0;
+          var n = amountOf(el.querySelector('[data-amt]').value);
+          if (isNaN(n)) return setText(el, '[data-e]', AMOUNT_BAD);
           if (n <= 0) {
             setText(el, '[data-e]', 'Type an amount.');
             return;
@@ -6457,31 +8667,7 @@
           ok.disabled = true;
           ok.textContent = 'Opening\u2026';
           setText(el, '[data-e]', '');
-          var dials = re
-            ? null
-            : D.isMainnet()
-              ? {
-                  cap_kas: ui.liveRules.limit,
-                  delay: Math.round(ui.liveRules.notice * 36000),
-                  window: Math.round(ui.liveRules.window * 36000),
-                }
-              : null; /* DAA units at 10 a second */
-          D.fund(n, dials, an || undefined).then(function (r) {
-            ok.disabled = false;
-            ok.textContent = re ? 'Open the account again' : an ? 'Open account ' + an : 'Open the account';
-            if (!r.ok) {
-              resetSlide(el);
-              setText(el, '[data-e]', r.error);
-              return;
-            }
-            haptic();
-            ui.acct = 'main';
-            if (an)
-              D.setAccount(an).then(function () {
-                go('home', {}, { root: true });
-              });
-            else go('home', {}, { root: true }); /* Home shows the account just opened */
-          });
+          fundOpen(el, ok, n, re, an);
         };
       },
     },
@@ -6492,7 +8678,8 @@
       html: function () {
         return (
           topbar() +
-          '<h1 class="head">Your sheets</h1><p class="sub">Any two of the three open your vault. Write them on paper and keep them in three places; never a photo.</p><div data-sheets></div><div class="err" data-e></div><div class="push"></div>'
+          '<h1 class="head">Your vault seeds</h1><p class="sub">Any two of the three open your vault. Write them on paper and keep them in three places; ' +
+          'never a photo.</p><div data-sheets></div><div class="err" data-e></div><div class="push"></div>'
         );
       },
       after: function (el) {
@@ -6504,7 +8691,7 @@
           el.querySelector('[data-sheets]').innerHTML = (r.sheets || [])
             .map(function (sh, k) {
               return (
-                '<div class="label mt20">Sheet ' +
+                '<div class="label mt20">Vault seed ' +
                 (k + 1) +
                 '</div><div class="words">' +
                 sh
@@ -6525,10 +8712,13 @@
       html: function () {
         return (
           topbar() +
-          '<h1 class="head">Burn the sheets on this phone</h1><p class="line">This phone keeps a sealed copy of your three vault sheets, so it can show them again and open the vault for you. Burning the copy means only your paper sheets open the vault from then on. Nothing on this phone, and nobody who takes it, can.</p>' +
+          '<h1 class="head">Delete the seeds on this phone</h1><p class="line">This phone keeps a sealed copy of your three vault seeds, so it can show them ' +
+          'again and open the vault for you. Deleting the copy means only your paper seeds open the vault from then on. Nothing on this phone, and nobody ' +
+          'who takes it, can.</p>' +
           '<p class="sub">It cannot be undone. If the paper is lost, the money in the vault is lost with it.</p>' +
-          '<div class="dial"><div class="h"><span>I have all three sheets on paper and read them back</span></div><span class="seg" data-sure><button data-v="0" class="on">No</button><button data-v="1">Yes</button></span></div>' +
-          '<div class="err" data-e></div><div class="push"></div><button class="pill" data-ok disabled>Burn them</button>'
+          '<div class="dial"><div class="h"><span>I have all three seeds on paper and read them back</span></div><span class="seg" data-sure><button ' +
+          'data-v="0" class="on">No</button><button data-v="1">Yes</button></span></div>' +
+          '<div class="err" data-e></div><div class="push"></div><button class="pill" data-ok disabled>Delete them</button>'
         );
       },
       after: function (el) {
@@ -6539,16 +8729,17 @@
         ok.onclick = function () {
           armSlide(
             this,
-            'Burn the sheets on this phone',
+            'Delete the vault seeds on this phone',
             'Only paper opens the vault after this.',
             true,
-            'Slide to burn them',
+            'Slide to delete them',
             'stop',
             function () {
               D.burnSheets().then(function (r) {
-                if (r.ok) {
+                if (r.ok && !r.burn_not_done) {
                   haptic();
-                  setText(el, '[data-e]', 'Burned. Only your paper opens the vault now.');
+                  seedMarks(true);
+                  setText(el, '[data-e]', 'Deleted. Only your paper seeds can open the vault now.');
                   ok.disabled = true;
                 } else {
                   resetSlide(el);
@@ -6567,11 +8758,15 @@
       html: function () {
         return (
           topbar() +
-          '<h1 class="head">Pay from the purse</h1><p class="sub">Money in the purse is outside the account and its rules. It goes where you say, at once.</p>' +
+          (ui.duress
+            ? '<h1 class="head">Send</h1><p class="sub">It goes where you say, at once.</p>'
+            : '<h1 class="head">Pay from the purse</h1><p class="sub">Money in the purse is ' +
+              'outside the account and its rules. It goes where you say, at once.</p>') +
           '<div class="sub" data-purse>Reading the purse\u2026</div>' +
           '<label class="field"><span>To</span><input data-to autocapitalize="none" spellcheck="false" placeholder="kaspa:\u2026"></label>' +
           '<label class="field"><span>Amount, KAS<button class="maxb" data-max type="button">Max</button></span><input data-amt inputmode="decimal" placeholder="All of it"></label>' +
-          '<div class="err" data-e></div><div class="push"></div><button class="pill" data-ok>Pay</button>'
+          '<div class="err" data-e></div><div class="push"></div><button class="pill" data-ok>' +
+          (ui.duress ? 'Send' : 'Pay') + '</button>'
         );
       },
       after: function (el) {
@@ -6586,20 +8781,22 @@
         });
         ok.onclick = function () {
           var to = el.querySelector('[data-to]').value.trim().toLowerCase(),
-            n = parseFloat(el.querySelector('[data-amt]').value) || 0;
+            n = amountOf(el.querySelector('[data-amt]').value);
           if (!isKaspaAddress(to)) {
             setText(el, '[data-e]', 'That is not a Kaspa address.');
             return;
           }
+          if (isNaN(n)) return setText(el, '[data-e]', AMOUNT_BAD);
           if (have != null && n > 0 && n >= Math.floor(have * 100) / 100) n = 0; /* Max or more = everything, the fee comes off the top */
           if (have != null && n > have) {
             setText(el, '[data-e]', 'The purse holds ' + fmt(have) + ' KAS.');
             return;
           }
-          armSlide(
+          armToSlide(
+            to,
             this,
             'Pay ' + (n > 0 ? fmt(n) + ' KAS' : 'everything in the purse'),
-            'To ' + shortAddr(to) + '. At once, no notice period.',
+            'To ' + addrGroups(to) + '. At once, no notice period.',
             false,
             'Slide to pay',
             'send',
@@ -6614,26 +8811,104 @@
         };
       },
     },
-    /* Fresh keys on this phone (engine keys.reset): only once the purse and the account are empty; the old folder is kept aside. */
-    resetkeys: {
-      tab: 'settings',
+    /* What a claim paid to this phone's heir address: outside every account and its rules; a plain
+       payment out, signed
+       with this phone's heir key after the slide and one fingerprint */
+    heirpurse: {
+      tab: 'people',
       money: true,
       html: function () {
         return (
           topbar() +
-          '<h1 class="head">Start fresh keys</h1><p class="line">New keys mean a new purse, a new account and a new vault. The old ones are set aside, not deleted. This works only once the purse and the account are empty: pay the purse out first.</p>' +
-          '<div class="dial"><div class="h"><span>The vault’s sheets are lost: leave the vault behind</span></div><span class="seg" data-leave><button data-v="0" class="on">No</button><button data-v="1">Yes</button></span></div>' +
-          '<div class="sub">Yes means the money in the old vault stays where it is, for good. Only choose it when no two sheets exist anywhere.</div>' +
-          '<div class="err" data-e></div><div class="push"></div><button class="pill" data-ok>Start fresh</button>'
+          '<h1 class="head">Received as heir</h1><p class="sub">Funds you claimed as an heir. They are outside any account and its rules, and go where you ' +
+          'say at once.</p>' +
+          '<div class="sub" data-purse>Reading\u2026</div>' +
+          '<label class="field"><span>To</span><input data-to autocapitalize="none" spellcheck="false" placeholder="kaspa:\u2026"></label>' +
+          '<label class="field"><span>Amount, KAS<button class="maxb" data-max type="button">Max</button></span><input data-amt inputmode="decimal" ' +
+          'placeholder="All of it"></label>' +
+          '<div class="err" data-e></div><div class="push"></div><button class="pill" data-ok>Send</button>'
         );
       },
       after: function (el) {
+        var ok = el.querySelector('[data-ok]'),
+          have = null,
+          amt = el.querySelector('[data-amt]');
+        el.querySelector('[data-max]').onclick = function () {
+          if (have != null) amt.value = String(Math.floor(have * 100) / 100);
+        };
+        D.heirPurse().then(function (r) {
+          if (!r.ok) return setText(el, '[data-purse]', r.error);
+          have = r.kas;
+          setText(el, '[data-purse]', 'You hold ' + fmt(r.kas) + ' KAS received as heir.');
+        });
+        ok.onclick = function () {
+          var to = el.querySelector('[data-to]').value.trim().toLowerCase(),
+            n = amountOf(amt.value);
+          if (!isKaspaAddress(to)) return setText(el, '[data-e]', 'That is not a Kaspa address.');
+          if (isNaN(n)) return setText(el, '[data-e]', AMOUNT_BAD);
+          /* Max or more = everything, the fee comes off the top */
+          if (have != null && n > 0 && n >= Math.floor(have * 100) / 100) n = 0;
+          if (have != null && n > have) return setText(el, '[data-e]', 'You hold ' + fmt(have) +
+            ' KAS.');
+          var title = 'Send ' + (n > 0 ? fmt(n) + ' KAS' : 'all of it'),
+            line = 'To ' + addrGroups(to) + '. At once; this cannot be undone.';
+          armToSlide(to, this, title, line, false, 'Slide to send', 'send', function () {
+            ok.disabled = true;
+            D.heirPay(to, n).then(function (r) {
+              ok.disabled = false;
+              if (!r.ok) {
+                resetSlide(el);
+                return setText(el, '[data-e]', r.error ||
+                  'The payment failed. No funds were sent.');
+              }
+              haptic();
+              D.addHistory('Sent ' + (n > 0 ? fmt(n) + ' KAS' : 'all funds') + ' received as heir.',
+                'people');
+              go('people', {}, { root: true });
+            });
+          });
+        };
+      },
+    },
+    /* Fresh keys on this phone (engine keys.reset): only once the purse and the account are empty; the old folder is kept aside. */
+    resetkeys: {
+      tab: 'settings',
+      money: true,
+      html: function (p) {
+        if (!p.sure)
+          return (
+            topbar() +
+            '<div class="label">Warning</div><h1 class="head">Lost your vault seeds?</h1>' +
+            '<p class="line">If no two of your vault seeds exist anywhere, the money in your vault can never be opened ' +
+            'again. Replacing your keys does not bring it back: it starts over with a new purse, ' +
+            'a new account and a new vault.</p>' +
+            '<p class="line">If you still have two seeds, you do not need this. Close it.</p>' +
+            '<div class="push"></div><button class="pill" data-back>Close</button>' +
+            '<button class="ghost small" data-go="resetkeys" data-params="' + esc(JSON.stringify({ sure: true })) +
+            '">I understand, continue</button>'
+          );
+        return (
+          topbar() +
+          '<div class="label">Second warning: this cannot be undone</div>' +
+          '<h1 class="head">Replace your keys</h1><p class="line">New keys mean a new purse, a new account and a new vault. The old ones are set aside, not ' +
+          'deleted. This works only once the purse and the account are empty: pay the purse out first.</p>' +
+          '<div class="dial"><div class="h"><span>The vault’s seeds are lost: leave the vault behind</span></div><span class="seg" data-leave><button ' +
+          'data-v="0" class="on">No</button><button data-v="1">Yes</button></span></div>' +
+          '<div class="sub">Yes means the money in the old vault stays where it is, for good. Only choose it when no two seeds exist anywhere.</div>' +
+          '<label class="field"><span>Type REPLACE to go on</span><input data-typed maxlength="12" autocomplete="off"></label>' +
+          '<div class="err" data-e></div><div class="push"></div><button class="pill" data-ok>Start fresh</button>'
+        );
+      },
+      after: function (el, p) {
         var ok = el.querySelector('[data-ok]');
+        if (!p.sure || !ok) return;
         wireSeg(el, '[data-leave]');
         ok.onclick = function () {
           var leave = el.querySelector('[data-leave] .on').dataset.v === '1';
+          if (String(el.querySelector('[data-typed]').value).trim().toUpperCase() !== 'REPLACE')
+            return setText(el, '[data-e]', 'Type REPLACE first.');
           confirmAction(
-            'Start fresh keys',
+            'Replace your keys',
             leave ? 'The old vault and its money are left behind, for good.' : 'The old keys are set aside.',
             true
           ).then(function (yes) {
@@ -6648,11 +8923,13 @@
       },
     },
     seconddevice: {
+      sample: true /* needs demo.js: go() sends Live Home */,
       tab: 'settings',
       html: function () {
         return (
           topbar(tag()) +
-          '<h1 class="head">Second device</h1><p class="line">A second phone or tablet can keep your vault seed, so this one never has to, and can hear about every withdrawal. Linking one is not part of this app.</p><div class="list">' +
+          '<h1 class="head">Second device</h1><p class="line">A second phone or tablet can watch too. It watches your addresses and alerts you to every ' +
+          'withdrawal. It holds no keys and cannot move money. Linking one is not part of this app.</p><div class="list">' +
           toggleRow(
             'alert_second',
             'Send alerts to it too',
@@ -6668,7 +8945,11 @@
       html: function () {
         return (
           topbar() +
-          '<h1 class="head">KaspaVault</h1><p class="line">Version 1.0</p><p class="sub">An early build. In Sample mode nothing is real and nothing leaves this phone.</p><div class="push"></div>' +
+          '<h1 class="head">KVault</h1><p class="line">Version 1.0</p><p class="sub">Early release. In Sample mode, balances are simulated and nothing ' +
+          'leaves this phone.</p>' +
+          '<div class="list mt8">' +
+          row('privacy', 'Privacy', 'What leaves this phone, and who sees it') +
+          '</div><div class="push"></div>' +
           (D.isLive() ? '' : '<button class="ghost" data-reset>Start over</button>')
         );
       },
@@ -6683,8 +8964,34 @@
           };
       },
     },
+    /* Settings > About > Privacy: the essentials of the privacy policy (docs/store/PRIVACY.md) */
+    privacy: {
+      tab: 'settings',
+      html: function () {
+        return (
+          topbar() +
+          '<div class="label">Privacy</div><h1 class="head">We never receive your information.</h1>' +
+          PRIVACY.map(function (t) {
+            return '<p class="line">' + esc(t) + '</p>';
+          }).join('') +
+          (bridge && bridge.openUrl
+            ? '<div class="push"></div>' +
+              '<button class="ghost" data-web>Read the policy on the web</button>'
+            : '')
+        );
+      },
+      after: function (el) {
+        var b = el.querySelector('[data-web]');
+        if (!b) return;
+        b.onclick = function () {
+          /* the phone opens only this address, in the phone's browser, never inside the app */
+          if (!bridge.openUrl(PRIVACY_URL)) refuse('The policy page could not be opened.');
+        };
+      },
+    },
   };
 
+  var PRIVACY_URL = 'https://sites.google.com/view/kaspavault-privacy';
   /* ---- start ---- */
   D.subscribe(function () {
     refresh();
@@ -6692,7 +8999,6 @@
   });
   KVScene.init(document.getElementById('scene'));
   D.boot();
-  if (D.isLive()) ui.people = []; /* a live account starts with nobody in it */
   go(D.getSetting('welcomed') === '1' || D.isLive() ? 'lock' : D.demo ? 'home' : 'welcome', {}, { root: true });
   if (document.fonts && document.fonts.ready)
     document.fonts.ready.then(function () {

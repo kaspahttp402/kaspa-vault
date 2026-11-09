@@ -2,8 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<!-- Desktop demo: index.html plus demo.js (the Sample account), loaded before data.js. The phone never opens this page. Only the bundled files may run or style the page; the laptop is reached through the phone bridge, not from here. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://api.coingecko.com; base-uri 'none'; form-action 'none'">
+<!-- Desktop demo: index.html plus demo.js (the Sample account), loaded before data.js. The phone never opens this page
+     (build.sh leaves demo.html and demo.js out of the app). Same policy as index.html: nothing loads from the network,
+     so Sample's prices are demo.js's seeded walk. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <meta name="theme-color" content="#06070c">
 <title>KaspaVault Sample</title>
@@ -18,7 +21,7 @@
   <button data-tab="receive">Receive</button>
   <button data-tab="price">Price</button>
   <button data-tab="people">People</button>
-  <button data-tab="settings">Settings</button>
+  <button data-tab="safe" class="vtab">Vault</button>
 </nav>
 <div id="sheet" aria-hidden="true"></div>
 <script src="scene.js"></script>

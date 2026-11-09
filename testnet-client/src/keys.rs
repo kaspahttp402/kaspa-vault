@@ -10,7 +10,7 @@ use crate::contract::{Dials, INHERIT_DELAY_NONE, sha256_hex, spk_hash};
 use crate::network::Network;
 use kaspa_addresses::{Address, Prefix, Version};
 use kaspa_txscript::script_builder::ScriptBuilder;
-use kaspa_txscript::{extract_script_pub_key_address, multisig_redeem_script, pay_to_script_hash_script};
+use kaspa_txscript::{extract_script_pub_key_address, multisig_redeem_script, pay_to_address_script, pay_to_script_hash_script};
 use secp256k1::rand::RngCore;
 use secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
@@ -28,6 +28,15 @@ fn legacy_version() -> u32 {
 fn is_legacy_version(v: &u32) -> bool {
     *v < PUBLIC_VERSION
 }
+const OUTSIDE_AND_SHEETS: &str = concat!(
+    "The rule block in keys.json names an outside safe address and cold sheets at once. ",
+    "Restore the original keys.json.",
+);
+const OUTSIDE_IS_SPEND: &str = concat!(
+    "That is the challenge account's own spend key address, which everyone has. ",
+    "Give your own wallet's address.",
+);
+const NO_BLOCK: &str = "keys.json has no rule block; run `keys` first.";
 fn is_off(b: &bool) -> bool {
     !*b
 }
@@ -46,6 +55,11 @@ pub struct Public {
     /// The three x-only cold keys in redeem-script order; empty on a legacy single-key safe.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cold_x: Vec<String>,
+    /// Public challenge: the safe is an outside address the owner chose (`set-cold-to`, his own
+    /// wallet), not cold sheets made here; `cold_x` is then empty and no cold secret is kept.
+    /// Written only when on, so every older block keeps its code.
+    #[serde(default, skip_serializing_if = "is_off")]
+    pub cold_external: bool,
     /// Second and third stop keys; an empty slot repeats `cancel_x` (vaults 1-6 have none).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cancel2_x: String,
@@ -127,7 +141,10 @@ impl Public {
                 missing.push(name.to_string());
             }
         }
-        if self.cold_x.len() != 3 {
+        if self.cold_external && !self.cold_x.is_empty() {
+            return Err(OUTSIDE_AND_SHEETS.into());
+        }
+        if !self.cold_external && self.cold_x.len() != 3 {
             missing.push(format!("cold_x (three sheets, found {})", self.cold_x.len()));
         }
         if !missing.is_empty() {
@@ -145,11 +162,53 @@ impl Public {
         vec![
             format!("rule block form {}", self.v),
             format!("stop keys: {} distinct{}", stops.len(), if stops.len() < 3 { " (an empty slot repeats stop key 1)" } else { "" }),
-            format!("safe: {}", if self.cold_x.len() == 3 { "2-of-3 cold sheets" } else { "one cold key (legacy)" }),
+            match (self.cold_external, self.cold_x.len()) {
+                (true, _) => {
+                    let to = &self.cold_address;
+                    format!("safe: an outside address you chose, {to} (no cold sheets)")
+                }
+                (false, 3) => "safe: 2-of-3 cold sheets".to_string(),
+                _ => "safe: one cold key (legacy)".to_string(),
+            },
             if self.heir_x.is_empty() { "heir: none (the silence clock never fires)".to_string() } else { format!("heir: yes, {} (after the silence set by the vault's heir delay dial)", self.heir_address) },
             format!("auto-heir: {}", if self.auto_heir { "on (after the silence anyone may send the vault to the heir)" } else { "off (only the heir's own key inherits)" }),
             format!("hard limit: {}", if self.hard_limit { "on (no payment above the limit can wait; above the limit only the stop keys or the heir move money)" } else { "off (a payment above the limit may wait out the notice period)" }),
         ]
+    }
+    /// A block from another device (watch.import, guard.import), before anything is written: complete
+    /// (`check_complete`), every key a valid x-only point, both addresses readable on `network`.
+    pub fn check_foreign(&self, network: &Network) -> Result<(), String> {
+        self.check_complete()?;
+        let keys = [&self.spend_x, &self.cancel_x, &self.cancel2_x, &self.cancel3_x];
+        for x in keys.into_iter().chain(&self.cold_x) {
+            x_only_hex(x, "rule block")?;
+        }
+        if !self.heir_x.is_empty() {
+            x_only_hex(&self.heir_x, "heir")?;
+            network.address(&self.heir_address)?;
+        }
+        network.address(&self.cold_address).map(|_| ())
+    }
+    /// True when the safe address pays the spend key: its Schnorr pay-to-pubkey script, or the
+    /// ECDSA pay-to-pubkey script of either compressed form of the same x-only key. Compared as
+    /// scripts (what the covenant pins), never as address text, so another spelling of the same
+    /// script is caught too.
+    pub fn cold_is_spend(&self) -> bool {
+        let net = self.network();
+        let Ok(x) = x_only_hex(&self.spend_x, "spend") else { return false };
+        let Ok(spk) = net.try_to_spk(&self.cold_address) else { return false };
+        let mut forms = vec![Address::new(net.prefix, Version::PubKey, &x)];
+        for parity in [2u8, 3] {
+            let mut c = vec![parity];
+            c.extend_from_slice(&x);
+            forms.push(Address::new(net.prefix, Version::PubKeyECDSA, &c));
+        }
+        forms.iter().any(|a| pay_to_address_script(a) == spk)
+    }
+    /// True when the safe address is written exactly as this network renders it (lower case,
+    /// trimmed): one spelling per script, so text checks elsewhere cannot be dodged.
+    pub fn cold_is_canonical(&self) -> bool {
+        self.network().address(&self.cold_address).is_ok_and(|a| a.to_string() == self.cold_address)
     }
     pub fn cold_redeem(&self) -> Option<Vec<u8>> {
         (self.cold_x.len() == 3).then(|| cold_redeem_script(&self.cold_x.iter().map(|x| unhex(x)).collect::<Vec<_>>()))
@@ -236,8 +295,6 @@ struct PublicOnly {
     funding_x: Option<String>,
 }
 
-/// Secret names of the three stop slots, in contract order.
-const STOP_NAMES: [&str; 3] = ["cancel", "cancel2", "cancel3"];
 
 /// What `keys --offline` hands the online device: the public side of the stop keys and the safe, no secret.
 #[derive(Serialize, Deserialize, Debug)]
@@ -410,7 +467,7 @@ fn x_only_hex(x: &str, what: &str) -> Result<Vec<u8>, String> {
 
 /// `--which 1|2|3` on the command line to the contract's 0-based stop slot.
 pub fn stop_slot(which: u8) -> Result<usize, String> {
-    (1..=3).contains(&which).then(|| which as usize - 1).ok_or_else(|| format!("--which must be 1, 2 or 3 (got {which})"))
+    (1..=3).contains(&which).then(|| which as usize - 1).ok_or_else(|| format!("Emergency stop button must be 1, 2 or 3 (got {which})."))
 }
 
 impl Keys {
@@ -452,6 +509,7 @@ impl Keys {
             cancel_x: export.cancel_x.clone(),
             cold_address: export.cold_address.clone(),
             cold_x: export.cold_x.clone(),
+            cold_external: false,
             cancel2_x: export.cancel2_x.clone(),
             cancel3_x: export.cancel3_x.clone(),
             heir_x,
@@ -468,17 +526,17 @@ impl Keys {
     /// its network, three valid cold sheets making its cold address, valid stop keys 2 and 3.
     fn check_export(net: &Network, export: &OfflineExport) -> Result<(), String> {
         if export.kind != OFFLINE_EXPORT_KIND {
-            return Err(format!("this file is not what `keys --offline` writes (kind `{}`); copy offline-public.json from the offline device", export.kind));
+            return Err(format!("This is not the key file an offline device writes (kind `{}`). Copy the file from the offline device again.", export.kind));
         }
         net.check_recorded(&export.network, "offline-public.json")?;
         if export.cold_x.len() != 3 {
-            return Err(format!("the offline export has {} cold sheets, not three; run `keys --offline` again on the offline device", export.cold_x.len()));
+            return Err(format!("The offline device's file has {} safe sheets, not three. Make it again on the offline device.", export.cold_x.len()));
         }
         for (name, x) in [("cancel2_x", &export.cancel2_x), ("cancel3_x", &export.cancel3_x), ("cold_x", &export.cold_x[0]), ("cold_x", &export.cold_x[1]), ("cold_x", &export.cold_x[2])] {
             x_only_hex(x, name)?;
         }
         if p2sh_address(net.prefix, &cold_redeem_script(&export.cold_x.iter().map(|x| unhex(x)).collect::<Vec<_>>())).to_string() != export.cold_address {
-            return Err("the offline export's cold address does not match its three cold sheets; run `keys --offline` again on the offline device".into());
+            return Err("The offline device's file does not match its own safe address. Make it again on the offline device.".into());
         }
         Ok(())
     }
@@ -498,7 +556,7 @@ impl Keys {
     pub fn fresh_phone(net: &Network, export: &OfflineExport, heir_x: &str, auto_heir: bool, hard_limit: bool) -> Result<(Keys, [u8; 96]), String> {
         Self::check_export(net, export)?;
         if !export.cancel_x.is_empty() {
-            return Err("The drawer device's file already holds a stop key 1. On the drawer device run `keys --offline --for-phone`, which leaves stop key 1 to be made on this phone.".into());
+            return Err("The offline device's file already holds stop key 1. Make it again on the offline device in phone mode, which leaves stop key 1 to be made on this phone.".into());
         }
         let (heir_x, heir_address) = Self::heir_of(net, heir_x)?;
         let secp = Secp256k1::new();
@@ -549,6 +607,7 @@ impl Keys {
             cancel_x: faster_hex::hex_string(&xonly(&keys.cancel_key())),
             cold_address: export.cold_address.clone(),
             cold_x: export.cold_x.clone(),
+            cold_external: false,
             cancel2_x: export.cancel2_x.clone(),
             cancel3_x: export.cancel3_x.clone(),
             heir_x,
@@ -694,6 +753,14 @@ impl Keys {
             && same(&self.cancel3, p.stop_x(2))
             && same(&self.heir, &p.heir_x)
             && self.heir.as_ref().is_none_or(|s| p2pk_address(prefix, &keypair(s)).to_string() == p.heir_address);
+        if p.cold_external {
+            // An outside safe (`set-cold-to`): no sheet in the block or on this device, an
+            // address of the block's own network, and never the spend key's (public) address.
+            // The sheet checks below then have nothing to look at.
+            let readable = p.cold_is_canonical();
+            ok &= p.cold_x.is_empty() && self.cold_keys().is_empty() && readable;
+            ok &= !p.cold_is_spend();
+        }
         for (i, k) in self.cold_keys() {
             ok &= match p.cold_x.get(i - 1) {
                 Some(x) => *x == hex_of(&k),
@@ -754,7 +821,7 @@ impl Keys {
     }
     /// Stop key `which` (0-based), or a clear refusal naming the missing secret.
     pub fn try_stop_key(&self, which: usize) -> Result<Keypair, String> {
-        self.stop_secret(which).as_ref().map(keypair).ok_or_else(|| format!("stop key {} (secret `{}`) is not on this device", which + 1, STOP_NAMES[which.min(2)]))
+        self.stop_secret(which).as_ref().map(keypair).ok_or_else(|| format!("Emergency stop button {} is not on this device.", which + 1))
     }
     fn spend_key(&self) -> Keypair {
         Self::key(&self.spend, "spend")
@@ -774,7 +841,34 @@ impl Keys {
     }
     /// True when this is the old one-key safe (no cold2/cold3 anywhere, stored or secret).
     pub fn legacy_safe(&self) -> bool {
-        self.public().cold_x.is_empty()
+        let p = self.public();
+        p.cold_x.is_empty() && !p.cold_external
+    }
+    /// `set-cold-to` (public challenge), before `fund`: the safe becomes `address`, an outside
+    /// address the owner chose. The cold sheets made here are dropped (they guard nothing once
+    /// the safe is elsewhere) and the block's code is written again. Refuses an address of
+    /// another network or with a typo (checksum), and the spend key's own address. Answers the
+    /// address as stored.
+    pub fn set_cold_external(&mut self, address: &str) -> Result<String, String> {
+        let mut p = self.public.clone().ok_or(NO_BLOCK)?;
+        let addr = p.network().address(address)?.to_string();
+        p.cold_address = addr.clone();
+        p.cold_x.clear();
+        p.cold_external = true;
+        if p.cold_is_spend() {
+            return Err(OUTSIDE_IS_SPEND.into());
+        }
+        if !p.cold_is_canonical() {
+            return Err(format!("`{address}` is not written the usual way (lower case). Copy it again from your wallet."));
+        }
+        let code = Some(p.sha256());
+        let (cold, cold2, cold3) = (None, None, None);
+        let public = Some(p);
+        let mut next = Keys { cold, cold2, cold3, public_sha256: code, public, ..self.clone() };
+        next.check_self()?;
+        std::mem::swap(self, &mut next);
+        next.wipe();
+        Ok(addr)
     }
     /// The public part: stored, or derived from the secrets when all of them are present.
     pub fn public(&self) -> Public {
@@ -802,6 +896,7 @@ impl Keys {
             cancel_x: faster_hex::hex_string(&xonly(&self.cancel_key())),
             cold_address,
             cold_x,
+            cold_external: false,
             cancel2_x: hex_of(&self.cancel2),
             cancel3_x: hex_of(&self.cancel3),
             heir_x: hex_of(&self.heir),
@@ -835,6 +930,18 @@ pub fn unhex(s: &str) -> Vec<u8> {
 }
 pub fn keypair(secret: &[u8; 32]) -> Keypair {
     Keypair::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(secret).unwrap())
+}
+/// The x-only key (hex) `secret` makes, or None when it is no secp256k1 secret (zero, or at or
+/// past the curve order): such a secret is simply "not this key", never a panic.
+pub fn try_xonly_hex(secret: &[u8; 32]) -> Option<String> {
+    let sk = SecretKey::from_slice(secret).ok()?;
+    Some(faster_hex::hex_string(&xonly(&Keypair::from_secret_key(&Secp256k1::new(), &sk))))
+}
+/// A stop-slot key nobody holds: a fresh key pair whose secret is dropped at once. It fills a stop slot that has
+/// no guardian (phone setup, a removed guardian), so the rule block keeps five different keys (`check_complete`).
+pub fn unheld_x() -> String {
+    let k = Secp256k1::new().generate_keypair(&mut secp256k1::rand::thread_rng()).1;
+    faster_hex::hex_string(&k.x_only_public_key().0.serialize())
 }
 pub fn xonly(k: &Keypair) -> Vec<u8> {
     k.x_only_public_key().0.serialize().to_vec()
@@ -883,13 +990,13 @@ pub fn sheet_words(secret: &[u8; 32]) -> [String; 24] {
 /// out (a word mistyped from the paper).
 pub fn sheet_from_words<S: AsRef<str>>(words: &[S]) -> Result<[u8; 32], String> {
     if words.len() != 24 {
-        return Err(format!("A sheet has 24 words; {} were given.", words.len()));
+        return Err(format!("A vault seed has 24 words; {} were given.", words.len()));
     }
     let list = bip39_words();
     let mut bits = [0u8; 33];
     for (i, w) in words.iter().enumerate() {
         let w = w.as_ref().trim().to_ascii_lowercase();
-        let idx = list.iter().position(|x| *x == w).ok_or_else(|| format!("Word {} is not a sheet word. Check its spelling on the paper.", i + 1))?;
+        let idx = list.iter().position(|x| *x == w).ok_or_else(|| format!("Word {} is not a seed word. Check its spelling on the paper.", i + 1))?;
         for b in 0..11 {
             if (idx >> (10 - b)) & 1 == 1 {
                 let at = i * 11 + b;
@@ -964,6 +1071,76 @@ mod tests {
     }
 
     #[test]
+    fn outside_safe_refuses_typos_other_networks_and_the_spend_address_and_old_blocks_keep_their_code() {
+        let mut k = Keys::fresh(&Network::testnet());
+        let before = k.public().sha256();
+        let good = p2pk_address(Prefix::Testnet, &fresh()).to_string();
+        let on_main = p2pk_address(Prefix::Mainnet, &fresh()).to_string();
+        let mut typo: Vec<char> = good.chars().collect();
+        let i = typo.len() - 9;
+        typo[i] = if typo[i] == 'q' { 'p' } else { 'q' };
+        let typo: String = typo.into_iter().collect();
+        assert!(k.set_cold_external(&on_main).unwrap_err().contains("only sends to addresses that start with kaspatest:"));
+        assert!(k.set_cold_external(&typo).unwrap_err().contains("is not a Kaspa address"), "checksum");
+        assert!(k.set_cold_external("kaspa:qq").is_err());
+        let spend_addr = p2pk_address_x(Prefix::Testnet, &k.public().spend_x).unwrap().to_string();
+        assert!(k.set_cold_external(&spend_addr).unwrap_err().contains("spend key"));
+        assert_eq!((k.public().sha256(), k.cold_keys().len()), (before.clone(), 3), "a refusal changes nothing");
+        // a mainnet folder refuses a testnet address the same way
+        assert!(Keys::fresh(&Network::mainnet()).set_cold_external(&good).unwrap_err().contains("start with kaspa:"));
+        // accepted: the block names it, the sheets are gone, the code is written again and holds
+        assert_eq!(k.set_cold_external(&format!(" {good} ")).unwrap(), good);
+        let p = k.public();
+        assert!(p.cold_external && p.cold_x.is_empty() && k.cold_keys().is_empty() && !k.legacy_safe());
+        assert_eq!((p.cold_address.as_str(), k.public_sha256.clone()), (good.as_str(), Some(p.sha256())));
+        assert_ne!(p.sha256(), before);
+        assert_eq!(k.check_self(), Ok(()));
+        assert!(p.check_complete().unwrap().iter().any(|r| r.contains("outside address") && r.contains(&good)));
+        let back: Keys = serde_json::from_str(&serde_json::to_string(&k).unwrap()).unwrap();
+        assert_eq!((back.public().cold_external, back.check_self()), (true, Ok(())));
+        // nothing looser: a sheet back on the device, sheets in the block, the spend address, another network
+        assert!(Keys { cold: Some([3u8; 32]), ..back.clone() }.check_self().is_err());
+        let edit = |f: &dyn Fn(&mut Public)| {
+            let mut p = back.public();
+            f(&mut p);
+            Keys { public_sha256: Some(p.sha256()), public: Some(p), ..back.clone() }
+        };
+        assert!(edit(&|p| p.cold_x = vec![p.spend_x.clone(); 3]).check_self().is_err());
+        assert!(edit(&|p| p.cold_x = vec![p.spend_x.clone(); 3]).public().check_complete().is_err());
+        assert!(edit(&|p| p.cold_address = p2pk_address_x(Prefix::Testnet, &p.spend_x).unwrap().to_string()).check_self().is_err());
+        assert!(edit(&|p| p.cold_address = on_main.clone()).check_self().is_err());
+        // the spend key in any other spelling or script form: refused by set-cold-to and check_self
+        let spend_addr = p2pk_address_x(Prefix::Testnet, &back.public().spend_x).unwrap().to_string();
+        let x = unhex(&back.public().spend_x);
+        let ecdsa = |parity: u8| Address::new(Prefix::Testnet, Version::PubKeyECDSA, &[vec![parity], x.clone()].concat()).to_string();
+        let (upper, mixed) = (spend_addr.to_uppercase(), format!("kaspatest:{}", spend_addr["kaspatest:".len()..].to_uppercase()));
+        for form in [upper.clone(), mixed.clone(), ecdsa(2), ecdsa(3)] {
+            assert!(back.clone().set_cold_external(&form).is_err(), "set-cold-to {form}");
+            assert!(edit(&|p| p.cold_address = form.clone()).check_self().is_err(), "check_self {form}");
+        }
+        let ecdsa_block = edit(&|p| p.cold_address = ecdsa(2)).public();
+        assert!(ecdsa_block.cold_is_spend(), "the ECDSA form pays the spend key");
+        // a non-canonical spelling of a good outside address: refused by check_self (and by set-cold-to if readable)
+        let good_upper = good.to_uppercase();
+        assert!(edit(&|p| p.cold_address = good_upper.clone()).check_self().is_err());
+        assert!(edit(&|p| p.cold_address = format!(" {good}")).check_self().is_err());
+        if let Ok(a) = Network::testnet().address(&good_upper) {
+            assert_eq!(a.to_string(), good, "the parser reads upper case as the same address");
+        }
+        // the flag dropped on a sheet-less block: no longer a whole rule block
+        assert!(edit(&|p| p.cold_external = false).public().check_complete().is_err());
+        // old blocks: the field is absent, loads off, and the code does not move
+        let old = Keys::fresh(&Network::testnet()).public();
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("cold_external"));
+        let reread: Public = serde_json::from_str(&json).unwrap();
+        assert_eq!((reread.cold_external, reread.sha256()), (false, old.sha256()));
+        let legacy = r#"{"public":{"spend_x":"00","cancel_x":"00","cold_address":"kaspatest:qpgjqaw6x7x826krf49calxygwjw7qx0hlwdd8g9zhqr3ja3xn9gush48satx"}}"#;
+        let legacy: Keys = serde_json::from_str(legacy).unwrap();
+        assert!(!legacy.public().cold_external && legacy.legacy_safe());
+    }
+
+    #[test]
     fn legacy_and_new_public() {
         let secp = Secp256k1::new();
         let fresh = || secp.generate_keypair(&mut secp256k1::rand::thread_rng()).0.secret_bytes();
@@ -992,7 +1169,7 @@ mod tests {
         assert!(p.cancel2_x.is_empty() && p.cancel3_x.is_empty() && p.heir_x.is_empty() && p.heir_address.is_empty());
         assert_eq!((p.stop_x(0), p.stop_x(1), p.stop_x(2)), ("bb", "bb", "bb"));
         assert_eq!(p.heir_slot(vec![9], &Dials::testnet()), (unhex("bb"), vec![9], INHERIT_DELAY_NONE));
-        assert!(k.try_stop_key(1).unwrap_err().contains("cancel2"));
+        assert!(k.try_stop_key(1).unwrap_err().contains("button 2"));
         // written back, the empty slots stay out of the file
         let json = serde_json::to_string(&k).unwrap();
         assert!(!json.contains("cancel2") && !json.contains("\"heir"), "{json}");
@@ -1278,7 +1455,7 @@ mod tests {
         assert!(Keys::fresh_online(&Network::testnet(), &export, Some("zz"), false, false).unwrap_err().contains("heir"));
         let mut wrong = off.offline_export(&Network::testnet()).unwrap();
         wrong.cold_address = "kaspatest:q".into();
-        assert!(Keys::fresh_online(&Network::testnet(), &wrong, None, false, false).unwrap_err().contains("cold address"));
+        assert!(Keys::fresh_online(&Network::testnet(), &wrong, None, false, false).unwrap_err().contains("safe address"));
         assert!(Keys { cancel: off.cancel, ..Default::default() }.offline_export(&Network::testnet()).unwrap_err().contains("cold"));
     }
 
@@ -1324,7 +1501,7 @@ mod tests {
         p.check_complete().unwrap();
         // The drawer adopts the block: its absent stop secret 1 passes against the phone-born cancel_x, slots 2 and 3 still sign.
         drawer.adopt_public(&PublicExport { kind: PUBLIC_EXPORT_KIND.into(), public: p.clone(), public_sha256: p.sha256() }).unwrap();
-        assert!(drawer.try_stop_key(0).unwrap_err().contains("stop key 1"));
+        assert!(drawer.try_stop_key(0).unwrap_err().contains("button 1"));
         assert!(drawer.try_stop_key(1).is_ok());
         // The phone's file round-trips with its code and the funding half.
         let dir = std::env::temp_dir().join(format!("kv-keys-phone-{}", std::process::id()));
@@ -1337,7 +1514,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         // A drawer export that already holds stop key 1 is refused, as is a missing heir.
         let full = Keys::fresh_offline().offline_export(&net).unwrap();
-        assert!(Keys::fresh_phone(&net, &full, &heir_x, false, false).unwrap_err().contains("--for-phone"));
+        assert!(Keys::fresh_phone(&net, &full, &heir_x, false, false).unwrap_err().contains("phone mode"));
         assert!(Keys::fresh_phone(&net, &export, "", false, false).unwrap_err().contains("heir"));
     }
 

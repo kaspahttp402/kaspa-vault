@@ -1,7 +1,6 @@
 package com.kaspavault.wallet;
 
 import android.content.Intent;
-import android.net.Uri;
 import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
@@ -72,6 +71,9 @@ final class InsetsGuard {
     private String insetsJs = "";
     InsetsGuard(MainActivity a) { act = a; }
 
+    /** Pref (Java only, not in SETTINGS): the user wants the guard on; GuardRestart and the app's start bring it back. */
+    static final String GUARD_WANTED = "guard_wanted";
+
     void pushInsets() { if (!insetsJs.isEmpty()) act.web.evaluateJavascript(insetsJs, null); }
 
     android.widget.FrameLayout frame() {
@@ -97,27 +99,41 @@ final class InsetsGuard {
     }
 
     void guardOn(boolean on) {
-            act.main.post(() -> {
-                Intent svc = new Intent(act, GuardService.class);
-                if (!on) { act.stopService(svc); return; }
-                if (act.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
-                        && !"1".equals(act.prefs.getString("guard_notif_asked", ""))) {
-                    act.prefs.edit().putString("guard_notif_asked", "1").apply();
-                    act.requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 8);
-                }
-                if (!"1".equals(act.prefs.getString("guard_battery_asked", ""))) {
-                    act.prefs.edit().putString("guard_battery_asked", "1").apply();
-                    android.os.PowerManager pm = act.getSystemService(android.os.PowerManager.class);
-                    if (pm != null && !pm.isIgnoringBatteryOptimizations(act.getPackageName())) {
-                        try {
-                            act.startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + act.getPackageName())));
-                        } catch (Exception e) { android.util.Log.w("KaspaVault", "battery exemption ask refused: " + e); }
-                    }
-                }
-                try { act.startForegroundService(svc); }
-                catch (Exception e) { android.util.Log.w("KaspaVault", "guard start refused: " + e); }
-            });
+        // commit, not apply: a process killed right after the tap must not lose the user's choice
+        act.prefs.edit().putString(GUARD_WANTED, on ? "1" : "").commit();
+        act.main.post(() -> {
+            Intent svc = new Intent(act, GuardService.class);
+            if (!on) { act.stopService(svc); return; }
+            askNotifications();
+            askBatteryExemption();
+            try { act.startForegroundService(svc); }
+            catch (Exception e) { android.util.Log.w("KaspaVault", "guard start refused: " + e); }
+        });
+    }
+
+    /** API 33+ permission for the guard's alerts, asked once (answered to KV_notifications). */
+    private void askNotifications() {
+        if (act.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) return;
+        if ("1".equals(act.prefs.getString("guard_notif_asked", ""))) return;
+        act.prefs.edit().putString("guard_notif_asked", "1").apply();
+        act.requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 8);
+    }
+
+    /** Opens the phone's battery-saving list once (no exemption asked: the guard alarm arrives in
+     *  deep Doze without it, and the direct ask is a Play-policy risk). */
+    private void askBatteryExemption() {
+        if ("1".equals(act.prefs.getString("guard_battery_asked", ""))) return;
+        act.prefs.edit().putString("guard_battery_asked", "1").apply();
+        android.os.PowerManager pm = act.getSystemService(android.os.PowerManager.class);
+        if (pm == null || pm.isIgnoringBatteryOptimizations(act.getPackageName())) return;
+        try {
+            act.startActivity(new Intent(
+                    android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+        } catch (Exception e) {
+            android.util.Log.w("KaspaVault", "battery settings refused: " + e);
         }
+    }
 
     boolean guardRunning() { return GuardService.RUNNING; }
 }

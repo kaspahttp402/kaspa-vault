@@ -571,6 +571,35 @@ fn request_attacks() {
     ok("Q9 request to a 36-byte destination with version 0x0001 accepted (finding 6, no version guard)", t);
 }
 
+// Run 4 row H (Engine 17): testnet dials (maxFee 0.05, minRemainder 1), a 2.5 KAS account coin, a ~0.003 fee.
+// Requests of 2.49 / 2.48 / 2.45 break `newAmount + maxFee <= outputs[0].value` (the rest after the amount is
+// under maxFee), to the account's own vault address and to an ordinary one alike; 1.0 of 2.5 is fine. The two
+// boundaries of `leftover <= maxFee || leftover - maxFee >= minRemainder` pin the rule the engine now mirrors.
+fn testnet_req(amount: u64, to: &ScriptPublicKey) -> Try {
+    let tn = St { max_fee: (5 * KAS / 100) as i64, ..locked() };
+    let next = St { stage: 1, dest: spk_hash(to), amount: amount as i64, ..tn.clone() };
+    let mut t = base(tn, "request", Some(spend_key()), vec![cont(250 * KAS / 100 - 300_000, &next)]);
+    t.value = 250 * KAS / 100;
+    t.extra = vec![V::Bytes(spk_bytes(to)), V::Int(amount as i64)];
+    t
+}
+
+#[test]
+fn testnet_request_leftover() {
+    let own = vault_spk(&St { max_fee: (5 * KAS / 100) as i64, ..locked() });
+    let (out, mf) = (250 * KAS / 100 - 300_000, 5 * KAS / 100);
+    for (label, to) in [("own vault", own), ("ordinary", dest())] {
+        for hundredths in [249, 248, 245] {
+            no(&format!("H {label}: request {hundredths}/100 of 2.5"), testnet_req(hundredths * KAS / 100, &to));
+        }
+        ok(&format!("H {label}: request 1.0 of 2.5"), testnet_req(KAS, &to));
+        ok(&format!("H {label}: rest exactly maxFee"), testnet_req(out - mf, &to));
+        no(&format!("H {label}: rest 1 sompi under maxFee"), testnet_req(out - mf + 1, &to));
+        ok(&format!("H {label}: rest maxFee + minRemainder"), testnet_req(out - mf - MIN_REM, &to));
+        no(&format!("H {label}: rest 1 sompi under maxFee + minRemainder"), testnet_req(out - mf - MIN_REM + 1, &to));
+    }
+}
+
 #[test]
 fn finish_attacks() {
     let mut t = finish_part();

@@ -39,7 +39,6 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.InetSocketAddress;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -54,7 +53,6 @@ import java.security.cert.X509Certificate;
 
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
@@ -80,15 +78,16 @@ final class Bridge {
     /** Status the page gets from Bridge.vault when this build has no wallet engine (no libvault_core.so): "not ready". */
     static final int ENGINE_MISSING = -4;
     /** Body sent with a 500 when the engine's envelope cannot be read. Plain words, the page shows it as is. */
-    static final String ENGINE_UNREADABLE = "{\"ok\":false,\"error\":\"The wallet engine answered something unreadable.\"}";
+    static final String ENGINE_UNREADABLE = "{\"ok\":false,\"error\":\"The app could not read its own answer.\"}";
     /** Body (200) when a money method needs a key this phone has not made yet. Bank words, the page shows it as is. */
-    static final String NO_CARD_KEY = "{\"ok\":false,\"error\":\"This phone holds no card key yet. Make your keys first.\"}";
-    static final String NO_STOP_KEY = "{\"ok\":false,\"error\":\"This phone holds no emergency stop key yet. Make your keys first.\"}";
-    static final String NO_FUNDING_KEY = "{\"ok\":false,\"error\":\"This phone holds no funding key yet. Make your keys first.\"}";
+    static final String NO_CARD_KEY = "{\"ok\":false,\"error\":\"This phone has no everyday card yet. Complete setup first.\"}";
+    static final String NO_STOP_KEY = "{\"ok\":false,\"error\":\"This phone has no emergency stop button yet. Complete setup first.\"}";
+    static final String NO_FUNDING_KEY = "{\"ok\":false,\"error\":\"This phone has no purse yet. Complete setup first.\"}";
     /** Body (200) when the engine made no keys (it refused, or answered something that is not 96 bytes). */
-    static final String KEYS_NOT_MADE = "{\"ok\":false,\"error\":\"The keys could not be made on this phone.\"}";
+    static final String KEYS_NOT_MADE = "{\"ok\":false,\"error\":\"Setup could not be completed on this phone.\"}";
+    static final String KEYS_EXIST = "{\"ok\":false,\"already_has_keys\":true,\"error\":\"This phone already has an account set up.\"}";
     /** Body (200) when the engine made keys but this phone could not seal them: the account must be stopped and the keys made again. */
-    static final String KEYS_NOT_KEPT = "{\"ok\":false,\"error\":\"The keys were made but this phone could not keep them. Stop this account and make the keys again.\"}";
+    static final String KEYS_NOT_KEPT = "{\"ok\":false,\"error\":\"Setup finished but this phone could not store it. Stop this account and set up again.\"}";
     /**
      * Money methods and the key each one carries into the engine (VaultLib.callWithSecret): send -> the card key;
      * stop, decline -> the emergency stop key followed by the funding key (64 bytes); fund, purse.pay -> the funding key;
@@ -100,21 +99,58 @@ final class Bridge {
     static final Set<String> STOP_METHODS = new HashSet<>(Arrays.asList("stop", "decline"));
     static final Set<String> FUNDING_METHODS = new HashSet<>(Arrays.asList("fund", "purse.pay"));
     static final Set<String> TOPUP_METHODS = new HashSet<>(Arrays.asList("topup"));
+    /** The fingerprint windows the Settings screen offers, in seconds ("" = the default). Nothing else is stored. */
+    static final Set<String> SIGNER_WINDOW_CHOICES = new HashSet<>(Arrays.asList("", "0", "300", "900", "3600"));
+    /** live_network names the engine's folder: only these ("" = mainnet) are ever stored. */
+    static final Set<String> NETWORK_CHOICES =
+            new HashSet<>(Arrays.asList("", "mainnet", "testnet"));
     /** Every engine method the page may call; anything else answers 404 without reaching the engine. */
     static final Set<String> ENGINE_METHODS = new HashSet<>(Arrays.asList(
-            "status", "quote", "send", "finish", "stop", "decline", "funding", "fund", "topup", "takeout", "purse.pay",
+            "status", "send", "finish", "stop", "decline", "funding", "fund", "topup", "takeout", "purse.pay",
             "keys.reset", "keys.public", "keys.sheets", "keys.burn", "rules.change", "heir.set",
-            "guard.start", "guard.stop", "guard.status", "guard.wait", "guard.poll", "guard.export", "guard.import"));
+            "guard.export", "coins.info",
+            "link.code", "link.read", "link.heir_words",
+            "watch.import", "watch.list", "watch.status", "watch.stop", "watch.decline", "watch.claim", "watch.forget",
+            "watch.code",
+            "heir.purse", "heir.pay",
+            // Paper stop (docs/PAPER_STOP.md), all keyless here. check and stop need no prompt
+            // and no sealed keys (a new phone after a loss); stop's args hold the 24 words.
+            "paper.make", "paper.confirm", "paper.sheet", "paper.check", "paper.stop",
+            // takeout: two vault seeds in the args are the authority (keyless, no prompt).
+            "paper.takeout",
+            // Public supply figures (keyless, read-only, cached by the engine).
+            "market.supply"));
+    /** The helper's moves on a watched account: the link's guardian key (safe.guardian), 32 bytes. */
+    static final Set<String> GUARDIAN_METHODS = new HashSet<>(Arrays.asList("watch.stop", "watch.decline"));
+    /** The link's heir key (safe.heir), 32 bytes: the claim, and the heir sheet again. */
+    static final Set<String> HEIR_METHODS = new HashSet<>(Arrays.asList("watch.claim", "link.heir_words", "heir.pay"));
     /** The moves that cannot be undone: a fingerprint within Signer.FRESH_PROMPT_MS, whatever the window setting says. */
-    static final Set<String> FRESH_PROMPT_METHODS = new HashSet<>(Arrays.asList("takeout", "keys.sheets", "keys.burn", "keys.reset", "heir.set"));
-    static final String NOT_A_METHOD = "{\"ok\":false,\"error\":\"That is not something this wallet does.\"}";
-    static final String FRESH_FINGER = "{\"ok\":false,\"error\":\"This one needs your fingerprint again. Try once more.\"}";
+    static final Set<String> FRESH_PROMPT_METHODS = new HashSet<>(Arrays.asList("takeout", "keys.sheets", "keys.burn", "keys.reset", "heir.set",
+            "watch.stop", "watch.decline", "watch.claim", "link.heir_words", "heir.pay",
+            "paper.make", // a new stop key: its answer holds the 24 words
+            "paper.confirm")); // the typed-back words put that key in a stop slot
+    /** rules.change fields that change who can stop or inherit the account (as heir.set does). */
+    static final Set<String> PEOPLE_FIELDS = new HashSet<>(Arrays.asList(
+            "guardian_x", "guardian_which", "heir_x", "heir_address"));
+    static final String NO_GUARDIAN_KEY = "{\"ok\":false,\"error\":\"This phone is not set up as a guardian yet. Make your link code first.\"}";
+    static final String NO_HEIR_KEY = "{\"ok\":false,\"error\":\"This phone is not set up as an heir yet. Make your link code first.\"}";
+    static final String LINK_NOT_MADE = "{\"ok\":false,\"error\":\"The link code could not be made on this phone.\"}";
+    static final String LINK_EXISTS = "{\"ok\":false,\"error\":\"This phone already made its link code.\"}";
+    static final String LINK_NOT_KEPT = "{\"ok\":false,\"error\":\"The link code was made but this phone could not store it. Try once more.\"}";
+    static final String NOT_A_METHOD = "{\"ok\":false,\"error\":\"That is not something this app does.\"}";
+    static final String FRESH_FINGER = "{\"ok\":false,\"error\":\"Fingerprint confirmation required. Please try again.\"}";
+    /** A vault-seed action (take-out from the phone's copy, Show my sheets) whose prompt was answered with the PIN: only a finger opens them (PIN gap, safe.v2). */
+    static final String FINGER_ONLY = "{\"ok\":false,\"error\":\"Use your fingerprint to open the vault seeds on this phone. Two paper vault seeds also work.\"}";
+    /** A guardian or heir step whose prompt was answered with the PIN (those are kept beside the vault seeds, fingerprint only). */
+    static final String LINK_FINGER_ONLY = "{\"ok\":false,\"error\":\"Use your fingerprint for this step. The PIN does not open it on this phone.\"}";
     /** Body (200) for keys.sheets, or a takeout without typed sheets, once keys.burn wiped the sealed safe keys (the engine's own words). */
-    static final String SHEETS_BURNED = "{\"ok\":false,\"error\":\"The sheets were burned from this phone. Only paper opens the vault now.\"}";
+    static final String SHEETS_BURNED = "{\"ok\":false,\"error\":\"The vault seeds were deleted from this phone. Only your paper copies open the vault now.\"}";
     /** Body (200) when the sealed safe keys are there but do not open (a torn store). */
-    static final String NO_SAFE_KEYS = "{\"ok\":false,\"error\":\"The safe keys kept on this phone could not be read. Type the sheets from paper.\"}";
-    static final String BURN_UNCONFIRMED = "{\"ok\":false,\"error\":\"Burning the sheets needs a confirmation.\"}";
-    static final String TWO_SHEETS = "{\"ok\":false,\"error\":\"Two sheets of 24 words are needed.\"}";
+    static final String NO_SAFE_KEYS = "{\"ok\":false,\"error\":\"The vault seeds kept on this phone could not be read. Type the seeds from paper.\"}";
+    static final String BURN_UNCONFIRMED = "{\"ok\":false,\"error\":\"Deleting the vault seeds needs a confirmation.\"}";
+    static final String BURN_NOT_DONE = "{\"ok\":false,\"burn_not_done\":true,\"error\":"
+            + "\"The vault seeds could not be deleted from this phone. Nothing changed.\"}";
+    static final String TWO_SHEETS = "{\"ok\":false,\"error\":\"Two vault seeds of 24 words are needed.\"}";
     /** The copied address is wiped from the clipboard after this many seconds. Dial. */
     static final int CLIP_SECONDS = 60;
     /** A KAS price the chart may show must be above zero and under this many dollars; anything else is dropped. Dial. */
@@ -128,37 +164,55 @@ final class Bridge {
             return MainActivity.SETTINGS.contains(key) ? act.prefs.getString(key, "") : "";
         }
 
-        /** Allow-listed keys only; a laptop address must be a home-network IPv4 address; screen flags follow. */
+        /**
+         * Allow-listed keys only; screen flags follow. Retargeting the guard (guard_nodes,
+         * live_network) and widening signer_window need a fresh prompt (changeAllowed).
+         */
         @JavascriptInterface public void setSetting(String key, String value) {
             if (!MainActivity.SETTINGS.contains(key)) return;
             String v = value == null ? "" : value;
-            if ("live_base".equals(key) && !v.isEmpty() && !MainActivity.privateHost(MainActivity.hostOf(v))) return;
+            if ("signer_window".equals(key) && !SIGNER_WINDOW_CHOICES.contains(v)) return; // only what Settings offers
+            if ("live_network".equals(key) && !NETWORK_CHOICES.contains(v)) return;
+            if (!changeAllowed(key, v)) return;
             act.prefs.edit().putString(key, v).apply();
-            if ("screenshots".equals(key) || "live_on".equals(key)) act.main.post(act::applySecure);
+            if ("screenshots".equals(key)) act.main.post(act::applySecure);
             if ("signer_window".equals(key)) act.signer.shutSigner(); // a new window starts at the next fingerprint
+        }
+
+        /**
+         * A script in the page may not point the guard at other nodes or another network, nor
+         * stretch the fingerprint window. A CHANGE to guard_nodes or live_network, or a
+         * signer_window wider than the one in force, is stored only within FRESH_PROMPT_MS of a
+         * real prompt. The same guard value is a no-op; a narrower window stays free.
+         */
+        private boolean changeAllowed(String key, String v) {
+            boolean guard = "guard_nodes".equals(key) || "live_network".equals(key);
+            if (guard && v.equals(act.prefs.getString(key, ""))) return false; // same: no-op
+            boolean wider = "signer_window".equals(key)
+                    && windowSeconds(v) > act.signer.signerWindowSeconds();
+            // Allowing screenshots needs a fresh prompt too, so a page script cannot lift capture blocking.
+            boolean shots = "screenshots".equals(key) && "on".equals(v)
+                    && !"on".equals(act.prefs.getString(key, "off"));
+            if (!guard && !wider && !shots) return true;
+            if (act.signer.promptedRecently()) return true;
+            android.util.Log.i("KaspaVault", "setSetting(" + key + ") dropped: no fresh prompt");
+            return false;
+        }
+
+        /** The seconds a signer_window choice means, read as signerWindowSeconds() reads it. */
+        private static int windowSeconds(String v) {
+            if (v.isEmpty()) return Signer.SIGNER_WINDOW_DEFAULT;
+            try {
+                return Math.max(0, Math.min(Signer.SIGNER_WINDOW_MAX, Integer.parseInt(v.trim())));
+            } catch (NumberFormatException e) {
+                return Signer.SIGNER_WINDOW_DEFAULT;
+            }
         }
 
         /** The page reports which screen it shows; the flag decision stays here. Unknown names count as sensitive. */
         @JavascriptInterface public void screen(String name) {
             act.screen = name != null && name.matches("[a-z]{1,24}") ? name : "words";
             act.main.post(act::applySecure);
-        }
-
-        /**
-         * Stores a secret encrypted (AES-GCM under the data key an in-app prompt opened within UNLOCK_SECONDS). An empty
-         * value removes it. True when stored; false when the store is shut (the page should ask for a fingerprint and try
-         * again). A failed write never drops what was stored before.
-         */
-        @JavascriptInterface public synchronized boolean setSecret(String key, String value) {
-            return act.signer.setSecret(key, value);
-        }
-
-        /**
-         * "" when there is no such secret, no in-app prompt has opened the store in this run (or it shut again after
-         * UNLOCK_SECONDS), or this secret was already read since the last prompt: one read per secret per prompt.
-         */
-        @JavascriptInterface public synchronized String getSecret(String key) {
-            return act.signer.getSecret(key);
         }
 
         /** Puts text on the clipboard (the Receive address), marked sensitive so previews hide it, and wipes it after CLIP_SECONDS if it is still ours. */
@@ -180,6 +234,72 @@ final class Bridge {
             });
         }
 
+        /** Longest text share() hands on; longer text is cut, never refused. */
+        static final int SHARE_MAX = 8000;
+
+        /** The share sheet with plain text (statement, address, watch code); the person picks. */
+        @JavascriptInterface public void share(String text) {
+            if (text == null || text.isEmpty()) return;
+            String t = text.length() > SHARE_MAX ? text.substring(0, SHARE_MAX) : text;
+            act.main.post(() -> {
+                try {
+                    android.content.Intent send = new android.content.Intent(
+                            android.content.Intent.ACTION_SEND);
+                    send.setType("text/plain");
+                    send.putExtra(android.content.Intent.EXTRA_TEXT, t);
+                    android.content.Intent pick = android.content.Intent.createChooser(send, null);
+                    pick.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                    act.startActivity(pick);
+                } catch (Exception ignored) { } // no app can take text: nothing opens
+            });
+        }
+
+        /** The only page openUrl will hand to the system browser (the privacy page). */
+        static final String PRIVACY_HOST = "sites.google.com";
+        static final String PRIVACY_PATH = "/view/kaspavault-privacy";
+
+        /**
+         * Opens the privacy page in the system browser, never in the WebView. Only
+         * https://sites.google.com/view/kaspavault-privacy... is allowed: no credentials, no port,
+         * no query or fragment, plain ASCII. Answers true once the browser took it, false otherwise
+         * (refused, or no browser on the phone).
+         */
+        @JavascriptInterface public boolean openUrl(String url) {
+            if (url == null || url.length() > 200) return false;
+            if (!url.matches("[A-Za-z0-9/:._~%-]+")) return false;
+            if (!url.startsWith("https://" + PRIVACY_HOST + PRIVACY_PATH)) return false;
+            final Uri u = Uri.parse(url);
+            if (!"https".equals(u.getScheme()) || !PRIVACY_HOST.equals(u.getHost())) return false;
+            if (u.getUserInfo() != null || u.getPort() != -1) return false;
+            if (u.getQuery() != null || u.getFragment() != null) return false;
+            String path = u.getEncodedPath();
+            if (path == null || !path.startsWith(PRIVACY_PATH)) return false;
+            if (path.contains("..") || path.contains("//")) return false;
+            final boolean[] opened = {false};
+            final java.util.concurrent.CountDownLatch done =
+                    new java.util.concurrent.CountDownLatch(1);
+            act.main.post(() -> {
+                try {
+                    Intent i = new Intent(Intent.ACTION_VIEW, u);
+                    i.addCategory(Intent.CATEGORY_BROWSABLE);
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    act.startActivity(i);
+                    opened[0] = true;
+                } catch (android.content.ActivityNotFoundException e) {
+                    opened[0] = false;
+                } finally {
+                    done.countDown();
+                }
+            });
+            try {
+                if (!done.await(3, java.util.concurrent.TimeUnit.SECONDS)) return false;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+            return opened[0];
+        }
+
         /** The camera for the code scanner on Send: asks once, answers window.KV_camera(true|false). */
         @JavascriptInterface public void askCamera() {
             act.main.post(() -> {
@@ -189,12 +309,28 @@ final class Bridge {
         }
 
         /**
-         * The guard inside the app (D5): on starts GuardService in the foreground, off stops it. The first time on it asks
-         * for notifications (API 33+ runtime permission, answered to window.KV_notifications) and for the battery exemption
-         * (so the guard keeps hearing the network through the night); both asks happen once, the phone remembers the answer.
+         * The guard inside the app (D5): on starts GuardService in the foreground. The first time
+         * on it asks for notifications (API 33+ runtime permission, answered to
+         * window.KV_notifications) and for the battery exemption (so the guard keeps hearing the
+         * network through the night); both asks happen once, the phone remembers the answer.
+         * Off is ALWAYS refused here: the guard goes off only through guardOff, behind its own
+         * prompt, so no earlier fingerprint (a payment, an unlock) lets a page script silence it.
          */
         @JavascriptInterface public void guardOn(boolean on) {
-            act.insets.guardOn(on);
+            if (!on) {
+                android.util.Log.i("KaspaVault", "guardOn(false) refused: use guardOff");
+                return;
+            }
+            act.insets.guardOn(true);
+        }
+
+        /**
+         * Turns the guard off behind its OWN prompt (GuardOff: title and subtitle fixed in Java,
+         * never from the page). Answers window[callbackName]("ok" | "cancel" | "refused");
+         * only "ok" means the guard was stopped.
+         */
+        @JavascriptInterface public void guardOff(String callbackName) {
+            new GuardOff(act).ask(callbackName);
         }
 
         /** Whether the guard service is running right now (the engine accepted guard.start). */
@@ -215,7 +351,9 @@ final class Bridge {
          * the page may show a plain confirm there, since no money or words are at stake).
          */
         @JavascriptInterface public void confirmWithBiometric(String callbackName, String subtitle) {
-            act.signer.confirmWithBiometric(callbackName, subtitle);
+            // the page's subtitle may carry a name from another phone: no bidi or zero-width marks
+            String shown = GuardService.printable(subtitle, GuardService.TEXT_MAX);
+            act.signer.confirmWithBiometric(callbackName, shown);
         }
 
         @JavascriptInterface public void confirmSigner(String callbackName) {
@@ -230,106 +368,10 @@ final class Bridge {
          * the page gets SIGNER_ENROL_NOTICE; the safe sheets stay (own key, Signer.SAFE_ALIAS) and the prompt goes on. Money needs the real key, so Sample mode gets no plain-confirm pass here.
          */
         @JavascriptInterface public void confirmSigner(String callbackName, String subtitle) {
-            act.signer.confirmSigner(callbackName, subtitle);
+            String shown = GuardService.printable(subtitle, GuardService.TEXT_MAX);
+            act.signer.confirmSigner(callbackName, shown);
         }
 
-        /**
-         * First look at a laptop for pairing: a TLS handshake only (no request, nothing sent), answering
-         * window[callbackName](id, sha256hex) with the hash of the certificate it presented, or "" when it was not reached.
-         * The hash is kept as the pending pin for that host:port so /pair can use it once the user has confirmed the words.
-         * An empty url clears the pending pin (the user said the words do not match).
-         */
-        @JavascriptInterface public void peek(String callbackName, int id, String url) {
-            if (url == null || url.isEmpty()) {
-                synchronized (Bridge.this) { act.pendingPin = ""; act.pendingHost = ""; }
-                act.call(callbackName, String.valueOf(id), JSONObject.quote(""));
-                return;
-            }
-            new Thread(() -> {
-                String[] seen = {""};
-                try {
-                    if (!act.allowedUrl(url)) throw new IllegalArgumentException("url");
-                    URL u = new URL(url);
-                    try (SSLSocket s = (SSLSocket) MainActivity.peeking(seen).getSocketFactory().createSocket()) {
-                        s.connect(new InetSocketAddress(u.getHost(), u.getPort() < 0 ? 443 : u.getPort()), 8000);
-                        s.setSoTimeout(8000);
-                        s.startHandshake();
-                    }
-                } catch (Exception e) {
-                    seen[0] = "";
-                }
-                synchronized (Bridge.this) { act.pendingPin = seen[0]; act.pendingHost = seen[0].isEmpty() ? "" : MainActivity.hostPort(url); }
-                act.call(callbackName, String.valueOf(id), JSONObject.quote(seen[0]));
-            }).start();
-        }
-
-        /**
-         * Requests go through here so the bundled page is not held to browser cross-site rules. HTTPS only, and the laptop's
-         * certificate must hash to the pin: the one being paired (peek) for that host, else the stored live_pin; no CA, no
-         * hostname check (the pin is the identity). Answers window[callbackName](id, httpStatus, bodyText); status 0 means
-         * the laptop was not reached, -2 that it presented a different certificate (nothing is sent then, not even the
-         * token), -3 that the phone's store is still shut so no pin is known (unlock first; nothing was sent).
-         *
-         * The token travels only to the certificate the user has confirmed, the stored pin. Under a peeked, not yet
-         * confirmed certificate the request carries no token at all: /pair needs none, and an impostor who answered the
-         * peek learns nothing it could replay. The pin check itself runs in the TLS handshake (pinned()), before any byte
-         * of the request leaves the phone; on a mismatch the handshake fails and nothing is sent.
-         */
-        @JavascriptInterface public void http(String callbackName, int id, String method, String url, String token, String body) {
-            String pin;
-            boolean confirmed;
-            synchronized (this) {
-                if (act.livePin.isEmpty()) act.livePin = act.signer.open("live_pin");
-                boolean peeked = !act.pendingPin.isEmpty() && act.pendingHost.equals(MainActivity.hostPort(url));
-                pin = peeked ? act.pendingPin : act.livePin;
-                confirmed = !peeked && !act.livePin.isEmpty();
-            }
-            final String sendToken = confirmed && token != null ? token : "";
-            new Thread(() -> {
-                int status = NOT_REACHED;
-                String text = "";
-                boolean[] mismatch = {false};
-                boolean locked = false;
-                HttpsURLConnection c = null;
-                try {
-                    if (!act.allowedUrl(url)) throw new IllegalArgumentException("url");
-                    if (pin.length() != 64) { locked = true; throw new IllegalStateException("no pin"); }
-                    c = (HttpsURLConnection) new URL(url).openConnection();
-                    c.setSSLSocketFactory(MainActivity.pinned(pin, mismatch).getSocketFactory());
-                    c.setHostnameVerifier((h, sess) -> true); // the address is a LAN IP and the certificate is self-signed: the pin is the whole identity check
-                    c.setInstanceFollowRedirects(false); // a 3xx is an error: the token never follows a Location header
-                    c.setRequestMethod(method);
-                    c.setConnectTimeout(8000);
-                    c.setReadTimeout("GET".equals(method) ? 10000 : 150000);
-                    c.setRequestProperty("X-Token", sendToken);
-                    if (!"GET".equals(method)) {
-                        c.setDoOutput(true);
-                        c.setRequestProperty("Content-Type", "application/json");
-                        try (OutputStream o = c.getOutputStream()) {
-                            o.write((body == null ? "{}" : body).getBytes(StandardCharsets.UTF_8));
-                        }
-                    }
-                    status = c.getResponseCode();
-                    if (status >= 300 && status < 400) throw new IllegalStateException("redirect");
-                    InputStream in = status >= 400 ? c.getErrorStream() : c.getInputStream();
-                    if (in != null) {
-                        ByteArrayOutputStream b = new ByteArrayOutputStream();
-                        byte[] buf = new byte[8192];
-                        for (int n; (n = in.read(buf)) > 0; ) {
-                            if (b.size() + n > MAX_BODY) throw new IllegalStateException("body"); // bounded: no streaming forever
-                            b.write(buf, 0, n);
-                        }
-                        text = b.toString("UTF-8");
-                    }
-                } catch (Exception e) {
-                    status = mismatch[0] ? PIN_MISMATCH : locked ? LOCKED : NOT_REACHED;
-                    text = "";
-                } finally {
-                    if (c != null) c.disconnect();
-                }
-                act.call(callbackName, String.valueOf(id), String.valueOf(status), JSONObject.quote(text));
-            }).start();
-        }
         /**
          * The wallet engine in the app itself (no laptop): runs one method on vaultThread and answers through the page's
          * __kvHttp path exactly as http does: callback(id, status, text). Without the library: -4 at once. The envelope is
@@ -352,9 +394,10 @@ final class Bridge {
             if (!ENGINE_METHODS.contains(m)) { act.call(callbackName, String.valueOf(id), "404", JSONObject.quote(NOT_A_METHOD)); return; }
             // The irreversible moves need a fingerprint given just now. Refused in words and the signer shut, so the page's
             // next confirmSigner asks for the finger even inside the window; the user tries once more and it goes through.
-            if (FRESH_PROMPT_METHODS.contains(m)) {
+            final boolean fresh = FRESH_PROMPT_METHODS.contains(m) || peopleChange(m, args0);
+            if (fresh) {
                 synchronized (act.bridge) {
-                    if (!act.signer.promptedRecently()) {
+                    if (!act.signer.consumeFresh()) { // spends the yes: one prompt, one move
                         act.signer.shutSigner();
                         act.call(callbackName, String.valueOf(id), "200", JSONObject.quote(FRESH_FINGER));
                         return;
@@ -362,6 +405,7 @@ final class Bridge {
                 }
             }
             final boolean takeout = "takeout".equals(m), sheets = "keys.sheets".equals(m), burn = "keys.burn".equals(m);
+            final boolean link = GUARDIAN_METHODS.contains(m) || HEIR_METHODS.contains(m); // the safe key's link slots
             // Typed sheets ride in args.sheets: out of the JSON, into the key block.
             byte[] typed = null;
             if (takeout) {
@@ -382,13 +426,24 @@ final class Bridge {
             final String args = args0;
             final String engineMethod = burn ? "keys.burned" : m;
             final byte[] secret;
-            if (CARD_METHODS.contains(m) || STOP_METHODS.contains(m) || FUNDING_METHODS.contains(m) || TOPUP_METHODS.contains(m) || takeout || sheets || burn) {
+            if (CARD_METHODS.contains(m) || STOP_METHODS.contains(m) || FUNDING_METHODS.contains(m) || TOPUP_METHODS.contains(m) || takeout || sheets || burn || link) {
+                // Fingerprints changed (dead canary): the phone's copy of the vault seeds and the guardian or heir
+                // slots wait 72 hours of wall AND network time. Typed paper seeds never wait. Asked outside the lock.
+                boolean seedRead = link || ((sheets || (takeout && typed == null)) && act.signer.hasSlot("cold"));
+                long waitHours = seedRead ? act.signer.fingerWaitHours() : 0;
+                if (waitHours != 0) { // < 0: the fingerprint check could not be read just now (retry, no wait)
+                    synchronized (act.bridge) { act.signer.shutSigner(); }
+                    String w = waitHours < 0 ? Signer.fingerAgain() : link ? Signer.linkWait(waitHours) : Signer.seedWait(waitHours);
+                    act.call(callbackName, String.valueOf(id), "200", JSONObject.quote(w));
+                    return;
+                }
                 String missing = null;
                 byte[] a = null, b = null, c = null;
                 synchronized (act.bridge) {
                     // The safe methods passed the fresh-prompt gate above; they may run on a plain prompt too (no signer key,
                     // e.g. right after a new fingerprint cleared it), since the safe store has its own key.
-                    if (!act.signer.signerOpen() && !((takeout || sheets || burn) && act.signer.promptedRecently())) {
+                    boolean safeFresh = (takeout || sheets || burn || link) && fresh;
+                    if (!act.signer.signerOpen() && !safeFresh) {
                         if (typed != null) Arrays.fill(typed, (byte) 0);
                         act.call(callbackName, String.valueOf(id), String.valueOf(LOCKED), JSONObject.quote(""));
                         return;
@@ -412,6 +467,8 @@ final class Bridge {
                         } else if (takeout) {
                             if (typed != null) {
                                 a = typed;
+                            } else if (act.signer.hasSlot("cold") && act.signer.hasSlot("cold2") && !act.signer.lastPromptFinger()) {
+                                missing = FINGER_ONLY; // a PIN answer never opens the vault seeds on this phone
                             } else if (act.signer.hasSlot("cold") && act.signer.hasSlot("cold2")) {
                                 try {
                                     byte[][] o = act.signer.openCold("cold", "cold2");
@@ -428,6 +485,8 @@ final class Bridge {
                         } else if (sheets) {
                             if (!act.signer.hasSlot("cold") || !act.signer.hasSlot("cold2") || !act.signer.hasSlot("cold3")) {
                                 missing = SHEETS_BURNED;
+                            } else if (!act.signer.lastPromptFinger()) {
+                                missing = FINGER_ONLY; // a PIN answer never opens the vault seeds on this phone
                             } else {
                                 try {
                                     byte[][] o = act.signer.openCold("cold", "cold2", "cold3");
@@ -439,18 +498,28 @@ final class Bridge {
                                     missing = FRESH_FINGER; // the safe key's seconds after the prompt ran out
                                 }
                             }
+                        } else if (link) {
+                            boolean guardian = GUARDIAN_METHODS.contains(m);
+                            if (!act.signer.lastPromptFinger()) missing = LINK_FINGER_ONLY; // kept beside the vault seeds: fingerprint only
+                            else try {
+                                a = act.signer.openLink(guardian ? "guardian" : "heir");
+                                if (a == null) missing = guardian ? NO_GUARDIAN_KEY : NO_HEIR_KEY;
+                            } catch (android.security.keystore.UserNotAuthenticatedException e) {
+                                missing = FRESH_FINGER; // the safe key's seconds after the prompt ran out
+                            }
                         } else {
                             boolean confirmed;
                             try { confirmed = new JSONObject(args).optBoolean("confirm", false); } catch (org.json.JSONException e) { confirmed = false; }
                             if (!confirmed) missing = BURN_UNCONFIRMED;
-                            else act.signer.burnCold(); // safe.cold* and any old signer.cold*
+                            else if (!act.signer.burnCold()) missing = BURN_NOT_DONE;
                         }
                     } finally {
-                        if (sheets || burn) act.signer.shutSigner(); else act.signer.signerUsed();
+                        if (sheets || burn || link) act.signer.shutSigner(); else act.signer.signerUsed(); // link: one finger per action
                     }
                 }
                 if (missing != null) {
-                    Signer.joinSecrets(a, b, c); // zero-fills what was read
+                    byte[] all = Signer.joinSecrets(a, b, c); // zero-fills what was read
+                    Arrays.fill(all, (byte) 0); // and the joined copy
                     act.call(callbackName, String.valueOf(id), "200", JSONObject.quote(missing));
                     return;
                 }
@@ -472,14 +541,17 @@ final class Bridge {
                     status = env.getInt("status");
                     text = env.isNull("body") ? "" : String.valueOf(env.get("body")); // objects and arrays re-serialise as JSON text
                 } catch (Throwable t) {
-                    android.util.Log.w("KaspaVault", "engine answer unreadable (" + m + "): " + t);
+                    android.util.Log.w("KaspaVault", "engine answer unreadable (" + m + "): "
+                            + t.getClass().getSimpleName()); // never the message
                     status = 500;
                     text = ENGINE_UNREADABLE;
                 }
                 // One line per engine call for logcat: method and outcome, never a body (a refusal's plain words only).
                 android.util.Log.i("KaspaVault", "engine " + m + " -> " + status + ((status == 200 && (bodyOk(text) || errorOf(text).isEmpty())) ? " ok" : " " + errorOf(text)));
                 // The old key files are archived: the sealed keys of that set go too, before the page hears it.
-                if ("keys.reset".equals(m) && status == 200 && bodyOk(text)) { act.signer.forgetSignerPrefs(); act.signer.forgetSafe(); }
+                if ("keys.reset".equals(m) && status == 200 && bodyOk(text)) {
+                    synchronized (act.bridge) { act.signer.forgetSignerPrefs(); act.signer.forgetSafe(); } // never beside a migration
+                }
                 act.call(callbackName, String.valueOf(id), String.valueOf(status), JSONObject.quote(text));
             });
         }
@@ -504,14 +576,25 @@ final class Bridge {
             if (!VaultLib.AVAILABLE) { act.call(callbackName, String.valueOf(id), String.valueOf(ENGINE_MISSING), JSONObject.quote("")); return; }
             final String args = argsJson == null ? "{}" : argsJson;
             if (!act.signer.signerOpen()) { act.call(callbackName, String.valueOf(id), String.valueOf(LOCKED), JSONObject.quote("")); return; }
+            act.signer.consumeFresh(); // this keysNew spends the prompt's yes
             act.vaultThread.execute(() -> {
                 byte[] k = null;
                 String text;
                 try {
+                    String network = act.prefs.getString("live_network", "");
+                    if (network.isEmpty()) network = "mainnet"; // as MainActivity's engine init
+                    String dir = act.getFilesDir() + "/vault/" + network;
+                    // slots are not split by network: any sealed slot refuses a new set
+                    if (act.signer.holdsAnySlot() || new java.io.File(dir, "keys.json").exists()) {
+                        android.util.Log.i("KaspaVault", "keysNew -> this phone already has keys");
+                        act.call(callbackName, String.valueOf(id), "200", JSONObject.quote(KEYS_EXIST));
+                        return;
+                    }
                     try {
                         k = VaultLib.keysNew(args);
                     } catch (Throwable t) {
-                        android.util.Log.w("KaspaVault", "keysNew failed: " + t);
+                        android.util.Log.w("KaspaVault", "keysNew failed: "
+                                + t.getClass().getSimpleName()); // never the message
                         k = null;
                     }
                     if (k == null || k.length < 96) {
@@ -531,38 +614,39 @@ final class Bridge {
                                 stop = act.signer.sealBytes("stop", st);
                                 funding = act.signer.sealBytes("funding", f);
                                 if (k1 != null) {
-                                    String[] sc = act.signer.sealSafe(k1, k2, k3); // the safe key: survives a new fingerprint
+                                    String[] sc = act.signer.sealSafe(k1, k2, k3); // safe.v2: fingerprint only, survives a new fingerprint
                                     coldSafe = sc != null;
                                     if (coldSafe) {
                                         cold = sc[0];
                                         cold2 = sc[1];
                                         cold3 = sc[2];
-                                    } else { // safe key's seconds ran out: the old store for now, migrateCold moves them at the next prompt
-                                        cold = act.signer.sealBytes("cold", k1);
-                                        cold2 = act.signer.sealBytes("cold2", k2);
-                                        cold3 = act.signer.sealBytes("cold3", k3);
-                                    }
+                                    } // else (PIN answer, or the seconds ran out): the vault seeds are NOT kept on this phone, never in
+                                      // the signer store again (PIN gap); the words still go to the page once, for paper ("seeds_kept":false)
                                 }
                             } finally {
-                                Signer.joinSecrets(c, st, f, k1, k2, k3); // zero-fills every part
+                                byte[] all = Signer.joinSecrets(c, st, f, k1, k2, k3); // every part
+                                Arrays.fill(all, (byte) 0); // and the joined copy
                                 act.signer.shutSigner();
                             }
                         }
-                        boolean safeKept = k1 == null || (cold != null && cold2 != null && cold3 != null);
+                        boolean safeKept = k1 == null || !coldSafe || (cold != null && cold2 != null && cold3 != null);
+                        if (coldSafe) act.signer.ensureCanary(); // a new v2 seal: the fingerprint check exists from now on
                         if (card != null && stop != null && funding != null && safeKept) {
                             SharedPreferences.Editor ed = act.prefs.edit().putString("signer.card", card).putString("signer.stop", stop).putString("signer.funding", funding);
                             if (k1 != null) {
-                                String p = coldSafe ? "safe." : "signer.", q = coldSafe ? "signer." : "safe.";
-                                ed.putString(p + "cold", cold).putString(p + "cold2", cold2).putString(p + "cold3", cold3)
-                                        .remove(q + "cold").remove(q + "cold2").remove(q + "cold3"); // the other store's old set never shadows this one
+                                for (String q : new String[]{"signer.", "safe.", Signer.SAFE2}) // no old set in any store shadows this one
+                                    ed.remove(q + "cold").remove(q + "cold2").remove(q + "cold3");
+                                if (coldSafe) ed.putString(Signer.SAFE2 + "cold", cold).putString(Signer.SAFE2 + "cold2", cold2).putString(Signer.SAFE2 + "cold3", cold3);
                             }
-                            ed.apply();
-                            if (k.length > tail) {
+                            if (!ed.commit()) {
+                                text = KEYS_NOT_KEPT; // not on disk: no words go out
+                            } else if (k.length > tail) {
                                 // the safe sheets follow the secrets: into the answer once, nowhere else
                                 String tail1 = new String(k, tail, k.length - tail, java.nio.charset.StandardCharsets.UTF_8);
                                 try {
                                     JSONObject answer = new JSONObject(tail1);
                                     answer.put("ok", true);
+                                    if (k1 != null && !coldSafe) answer.put("seeds_kept", false); // paper only: the page says so
                                     text = answer.toString();
                                 } catch (org.json.JSONException e) {
                                     text = KEYS_NOT_KEPT;
@@ -578,6 +662,92 @@ final class Bridge {
                     if (k != null) Arrays.fill(k, (byte) 0);
                     act.signer.shutSigner();
                 }
+                act.call(callbackName, String.valueOf(id), "200", JSONObject.quote(text));
+            });
+        }
+
+        /**
+         * Makes this phone's link (docs/LINK_DESIGN.md, the helper side): args {name}. The engine's linkMake answers
+         * [guardian 32][heir 32] then UTF-8 JSON {"heir_words":[24 words]} and writes the public link.json. The two keys
+         * are sealed under the safe key as safe.guardian + safe.heir in one commit (they survive a new fingerprint,
+         * keys.burn and keys.reset), every byte array is zero-filled, and the page gets window[callbackName](id, "200",
+         * body) with body {"ok":true,"heir_words":[...]} exactly once (never logged, never stored here), or
+         * {"ok":false,"error":<plain words>}; -3 when no in-app prompt just ran (the existing confirmSigner prompt, one
+         * finger: a signer prompt or a plain one, as the safe methods); -4 without the engine. The engine refuses with an
+         * empty array (its words go to its log), so an existing link reads as "already made". If the keys cannot be
+         * sealed, the link.json this call just wrote is removed (public only, never shown) so the user can try again.
+         */
+        @JavascriptInterface public void linkMake(String callbackName, int id, String argsJson) {
+            if (!VaultLib.AVAILABLE) { act.call(callbackName, String.valueOf(id), String.valueOf(ENGINE_MISSING), JSONObject.quote("")); return; }
+            final String args = argsJson == null ? "{}" : argsJson;
+            synchronized (act.bridge) {
+                if (!act.signer.consumeFresh()) { // spends the yes: one prompt, one link
+                    act.signer.shutSigner();
+                    act.call(callbackName, String.valueOf(id), String.valueOf(LOCKED), JSONObject.quote(""));
+                    return;
+                }
+            }
+            long waitHours = act.signer.fingerWaitHours(); // fingerprints changed: the link slots wait too
+            if (waitHours != 0) { // < 0: unreadable just now, refused with the retry words
+                String w = waitHours < 0 ? Signer.fingerAgain() : Signer.linkWait(waitHours);
+                act.call(callbackName, String.valueOf(id), "200", JSONObject.quote(w));
+                return;
+            }
+            act.vaultThread.execute(() -> {
+                byte[] k = null, g = null, h = null;
+                String text;
+                try {
+                    String network = act.prefs.getString("live_network", "");
+                    if (network.isEmpty()) network = "mainnet"; // as MainActivity's engine init
+                    java.io.File linkFile = new java.io.File(act.getFilesDir() + "/vault/" + network, "link.json");
+                    boolean hadLink = linkFile.exists() || act.signer.hasLink();
+                    if (hadLink) {
+                        text = LINK_EXISTS;
+                    } else if (!act.signer.lastPromptFinger()) {
+                        text = LINK_FINGER_ONLY; // kept beside the vault seeds: the PIN does not open it
+                    } else if (!act.signer.safeUsableNow()) {
+                        text = FRESH_FINGER; // the safe key's seconds after the prompt ran out: nothing made yet
+                    } else {
+                        try {
+                            k = VaultLib.linkMake(args);
+                        } catch (Throwable t) {
+                            android.util.Log.w("KaspaVault", "linkMake failed: "
+                                    + t.getClass().getSimpleName()); // never the message
+                            k = null;
+                        }
+                        if (k == null || k.length <= 64 || k[64] != '{') {
+                            text = linkFile.exists() ? LINK_EXISTS : LINK_NOT_MADE;
+                        } else {
+                            g = Arrays.copyOfRange(k, 0, 32);
+                            h = Arrays.copyOfRange(k, 32, 64);
+                            String words = null;
+                            try {
+                                JSONObject tail = new JSONObject(new String(k, 64, k.length - 64, java.nio.charset.StandardCharsets.UTF_8));
+                                JSONArray w = tail.optJSONArray("heir_words");
+                                if (w != null && w.length() > 0) {
+                                    JSONObject answer = new JSONObject();
+                                    answer.put("ok", true);
+                                    answer.put("heir_words", w);
+                                    words = answer.toString();
+                                }
+                            } catch (org.json.JSONException e) {
+                                words = null;
+                            }
+                            if (words != null && act.signer.sealLink(g, h)) {
+                                text = words;
+                            } else {
+                                if (!linkFile.delete()) android.util.Log.w("KaspaVault", "link.json not removed after a failed seal");
+                                text = LINK_NOT_KEPT;
+                            }
+                        }
+                    }
+                } finally {
+                    if (g != null) Arrays.fill(g, (byte) 0);
+                    if (h != null) Arrays.fill(h, (byte) 0);
+                    if (k != null) Arrays.fill(k, (byte) 0);
+                    act.signer.shutSigner(); // one finger, one link
+                }
+                android.util.Log.i("KaspaVault", "linkMake -> " + (bodyOk(text) ? "ok" : errorOf(text))); // never the words
                 act.call(callbackName, String.valueOf(id), "200", JSONObject.quote(text));
             });
         }
@@ -632,6 +802,23 @@ final class Bridge {
             return e.length() > 120 ? e.substring(0, 120) + "..." : e;
         } catch (Exception e) {
             return "(unreadable body, " + text.length() + " chars)";
+        }
+    }
+
+    /** True for a rules.change whose args name a people field (PEOPLE_FIELDS or any paper field):
+     *  it changes who can stop the account, so it needs heir.set's fresh prompt. Args that cannot
+     *  be read count too (the engine refuses them anyway, so asking the finger costs nothing). */
+    static boolean peopleChange(String method, String argsJson) {
+        if (!"rules.change".equals(method)) return false;
+        try {
+            java.util.Iterator<String> keys = new JSONObject(argsJson).keys();
+            for (int i = 0; i < 1000 && keys.hasNext(); i++) {
+                String k = keys.next();
+                if (PEOPLE_FIELDS.contains(k) || k.startsWith("paper")) return true;
+            }
+            return keys.hasNext(); // more fields than any real change has: ask the finger
+        } catch (Exception e) {
+            return true;
         }
     }
 

@@ -1,7 +1,11 @@
 # The vault covenant
 
-Source: [`contracts/vault.sil`](../../contracts/vault.sil) (SilverScript). This page describes the current version,
+Source: [`contracts/vault.sil`](../contracts/vault.sil) (SilverScript). This page describes the current version,
 which takes 20 constructor arguments and includes the hard-limit dial.
+
+Terms: this page uses the contract's own words. The *safe* (cold address) is what the app calls the vault, its keys
+are the app's three vault seeds, and the heir's *silence* is the app's inactivity period. In the app, *vault* never
+means this covenant: the covenant is the *account*.
 
 ## In plain terms
 
@@ -148,6 +152,23 @@ Practical consequences of the floors: a request must be at least `minRemainder` 
 either nothing or at least `maxFee + minRemainder` after a payment. The wallet checks these before building anything
 and explains a refusal in words.
 
+## Deployer rules
+
+The contract does not check its constructor arguments against each other. The wallet engine refuses dials that break
+the rules below; anyone deploying `vault.sil` with other tooling must enforce them too.
+
+- **`inheritDelay` at least 10 x `delay`.** The heir payout checks coin age only against `inheritDelay`, never against
+  `delay`, and from a Pending coin it pays the waiting request first. With `inheritDelay` below `delay`, `inherit` or
+  `inheritOpen` could pay a pending withdrawal out before its notice period ends, taking away the stop keys' time to
+  decline or cancel it. The wallet requires ten times the notice delay, which keeps that margin wide. The testnet
+  proof preset (both 3,000 DAA) is accepted only on testnet, so the proofs run in minutes; it must never hold real
+  funds.
+- **`maxFee` below `minRemainder`.** `maxFee` is how much a stop, keyless or ending path may leave as fee. Kept under
+  the floor, the fee allowance is always smaller than the smallest coin the account may create, so no path can burn a
+  whole minimum-sized coin as fee.
+- **Clocks between 1 and 2^32 - 1 DAA** (the relative-timelock domain), every amount above zero, and the no-heir
+  values above when there is no heir.
+
 ## What cannot happen
 
 - Nothing leaves above the limit without first being requested, recorded on chain, and left waiting for the notice
@@ -161,7 +182,12 @@ and explains a refusal in words.
   waiting payment is honoured first.
 - A keyless `finish` or `inheritOpen` cannot send money anywhere except the recorded destination or the heir; a
   stranger submitting one can only pay the fee.
-- No path can leave a coin too small to be mined: every output is either zero or at least `minRemainder`.
+- No path can leave the account's money in a coin too small to be mined: every continuation, the safe output of
+  `cancel`, the heir output and every requested payment are at least `minRemainder`, and `request` refuses an amount
+  whose `finish` would leave a remainder above `maxFee` but below `maxFee + minRemainder`. Other outputs are not
+  checked against the floor: the payment output of `spend` is whatever the card signs (Kaspa's storage-mass rule
+  decides whether the network accepts it; the continuation is checked either way), and extra outputs that `cancel`
+  and `inherit` allow can be funded only from outside inputs or the `maxFee` allowance.
 - With `hardLimit` set, no large withdrawal can ever start, whoever signs.
 - A coin sent to the vault address from outside cannot be spent by the card or finished by a stranger.
 

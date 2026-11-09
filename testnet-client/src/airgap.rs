@@ -45,13 +45,18 @@ const DECLINE: u8 = 2;
 pub const FEE_CEILING: u64 = KAS / 10;
 /// ...nor one above this many times what the engine itself measures as needed.
 pub const FEE_MULTIPLE: u64 = 2;
-/// The offline device takes the fee floor the online device measured (item 5), but never one above this
-/// many times what it knows its own network charges: a tampered request cannot price the move itself.
-pub const FEE_RATE_MULTIPLE: u64 = 10;
 pub const DIFFERENT_REQUEST: &str = "This answer belongs to a different request.";
 pub const NOTHING_WAITING: &str = "Nothing is waiting: the vault is Locked.";
 const VAULT_STATE_MISSING: &str = "a cancel or decline request must carry the vault state";
 const NO_LINEAGE: &str = "the coin carries no account lineage (a coin sent straight to the vault address); this device refuses it, use the online cancel";
+const ZERO_COIN: &str = "the request spends a coin of 0 KAS";
+const COINS_OVERFLOW: &str = "the request's coins add up to more than any amount can hold; refused";
+/// A signature as both devices write it: 64 bytes of Schnorr signature and the sighash type.
+#[cfg(feature = "laptop")]
+const SIG_LEN: usize = 65;
+#[cfg(feature = "laptop")]
+const BAD_SIGNATURE: &str =
+    "the answer carries a signature that is not 65 bytes of hex; make the answer again offline";
 
 /// Input 0 is the coin; a cold-send may spend more cold coins through `extra`. Output 0 pays the
 /// cold address (the whole coin for cancel, the change for cold-send) unless a cold-send sweeps
@@ -279,9 +284,18 @@ impl SignRequest {
     fn is_sweep(&self) -> bool {
         self.kind == COLD_SEND && self.output0 == 0 && self.pay.is_some()
     }
-    /// What the inputs hold together.
-    fn in_total(&self) -> u64 {
-        self.amount + self.extra.iter().map(|(_, a, _)| a).sum::<u64>()
+    /// What the inputs hold together. Every coin must hold something (the mass rules divide by each
+    /// amount) and the sum must fit: a malformed request is refused in words, never a panic.
+    fn in_total(&self) -> Result<u64, String> {
+        let amounts = std::iter::once(self.amount).chain(self.extra.iter().map(|(_, a, _)| *a));
+        let mut total = 0u64;
+        for a in amounts {
+            if a == 0 {
+                return Err(ZERO_COIN.into());
+            }
+            total = total.checked_add(a).ok_or(COINS_OVERFLOW)?;
+        }
+        Ok(total)
     }
     /// How many signatures each input needs: two for a 2-of-3 cold-send, else one.
     fn sig_count(&self, ctx: &Ctx) -> usize {
@@ -479,6 +493,9 @@ pub async fn prepare_decline(ctx: &Ctx, which: u8) -> Result<(), String> {
 #[cfg(feature = "laptop")]
 pub async fn prepare_cold_send(ctx: &Ctx, amount_kas: f64, to: &str) -> Result<(), String> {
     clear_airgap(ctx);
+    if ctx.keys.public().cold_external {
+        return Err(COLD_EXTERNAL.into());
+    }
     if !ctx.keys.cold_keys().is_empty() {
         return Err("a cold key is on this device; air-gapped signing is pointless until you run split-keys".into());
     }
@@ -547,7 +564,7 @@ fn sweep_cold_coins(ctx: &Ctx, mut coins: Vec<Coin>, to_spk: ScriptPublicKey) ->
 }
 
 /// "Update now": the account's stop has not shown up in the safe yet (the page waits a moment and asks again).
-pub const STOP_NOT_IN_SAFE_YET: &str = "The account's money has not reached your safe yet. Trying again in a moment.";
+pub const STOP_NOT_IN_SAFE_YET: &str = "The account's funds have not reached your vault yet. Trying again in a moment.";
 
 /// The phone's take-out (mainnet): spend from the safe on this device, with two of its three
 /// cold sheets held in `ctx.keys` (cold/cold2/cold3 at the slots the rule block's `cold_x` names; the caller
@@ -570,14 +587,22 @@ pub async fn takeout(ctx: &Ctx, amount: Option<u64>, to: &str, only_tx: Option<&
         }
     }
     let (req, _) = cold_send_request(ctx, coins, amount, to_spk)?;
-    let mut c = sign_here(ctx, &req)?;
-    ctx.verify(&c.tx, &c.entries)?;
-    let paid = c.tx.outputs.last().map_or(0, |o| o.value);
-    let id = ctx.try_submit(&c.tx, "takeout (two sheets on this device)").await?;
-    for k in &mut c.keys {
-        k.non_secure_erase();
-    }
+    let c = KeysErased(sign_here(ctx, &req)?);
+    ctx.verify(&c.0.tx, &c.0.entries)?;
+    let paid = c.0.tx.outputs.last().map_or(0, |o| o.value);
+    let id = ctx.try_submit(&c.0.tx, "takeout (two sheets on this device)").await?;
     Ok((id, paid, to.to_string()))
+}
+
+/// A signed take-out whose Keypair copies are erased when it drops, on every path (errors too).
+struct KeysErased(Checked);
+
+impl Drop for KeysErased {
+    fn drop(&mut self) {
+        for k in &mut self.0.keys {
+            k.non_secure_erase();
+        }
+    }
 }
 
 /// `check` for a request made on this same device (no file, no fingerprint to compare by eye): the signed,
@@ -679,13 +704,17 @@ struct Checked {
     lines: Vec<String>,
 }
 
+/// cold-send on an account whose safe is an outside address (`set-cold-to`): nothing here signs it.
+pub const COLD_EXTERNAL: &str = concat!(
+    "This account's safe is an outside address you chose (your own wallet); ",
+    "there are no cold sheets here. Pay from that wallet's own app.",
+);
+
 /// Offline: pick the keys, rebuild the transaction from this device's own scripts, sign it in memory,
 /// measure the fee in the engine, and refuse anything the human should never be asked to approve.
 fn check(ctx: &Ctx, req: &SignRequest, fp: &str, sheets: Option<Vec<usize>>) -> Result<Checked, String> {
     let name = req.name()?;
-    if req.amount == 0 {
-        return Err("the request spends a coin of 0 KAS".into());
-    }
+    let in_total = req.in_total()?;
     let mut lines = vec![];
     let short = |h: &Hash| h.to_string()[..8].to_string();
     // 0. This device's own keys.json: the public block must be the one its secrets make (and hash to the code written in it).
@@ -706,6 +735,7 @@ fn check(ctx: &Ctx, req: &SignRequest, fp: &str, sheets: Option<Vec<usize>>) -> 
             });
             vec![key]
         }
+        _ if ctx.keys.public().cold_external => return Err(COLD_EXTERNAL.into()),
         _ if ctx.keys.legacy_safe() => {
             lines.push("Action:       SAFE WITHDRAWAL with the one cold key (legacy single-key safe)".to_string());
             vec![ctx.keys.cold_key()]
@@ -721,7 +751,7 @@ fn check(ctx: &Ctx, req: &SignRequest, fp: &str, sheets: Option<Vec<usize>>) -> 
                 present.retain(|(n, _)| want.contains(n));
             }
             if present.len() < 2 {
-                return Err(format!("a 2-of-3 cold-send needs two cold sheets here; found {}", present.len()));
+                return Err(format!("Taking money out of the vault needs two of its three seeds on this device; found {}.", present.len()));
             }
             present.truncate(2);
             let names: Vec<String> = present.iter().map(|(n, _)| n.to_string()).collect();
@@ -756,7 +786,7 @@ fn check(ctx: &Ctx, req: &SignRequest, fp: &str, sheets: Option<Vec<usize>>) -> 
                     "Decline:      decline (stop key {}): vault {addr} back to Locked, the waiting withdrawal of {:.4} KAS is withdrawn, fee {:.5} KAS",
                     req.which + 1,
                     kas(state.amount as u64),
-                    kas(req.amount - req.output0)
+                    kas(req.amount.saturating_sub(req.output0))
                 ));
             }
             let hash = local.and_then(|v| v.contract_sha256);
@@ -781,7 +811,10 @@ fn check(ctx: &Ctx, req: &SignRequest, fp: &str, sheets: Option<Vec<usize>>) -> 
                 for (i, (op, amount, _)) in req.extra.iter().enumerate() {
                     lines.push(format!("Coin {} of {n}:  {}:{} holding {:.4} KAS", i + 2, op.transaction_id, op.index, kas(*amount)));
                 }
-                lines.push(format!("Coins:        {:.4} KAS together (the smaller could not move alone)", kas(req.in_total())));
+                lines.push(format!(
+                    "Coins:        {:.4} KAS together (the smaller could not move alone)",
+                    kas(in_total)
+                ));
             }
         }
     }
@@ -792,7 +825,6 @@ fn check(ctx: &Ctx, req: &SignRequest, fp: &str, sheets: Option<Vec<usize>>) -> 
         return Err("output 0 (what goes to the cold safe) is 0 KAS; refused".into());
     }
     let (mut tx, entries) = req.build(ctx)?;
-    let in_total = req.in_total();
     let out_total = tx.outputs.iter().try_fold(0u64, |a, o| a.checked_add(o.value)).ok_or("the outputs overflow")?;
     let fee_before = in_total.checked_sub(out_total).ok_or_else(|| format!("the outputs ({:.4} KAS) add up to more than the coin(s) ({:.4} KAS)", kas(out_total), kas(in_total)))?;
     let change = if sweep { None } else { Some(readable_address(&ctx.network, &tx.outputs[0].script_public_key)?) };
@@ -908,8 +940,8 @@ pub fn sign(ctx: &Ctx, request: &Path, sheets: Option<Vec<usize>>, answer: &mut 
     // Item 5: the online device measured the network's fee floor; price the move with it (never below this
     // device's own floor, never above FEE_RATE_MULTIPLE times it).
     check_fee_rate(ctx, &req)?;
-    set_fee_rate(req.fee_rate, &ctx.network);
     check_request_network(ctx, &req)?;
+    set_fee_rate(req.fee_rate, &ctx.network);
     let fp = fingerprint(&bytes);
     let c = check(ctx, &req, &fp, sheets)?;
     println!("\n=== Check this before signing ===");
@@ -953,6 +985,17 @@ pub fn sign(ctx: &Ctx, request: &Path, sheets: Option<Vec<usize>>, answer: &mut 
     Ok(true)
 }
 
+/// The answer's signatures as bytes: each must be SIG_LEN bytes of hex, else the answer is refused.
+#[cfg(feature = "laptop")]
+fn answer_sigs(hexes: &[String]) -> Result<Vec<Vec<u8>>, String> {
+    let decode = |s: &String| {
+        let mut b = vec![0u8; SIG_LEN];
+        let ok = s.len() == 2 * SIG_LEN && faster_hex::hex_decode(s.as_bytes(), &mut b).is_ok();
+        if ok { Ok(b) } else { Err(BAD_SIGNATURE.to_string()) }
+    };
+    hexes.iter().map(decode).collect()
+}
+
 /// Online: the transaction the offline device signed, rebuilt from our own request and checked against
 /// the answer: same request (fingerprint), same kind, output 0 moved only within the fee allowance, same txid.
 #[cfg(feature = "laptop")]
@@ -971,16 +1014,17 @@ fn rebuild(ctx: &Ctx, req: &SignRequest, fp: &str, resp: &SignResponse) -> Resul
     }
     let (mut tx, entries) = req.build(ctx)?;
     let asked = tx.outputs[0].value;
-    if resp.output0_value > asked || resp.output0_value + (req.dials.max_fee as u64) < asked {
+    let reach = resp.output0_value.saturating_add(req.dials.max_fee as u64);
+    if resp.output0_value > asked || reach < asked {
         return Err("output 0 moved by more than the fee allowance".into());
     }
     tx.outputs[0].value = resp.output0_value;
     tx.inputs[0].compute_commit = ComputeCommit::from(ComputeBudget(resp.budget));
-    let sigs: Vec<Vec<u8>> = resp.signatures.iter().map(|s| unhex(s)).collect();
+    let sigs = answer_sigs(&resp.signatures)?;
     tx.inputs[0].signature_script = req.sigscript(ctx, &sigs);
     for (i, m) in resp.more.iter().enumerate() {
         tx.inputs[i + 1].compute_commit = ComputeCommit::from(ComputeBudget(m.budget));
-        let sigs: Vec<Vec<u8>> = m.signatures.iter().map(|s| unhex(s)).collect();
+        let sigs = answer_sigs(&m.signatures)?;
         tx.inputs[i + 1].signature_script = req.sigscript(ctx, &sigs);
     }
     tx.finalize();
@@ -1018,7 +1062,7 @@ pub async fn submit(ctx: &Ctx, response: &Path) -> Result<(), String> {
                 "decline (stop key {}) signed offline: the request for {} KAS to {dest} is withdrawn, the vault is Locked again, fee {:.5} KAS, tx {id}",
                 req.which + 1,
                 kas(amount),
-                kas(req.amount - tx.outputs[0].value)
+                kas(req.amount.saturating_sub(tx.outputs[0].value))
             ));
             ctx.save_anchored(&v)?;
         }
@@ -1307,7 +1351,7 @@ mod tests {
         // one sheet cannot
         let mut one = ctx.keys.clone();
         (one.cold2, one.cold3) = (None, None);
-        assert!(sign_here(&Ctx { keys: one, ..ctx.clone() }, &req).err().unwrap().contains("two cold sheets"), "one sheet is refused");
+        assert!(sign_here(&Ctx { keys: one, ..ctx.clone() }, &req).err().unwrap().contains("two of its three seeds"), "one sheet is refused");
         // an empty safe
         assert!(cold_send_request(&ctx, vec![], None, pay_to()).err().unwrap().contains("no mature coins"));
         std::fs::remove_dir_all(&ctx.dir).ok();
@@ -1379,6 +1423,64 @@ mod tests {
         // the same request with the allowance set to 1 sompi still signs the honest round: the device judges with its own
         let stingy = SignRequest { dials: Dials { max_fee: 1, ..Dials::testnet() }, ..req.clone() };
         assert_eq!(run(&ctx, &stingy, "y\n"), Ok(true));
+        std::fs::remove_dir_all(&ctx.dir).ok();
+    }
+
+    /// `f` run with a panic turned into the refusal "PANIC".
+    fn no_panic<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        caught.unwrap_or_else(|_| Err("PANIC".into()))
+    }
+
+    #[test]
+    fn malformed_requests_are_refused_in_words() {
+        let ctx = offline_ctx("malformed");
+        let (req, _) = cold_send(&ctx, pay_to());
+        let op = TransactionOutpoint::new(Hash::from_bytes([8u8; 32]), 0);
+        let coin = |amount: u64| vec![(op, amount, 5_000)];
+        // a further coin so big the coins overflow when added, or one that holds nothing
+        let huge = SignRequest { extra: coin(u64::MAX), ..req.clone() };
+        assert_eq!(no_panic(|| run(&ctx, &huge, "y\n")).unwrap_err(), COINS_OVERFLOW);
+        let empty = SignRequest { extra: coin(0), ..req.clone() };
+        assert_eq!(no_panic(|| run(&ctx, &empty, "y\n")).unwrap_err(), ZERO_COIN);
+        // a decline that would keep more than its coin holds
+        let dest_hash = spk_hash(&pay_to());
+        let pending = State { stage: 1, dest_hash, amount: KAS as i64, ..locked() };
+        let over = SignRequest {
+            kind: DECLINE,
+            which: 1,
+            covenant_id: Some(Hash::from_bytes([5u8; 32])),
+            state: Some(pending),
+            amount: 10 * KAS,
+            output0: 20 * KAS,
+            pay: None,
+            ..req.clone()
+        };
+        let err = no_panic(|| run(&ctx, &over, "y\n")).unwrap_err();
+        assert!(err.contains("add up to more than the coin"), "{err}");
+        // another network's request is refused before its fee rate reaches this device's pricing
+        let floor = ctx.network.fee_floor;
+        let mainnet = crate::network::MAINNET.to_string();
+        let other = SignRequest { network: mainnet, fee_rate: 2 * floor, ..req.clone() };
+        assert!(run(&ctx, &other, "y\n").unwrap_err().contains("made for the mainnet network"));
+        assert_eq!(fee_rate(), floor);
+        std::fs::remove_dir_all(&ctx.dir).ok();
+    }
+
+    #[test]
+    fn malformed_answer_signatures_are_refused_in_words() {
+        let ctx = offline_ctx("bad-answer");
+        let (req, _) = cold_send(&ctx, pay_to());
+        assert_eq!(run(&ctx, &req, "y\n"), Ok(true));
+        let json = std::fs::read_to_string(airgap_dir(&ctx).join("response.json")).unwrap();
+        let (_, fp) = write_request(&ctx, &req);
+        for bad in ["zz".repeat(SIG_LEN), "abc".into(), "00".repeat(600), String::new()] {
+            let mut resp: SignResponse = serde_json::from_str(&json).unwrap();
+            resp.signatures[0] = bad;
+            assert_eq!(no_panic(|| rebuild(&ctx, &req, &fp, &resp)).unwrap_err(), BAD_SIGNATURE);
+        }
+        let resp: SignResponse = serde_json::from_str(&json).unwrap();
+        assert!(rebuild(&ctx, &req, &fp, &resp).is_ok(), "the honest answer still rebuilds");
         std::fs::remove_dir_all(&ctx.dir).ok();
     }
 

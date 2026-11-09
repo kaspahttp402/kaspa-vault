@@ -36,7 +36,8 @@ const FAKE_BRIDGE = `(function () {
     return { ok: true, account: a || 1, accounts: [1, 2], next_account: 3, rules_next: (a === 2 ? { dials: {}, words: ['20 KAS a day without waiting'] } : null),
       balance_kas: 120, limit_kas: 20, spent_kas: 0, left_kas: 20, safe_kas: 5, stopped: false, purse_kas: 3,
       purse_address: 'kaspa:qpursepursepursepursepursepurse0', safe_address: 'kaspa:qsafesafesafesafesafesafesafe0',
-      notice_seconds: 86400, refresh_seconds: 0, sheets_on_phone: true, heir: false, history: [] };
+      notice_seconds: 86400, refresh_seconds: 0, sheets_on_phone: true, heir: false, history: [],
+      alerts: settings.smoke_alert === '1' ? [{ at: Math.floor(Date.now() / 1000), kind: 'guard', text: 'Smoke alert.' }] : [] };
   }
   function answer(m, a) {
     if (m === 'status') return status(a.account);
@@ -62,6 +63,20 @@ const done = code => { try { ch.kill(); } catch (e) {} setTimeout(() => process.
 ch.stderr.on('data', d => { buf += d; const m = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(buf); if (m && !port) { port = m[1]; run().catch(e => { console.log('FAIL', e.message); done(2); }); } });
 setTimeout(() => { console.log('FAIL timeout'); done(2); }, 240000);
 
+/* --live: an engine alert must light the bell's amber dot (.bell.new) on Home */
+async function bellLights(evaluate) {
+  const B = 'KaspaVaultBridge.setSetting';
+  await evaluate(`${B}('alerts_seen', ''); ${B}('smoke_alert', '1')`);
+  await evaluate(`KVApp.go('home', {}, { root: true })`);
+  let lit = false;
+  for (let i = 0; i < 30 && !lit; i++) {
+    await sleep(500);
+    lit = await evaluate(`!!document.querySelector('.bell.new')`);
+  }
+  const said = lit ? 'lights' : 'did not light';
+  console.log((lit ? '' : '✖ ') + 'bell: an engine alert ' + said + ' the amber dot');
+  return lit;
+}
 async function run() {
   const list = await (await fetch('http://127.0.0.1:' + port + '/json')).json();
   const ws = new WebSocket(list.find(t => t.type === 'page').webSocketDebuggerUrl);
@@ -107,6 +122,8 @@ async function run() {
     }
     if (errors.length) bad[name] = errors.slice(0, 3);
   }
+  if (LIVE && !(await bellLights(evaluate)))
+    bad['bell'] = ['no .bell.new within 15 s of an engine alert'];
   const names = Object.keys(bad);
   console.log(screens.length + ' screens visited, ' + names.length + ' with script errors');
   names.forEach(k => console.log('✖ ' + k + ':\n    ' + bad[k].join('\n    ')));

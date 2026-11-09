@@ -21,6 +21,7 @@
 //! holds it, and a losing double-spend rolls the derived state back. Every exit, panics
 //! included, prints and pushes "WATCHER DOWN: <reason>".
 
+use crate::autostop::{self, AutoStop};
 use crate::contract::{Coin, Dials, HeirClock, State, Vault, after_decline, after_finish, after_spend, heir_clock, kas, spk_hash};
 use crate::network::Network;
 use crate::keys::Public;
@@ -58,6 +59,9 @@ const UNCONFIRMED_WARN: Duration = Duration::from_secs(120);
 const NODE_DAA_GAP: u64 = 600;
 /// Ticks in a row two nodes may disagree about the coin before it is an alert (propagation).
 const DISAGREE_TICKS: u32 = 3;
+/// Looks in a row one node may show a spender the others do not before it is an alert (item 10):
+/// about half a minute at POLL, room for a slow node, far inside any notice period.
+const WAITING_TICKS: u32 = 10;
 /// Foreign coins at the vault address listed before the log stops naming them (dust spam).
 const MAX_FOREIGN: usize = 100;
 /// Item 9: pages of blocks (and of the virtual chain) one catch-up walk may take before it stops and says so.
@@ -170,7 +174,7 @@ pub fn check_nodes(nodes: &[String]) -> Result<(), String> {
     distinct.sort_unstable();
     distinct.dedup();
     if distinct.len() < 2 {
-        return Err(format!("the guard needs at least two different --node urls (your own node and one more) so a lying node can be caught; {} given. Add --node ws://<host>:<port> for each.", nodes.len()));
+        return Err(format!("the guard needs at least two different --node urls (your own node and one more) so a lying node can be caught; {} given. Add --node wss://<host>:<port> for each (plain ws:// only for this machine's own node).", nodes.len()));
     }
     Ok(())
 }
@@ -396,6 +400,77 @@ struct Outcome {
     text: String,
     next: Option<State>,
     closed: bool,
+    /// What a watched folder's state.json records for this move (watched-follow mode); None for a bad shape.
+    rec: Option<Move>,
+}
+
+/// One followed move of the covenant, as `follow_record` writes it into a watched account's state.json.
+#[derive(Clone, Debug)]
+pub(crate) struct Move {
+    pub entry: String,
+    /// The state the move leads to (None: the coin left the covenant, or a `finish` that emptied it).
+    pub next: Option<State>,
+    /// The coin ended here (cancel, inherit, a finish that emptied the vault).
+    pub closed: bool,
+    /// A request's destination; for every other move the address output 0 paid.
+    pub to: String,
+    /// Sompi: the amount requested, paid, sent, or (topup) added.
+    pub moved: u64,
+    /// The fee when the vault coin was the only input; None when other inputs carried it.
+    pub fee: Option<u64>,
+    pub txid: String,
+    /// The stop slot (0-based) a cancel or decline was signed with, when readable.
+    pub slot: Option<i64>,
+    /// The vault's delay dial, for the request line.
+    pub delay: i64,
+    pub heir: String,
+}
+
+/// The end of a `finish` line whose withdrawal emptied the vault (watched-follow mode; watched.rs reads it).
+pub(crate) const EMPTIED: &str = "; the vault is now empty";
+
+/// Watched-follow mode: the vault record after a followed move. Same history words as the wallet's own
+/// commands (commands.rs), so `contract::is_stopped` and `watched::map_status` read them; `pending_to` is the
+/// request's destination while Pending, else None. A line naming the same tx is never added twice (a
+/// restart that follows the same move again). Pure.
+#[path = "watch_race.rs"]
+mod race;
+
+pub(crate) fn follow_record(old: &Vault, m: &Move) -> Vault {
+    let mut v = old.clone();
+    let id = &m.txid;
+    let fee = m.fee.map(|f| format!("{:.5} KAS", kas(f))).unwrap_or_else(|| "unknown".into());
+    let which = m.slot.map(|s| (s + 1).to_string()).unwrap_or_else(|| "?".into());
+    let dest = old.pending_to.clone().unwrap_or_else(|| "the requested address".into());
+    let pending = kas(old.state.amount.max(0) as u64);
+    let line = match m.entry.as_str() {
+        "spend" => format!("spend {} KAS to {}, fee {fee}, tx {id}", kas(m.moved), m.to),
+        "request" => format!("request {} KAS to {}, fee {fee}, tx {id}; finish allowed after {} DAA", kas(m.moved), m.to, m.delay),
+        "finish" => format!("finish {} KAS to {}, fee {fee}, tx {id}{}", kas(m.moved), m.to, if m.closed { EMPTIED } else { "" }),
+        "decline" => format!("decline (stop key {which}): the request for {pending} KAS to {dest} is withdrawn, the vault is Locked again, fee {fee}, tx {id}"),
+        "cancel" => format!("cancel (stop key {which}): everything to cold, fee {fee}, tx {id}"),
+        "topup" => format!("topup {} KAS, tx {id}", kas(m.moved)),
+        "inherit" | "inheritOpen" if old.state.stage == 1 => {
+            format!("{} from Pending: {pending} KAS to {dest} (the pending request), the rest to heir {}, fee {fee}, tx {id}", m.entry, m.heir)
+        }
+        "inherit" | "inheritOpen" => format!("{}: everything to heir {}, fee {fee}, tx {id}", m.entry, m.heir),
+        other => format!("{other}, tx {id}"),
+    };
+    match (&m.next, m.entry.as_str()) {
+        (Some(n), _) => v.state = n.clone(),
+        // a finish that emptied the vault: back to Locked, like the wallet's own finish writes
+        (None, "finish") => v.state = after_finish(&old.state),
+        _ => {}
+    }
+    v.pending_to = match m.entry.as_str() {
+        "request" => Some(m.to.clone()),
+        _ if v.state.stage == 1 && !m.closed => old.pending_to.clone(),
+        _ => None,
+    };
+    if !old.history.iter().any(|h| h.contains(&format!("tx {id}"))) {
+        v.history.push(line);
+    }
+    v
 }
 
 /// A spend first seen in the mempool: not final until a block holds it.
@@ -440,6 +515,10 @@ struct Watcher<'a> {
     stall_said: Option<Instant>,
     gap_said: Option<Instant>,
     disagree: u32,
+    /// Looks in a row that one node showed a spender the others did not (Verdict::Waiting).
+    waiting: u32,
+    /// The lowest DAA any node reported this tick: the `finish` timing check trusts no one node.
+    daa_low: u64,
     last_heartbeat: Instant,
     started: Instant,
     alerts: AlertFile,
@@ -451,6 +530,21 @@ struct Watcher<'a> {
     heir_warned: bool,
     /// Woken after every saved alert and every good answer (`guard.wait` on the phone).
     woke: Arc<Notify>,
+    /// Watched-follow mode (the folder holds watched.json, watched.rs): every final move is written into the
+    /// folder's state.json (`follow_record`). Never true for a wallet's own folder.
+    follow: bool,
+    /// Moves seen but not yet accepted by the chain; written once confirmed, dropped on a roll-back.
+    follow_wait: Vec<Move>,
+    /// `--auto-stop` (the public challenge): answer waiting withdrawals with the held stop key.
+    auto_stop: Option<AutoStop>,
+    /// The stop this watcher sent: txid, the waiting coin it spends, when, sends for that coin.
+    stop_sent: Option<(String, TransactionOutpoint, Instant, u32)>,
+    /// The racer: the sink when its coin was last seen unspent (a block search starts there).
+    race_low: Option<Hash>,
+    /// Racer ticks in a row without finding the followed coin or its spender.
+    race_lost: u32,
+    /// The racer: when the challenge ends (unix seconds); then it sends everything to the vault.
+    race_end: Option<u64>,
 }
 
 async fn fetch_coins(rpc: &KaspaRpcClient, addr: &Address, cov: Hash) -> Result<(Vec<Coin>, Vec<Coin>), String> {
@@ -597,6 +691,8 @@ impl<'a> Watcher<'a> {
             stall_said: None,
             gap_said: None,
             disagree: 0,
+            waiting: 0,
+            daa_low: u64::MAX,
             last_heartbeat: now,
             started: now,
             alerts: AlertFile::load(&ctx.dir),
@@ -605,6 +701,25 @@ impl<'a> Watcher<'a> {
             open_sent: None,
             heir_warned: false,
             woke: Arc::new(Notify::new()),
+            follow: ctx.dir.join(crate::watched::WATCHED_FILE).exists(),
+            follow_wait: vec![],
+            auto_stop: None,
+            stop_sent: None,
+            race_low: None,
+            race_lost: 0,
+            race_end: None,
+        }
+    }
+
+    /// Watched-follow mode: writes a final move into the folder's state.json (anchored save). A failure is an
+    /// alert: the copy of the account would go stale.
+    fn record(&mut self, m: &Move) {
+        if !self.follow {
+            return;
+        }
+        let saved = self.ctx.try_load_vault().and_then(|v| v.ok_or_else(|| "state.json is missing".to_string())).and_then(|old| self.ctx.save_anchored(&follow_record(&old, m)));
+        if let Err(e) = saved {
+            self.alert(Kind::Unwatched, "This account's copy could not be updated. Check it by hand.", &format!("could not record `{}` (tx {}) in state.json: {e}", m.entry, m.txid));
         }
     }
 
@@ -832,10 +947,38 @@ impl<'a> Watcher<'a> {
                 let who: Vec<String> = found.iter().map(|(n, id)| format!("{n} says {id}")).collect();
                 self.alert(Kind::LineageMismatch, TWO_ANSWERS, &format!("NODES DISAGREE about who spent {op} ({where_}): {}; holding the last agreed state", who.join(", ")));
             }
-            Verdict::Waiting => println!("{} info  {} shows the spender of {op} in {where_}; {} does not yet; waiting for every node before believing it", stamp(), found[0].0, lagging.join(" and ")),
+            Verdict::Waiting => self.one_node_only(found, lagging, op, where_),
             Verdict::Agreed | Verdict::Nothing => {}
         }
+        if v != Verdict::Waiting {
+            self.waiting = 0;
+        }
         v
+    }
+
+    /// Item 10: one node shows a spender of `op` the others do not. Held, as one node's word moves
+    /// nothing; WAITING_TICKS looks of it in a row are an alert, so a node that hides a move (or
+    /// shows a made-up one) cannot keep the guard quiet.
+    fn one_node_only(
+        &mut self,
+        found: &[(String, String)],
+        lagging: &[String],
+        op: &TransactionOutpoint,
+        where_: &str,
+    ) {
+        let Some((who, id)) = found.first() else { return };
+        self.waiting = self.waiting.saturating_add(1);
+        let others = lagging.join(" and ");
+        let raw = format!("{who} shows the spender {id} of {op} in {where_}; {others} does not");
+        if self.waiting == WAITING_TICKS {
+            let text = format!(
+                "ONE NODE ONLY: {raw} after {WAITING_TICKS} looks; holding the last agreed state"
+            );
+            self.alert(Kind::LineageMismatch, TWO_ANSWERS, &text);
+        } else {
+            let wait = "waiting for every node before believing it";
+            println!("{} info  {raw} yet; {wait}", stamp());
+        }
     }
 
     /// Looks for the transaction that spent `op`: blocks first, from the catch-up cursor (item 9),
@@ -936,6 +1079,9 @@ impl<'a> Watcher<'a> {
             Level::Alert => self.alert(u.kind, &u.bank, &text),
             Level::Info => self.say(Level::Info, &text),
         }
+        for m in std::mem::take(&mut self.follow_wait) {
+            self.record(&m);
+        }
     }
 
     /// Works out what the spending transaction did to the vault and checks the continuation
@@ -944,7 +1090,7 @@ impl<'a> Watcher<'a> {
     /// nothing here panics on a hostile signature script; every bad shape is an alert text.
     fn judge(&self, tx: &RpcTransaction, prev: &Coin) -> Outcome {
         let txid = txid_of(tx);
-        let bad = |entry: &str, kind: Kind, bank: &str, text: String| Outcome { entry: entry.into(), level: Level::Alert, kind, bank: bank.into(), text, next: None, closed: false };
+        let bad = |entry: &str, kind: Kind, bank: &str, text: String| Outcome { entry: entry.into(), level: Level::Alert, kind, bank: bank.into(), text, next: None, closed: false, rec: None };
         let art = self.ctx.compile(&self.state);
         let Some(p) = tx.inputs.first().and_then(|i| pushes(&i.signature_script)) else {
             return bad("?", Kind::LineageMismatch, RULES_BROKEN, format!("vault coin spent by tx {txid} with an unreadable signature script (truncated push or non-push opcode)"));
@@ -998,7 +1144,19 @@ impl<'a> Watcher<'a> {
         // Output 0 is checked against what the rules pin, never repeated as fact.
         let paid_to = |want: &ScriptPublicKey| out0.is_some_and(|o| o.script_public_key == *want);
         let wrong = |what: &str| bad(&entry, Kind::LineageMismatch, RULES_BROKEN, format!("tx {txid} ({entry}) paid {:.4} KAS to {to}, which is not {what}; the money went somewhere the rules do not allow; check by hand", kas(v0)));
-        let ok = |level, kind, bank: String, text, next, closed| Outcome { entry: entry.clone(), level, kind, bank, text, next, closed };
+        // What a watched folder's state.json records (follow_record): the request's destination, the amount moved, the fee.
+        let rec_to = request.as_ref().map(|(spk, _)| addr_of(&self.ctx.network, spk)).unwrap_or_else(|| to.clone());
+        let moved = match (entry.as_str(), &request, cont) {
+            ("request", Some((_, a)), _) => (*a).max(0) as u64,
+            ("topup", _, Some(i)) => tx.outputs[i].value.saturating_sub(in_value),
+            _ => v0,
+        };
+        let fee = (tx.inputs.len() == 1).then(|| in_value.saturating_sub(tx.outputs.iter().map(|o| o.value).sum::<u64>()));
+        let heir = self.ctx.keys.public().heir_address;
+        let ok = |level, kind, bank: String, text, next: Option<State>, closed: bool| {
+            let rec = Move { entry: entry.clone(), next: next.clone(), closed, to: rec_to.clone(), moved, fee, txid: txid.clone(), slot: decode_cancel_slot(&p), delay: self.dials.delay, heir: heir.clone() };
+            Outcome { entry: entry.clone(), level, kind, bank, text, next, closed, rec: Some(rec) }
+        };
         match (entry.as_str(), cont, next) {
             ("spend", Some(i), Some(n)) => {
                 // A copied spend key can drain one window's limit forever if the
@@ -1047,7 +1205,8 @@ impl<'a> Watcher<'a> {
                 if v0 != self.state.amount as u64 {
                     return bad(&entry, Kind::LineageMismatch, RULES_BROKEN, format!("tx {txid} (finish) paid {:.4} KAS to {to}, not the recorded {:.4} KAS; check by hand", kas(v0), kas(self.state.amount as u64)));
                 }
-                let virtual_daa = self.daa_seen.0 as i64;
+                // the lowest DAA any node reported, so one node's clock cannot pass an early finish
+                let virtual_daa = self.daa_seen.0.min(self.daa_low) as i64;
                 if in_daa + self.dials.delay > virtual_daa {
                     return bad(&entry, Kind::LineageMismatch, RULES_BROKEN, format!("tx {txid} (finish) seen at virtual DAA {virtual_daa}, {} DAA before the delay allows; the node may be lying", in_daa + self.dials.delay - virtual_daa));
                 }
@@ -1163,6 +1322,14 @@ impl<'a> Watcher<'a> {
                 warned: false,
             });
         }
+        if let Some(m) = &o.rec {
+            if seen == Seen::Accepted {
+                self.follow_wait.clear();
+                self.record(m);
+            } else {
+                self.follow_wait.push(m.clone());
+            }
+        }
         if o.next.as_ref().map(|n| n.stage) == Some(1) && self.state.stage == 0 {
             // Already alerted; stop the 'pending found' alert from firing again on the next tick.
             self.last_countdown = Some(i64::MIN);
@@ -1192,6 +1359,7 @@ impl<'a> Watcher<'a> {
                 self.alert(Kind::LineageMismatch, TWO_ANSWERS, &format!("the provisional transaction {} LOST to {id}, which spent the same vault coin and was accepted; re-deriving the state from the accepted one", u.txid));
                 self.state = u.prev_state.clone();
                 self.closed = None;
+                self.follow_wait.clear();
                 self.apply(&tx, &u.prev, Seen::Accepted);
             }
             return;
@@ -1242,6 +1410,7 @@ impl<'a> Watcher<'a> {
             ),
         );
         self.unconfirmed = None;
+        self.follow_wait.clear();
         self.state = u.prev_state.clone();
         self.closed = None;
         self.coin = Some(u.prev.clone());
@@ -1349,6 +1518,7 @@ impl<'a> Watcher<'a> {
             return Tick::Go;
         };
         self.watch_clock(daa);
+        self.daa_low = infos.iter().map(|i| i.1).min().unwrap_or(daa);
         for (name, daa2, _) in &infos[1..] {
             let gap = daa.abs_diff(*daa2);
             if gap > NODE_DAA_GAP && self.gap_said.is_none_or(|t| t.elapsed() >= STALL) {
@@ -1548,7 +1718,7 @@ fn no_node_warning(nodes: &[String]) -> Option<&'static str> {
 
 /// The CLI form: today's `watch` command. Refusals print and exit(2); a panic inside a tick is
 /// logged with its location by the hook here and alerted by `watcher_down`, then exit(2).
-pub async fn run(ctx: &Ctx, nodes: &[String], auto_heir: bool) {
+pub async fn run(ctx: &Ctx, nodes: &[String], auto_heir: bool, auto_stop: Option<AutoStop>) {
     let dir = ctx.dir.clone();
     std::panic::set_hook(Box::new(move |info| {
         let msg = panic_text(info.payload());
@@ -1560,7 +1730,8 @@ pub async fn run(ctx: &Ctx, nodes: &[String], auto_heir: bool) {
     let poll = Arc::new(AtomicU64::new(POLL.as_secs()));
     let (_stop_tx, stop) = tokio::sync::watch::channel(false);
     let woke = Arc::new(Notify::new());
-    if let Err(e) = run_guard(ctx.clone(), nodes.to_vec(), auto_heir, poll, stop, woke).await {
+    let guard = run_guard_with(ctx.clone(), nodes.to_vec(), auto_heir, poll, stop, woke, auto_stop);
+    if let Err(e) = guard.await {
         eprintln!("Refused: {e}");
         std::process::exit(2);
     }
@@ -1581,7 +1752,34 @@ fn watcher_down(dir: &Path, msg: &str) {
 /// an `Err` and nothing exits the process. `poll` is the seconds between ticks, read every tick;
 /// `stop` ends the loop at the next tick (a dropped sender too); `woke` is notified after every saved
 /// alert and every good answer. Returns Ok(()) when the vault closes or `stop` is pulled.
-pub async fn run_guard(ctx: Ctx, nodes: Vec<String>, auto_heir: bool, poll: Arc<AtomicU64>, mut stop: tokio::sync::watch::Receiver<bool>, woke: Arc<Notify>) -> Result<(), String> {
+pub async fn run_guard(
+    ctx: Ctx,
+    nodes: Vec<String>,
+    auto_heir: bool,
+    poll: Arc<AtomicU64>,
+    stop: tokio::sync::watch::Receiver<bool>,
+    woke: Arc<Notify>,
+) -> Result<(), String> {
+    run_guard_with(ctx, nodes, auto_heir, poll, stop, woke, None).await
+}
+
+/// `run_guard` with the laptop-only `--auto-stop` (the CLI's `watch`; the phone's guard never holds
+/// a hot stop key). With it the folder's state.json follows every move, so a stop typed by hand
+/// still works.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_guard_with(
+    ctx: Ctx,
+    nodes: Vec<String>,
+    auto_heir: bool,
+    poll: Arc<AtomicU64>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    woke: Arc<Notify>,
+    auto_stop: Option<AutoStop>,
+) -> Result<(), String> {
+    if let Some(a) = &auto_stop {
+        a.check()?;
+        ctx.keys.try_stop_key(crate::keys::stop_slot(a.which)?)?;
+    }
     let ctx = &ctx;
     let nodes = &nodes[..];
     if auto_heir && !ctx.keys.public().auto_heir {
@@ -1595,7 +1793,9 @@ pub async fn run_guard(ctx: Ctx, nodes: Vec<String>, auto_heir: bool, poll: Arc<
         // A node on another network is lying or set up wrong; the guard does not start with it.
         others.push((url.clone(), connect(Some(url), &ctx.network).await?));
     }
-    if let Some(warning) = no_node_warning(nodes) {
+    // Watched-follow mode follows on the wallet's own connection; alarms come from the phone polling watch.status.
+    let follow = ctx.dir.join(crate::watched::WATCHED_FILE).exists();
+    if !follow && let Some(warning) = no_node_warning(nodes) {
         let line = format!("{} ALERT {warning}", stamp());
         println!("{line}");
         log_line(&ctx.dir, &line);
@@ -1604,6 +1804,27 @@ pub async fn run_guard(ctx: Ctx, nodes: Vec<String>, auto_heir: bool, poll: Arc<
     let mut w = Watcher::new(ctx, v.covenant_id, v.state.clone(), primary, others);
     w.auto_heir = auto_heir;
     w.woke = woke;
+    if let Some(a) = &auto_stop {
+        w.follow = true;
+        let after = match a.cap {
+            Some(c) => {
+                let hours = a.window_secs / 3600;
+                format!("after {c} declines in {hours} h, cancel (all to the cold vault)")
+            }
+            None => "no cap: it only declines; only a decline that cannot be built cancels".into(),
+        };
+        let proof = ctx.dir.join(autostop::PROOF_FILE);
+        let line = format!(
+            "--auto-stop: stop key {} declines every withdrawal request; {after}; proof file {}",
+            a.which,
+            proof.display()
+        );
+        w.say(Level::Info, &line);
+    }
+    let (cov, state, primary) = (v.covenant_id, v.state.clone(), w.primary.clone());
+    let racing = |a| race::race(ctx.clone(), cov, state, primary, a, stop.clone());
+    let racer = auto_stop.map(|a| tokio::spawn(racing(a)));
+    let mut racer_said = false;
     let resumed = Saved::load(&ctx.dir).map(|s| {
         let coin = s.coin.map(|(op, amount, _)| format!("coin {op} ({:.4} KAS)", kas(amount))).unwrap_or_else(|| "no coin in view".into());
         let line = format!("resuming from watch.json: stage {}, {coin}, block scan from {}", s.state.stage, s.sink.map(|h| h.to_string()).unwrap_or_else(|| "the first sink seen".into()));
@@ -1642,6 +1863,11 @@ pub async fn run_guard(ctx: Ctx, nodes: Vec<String>, auto_heir: bool, poll: Arc<
         if *stop.borrow() {
             w.say(Level::Info, "guard stopped by its owner");
             return Ok(());
+        }
+        if !racer_said && racer.as_ref().is_some_and(|h| h.is_finished()) {
+            racer_said = true;
+            let raw = "AUTO-STOP racer ended; this guard goes on alerting only";
+            w.alert(Kind::WatcherSilent, "The automatic emergency stop has ended.", raw);
         }
         match AssertUnwindSafe(w.tick()).catch_unwind().await {
             Ok(Tick::Go) => {
@@ -1994,6 +2220,35 @@ mod tests {
         assert!(next_states(&locked()).is_empty(), "from Locked the next address depends on a request or a spend amount");
     }
 
+    /// One node showing a spender the others never show is held, then an alert, once.
+    #[test]
+    fn one_node_showing_a_spender_is_an_alert_after_a_few_looks() {
+        let ctx = test_ctx("one-only");
+        let dir = ctx.dir.clone();
+        let op = TransactionOutpoint::new(Hash::from_bytes([5u8; 32]), 0);
+        let x = "x".to_string();
+        let mut w = Watcher::new(&ctx, Hash::from_bytes([3u8; 32]), locked(), "n1".into(), vec![]);
+        let look = |w: &mut Watcher<'_>| {
+            w.agree(&[("n1".into(), x.clone())], &["n2".into()], &op, "a block")
+        };
+        for _ in 1..WAITING_TICKS {
+            assert_eq!(look(&mut w), Verdict::Waiting);
+        }
+        assert!(AlertFile::load(&dir).alerts.is_empty(), "a node a little behind is not an alert");
+        assert_eq!(look(&mut w), Verdict::Waiting);
+        let json = AlertFile::load(&dir);
+        assert_eq!((json.alerts.len(), json.alerts[0].text.as_str()), (1, TWO_ANSWERS));
+        let log = std::fs::read_to_string(dir.join("alerts.log")).unwrap();
+        assert!(log.contains("ONE NODE ONLY: n1 shows the spender x of"), "{log}");
+        look(&mut w);
+        assert_eq!(AlertFile::load(&dir).alerts.len(), 1, "one alert, not one per look");
+        // the nodes agree again: the count starts over
+        let both = [("n1".to_string(), x.clone()), ("n2".to_string(), x.clone())];
+        assert_eq!(w.agree(&both, &[], &op, "a block"), Verdict::Agreed);
+        assert_eq!(w.waiting, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// One node alone moves nothing. The spender counts only when every reachable
     /// node names the same one; a lagging node means wait (no alert), two spenders is the
     /// "two answers" alert and a hold; the coin is gone only when every node says so.
@@ -2165,6 +2420,10 @@ mod tests {
         assert_eq!(o.kind, Kind::LineageMismatch);
         assert!(o.text.contains("before the delay allows"), "{}", o.text);
         w.daa_seen.0 += 1;
+        // another node a DAA behind: the lowest reading decides, so one node's clock cannot pass it
+        w.daa_low = w.daa_seen.0 - 1;
+        assert_eq!(w.judge(&good, &prev).kind, Kind::LineageMismatch);
+        w.daa_low = u64::MAX;
         // wrong amount
         let short = spend_tx(&ctx, &state, "finish", vec![], &prev, vec![TransactionOutput::new(KAS - 1, dest.clone()), cont(2 * KAS - 999)]);
         let o = w.judge(&short, &prev);
@@ -2294,5 +2553,55 @@ mod tests {
     fn no_pinned_node_is_said_out_loud() {
         assert!(no_node_warning(&[]).is_some_and(|w| w.contains("--node")));
         assert_eq!(no_node_warning(&["ws://127.0.0.1:17210".to_string()]), None);
+    }
+
+    fn mv(entry: &str, next: Option<State>, closed: bool, to: &str, moved: u64, slot: Option<i64>) -> Move {
+        Move { entry: entry.into(), next, closed, to: to.into(), moved, fee: Some(1_000), txid: format!("{entry}tx"), slot, delay: 600, heir: "kaspatest:heir".into() }
+    }
+
+    fn rec(state: State, pending_to: Option<&str>) -> Vault {
+        Vault { covenant_id: Hash::from_bytes([7u8; 32]), state, pending_to: pending_to.map(str::to_string), history: vec!["fund".into()], contract_sha256: None, network: String::new(), dials: Dials::testnet() }
+    }
+
+    #[test]
+    fn follow_record_request_finish_decline_cancel_topup() {
+        let lockd = locked();
+        let pending = State { stage: 1, dest_hash: vec![9; 32], amount: (2 * KAS) as i64, ..locked() };
+        // request: Pending, the destination recorded, the wallet's own words
+        let v = follow_record(&rec(lockd.clone(), None), &mv("request", Some(pending.clone()), false, "kaspatest:dest", 2 * KAS, None));
+        assert_eq!(v.state, pending);
+        assert_eq!(v.pending_to.as_deref(), Some("kaspatest:dest"));
+        assert_eq!(v.history.last().unwrap(), "request 2 KAS to kaspatest:dest, fee 0.00001 KAS, tx requesttx; finish allowed after 600 DAA");
+        // the same move followed again (a restart) adds no second line
+        let again = follow_record(&v, &mv("request", Some(pending.clone()), false, "kaspatest:dest", 2 * KAS, None));
+        assert_eq!(again.history.len(), v.history.len());
+        // finish with something left: Locked, no destination
+        let f = follow_record(&v, &mv("finish", Some(after_finish(&pending)), false, "kaspatest:dest", 2 * KAS, None));
+        assert_eq!((f.state.clone(), f.pending_to.clone()), (after_finish(&pending), None));
+        assert!(f.history.last().unwrap().starts_with("finish 2 KAS to kaspatest:dest, fee"));
+        assert!(!contract::is_stopped(&f));
+        // finish that empties the vault: Locked, said so
+        let f0 = follow_record(&v, &mv("finish", None, true, "kaspatest:dest", 2 * KAS, None));
+        assert_eq!(f0.state, after_finish(&pending));
+        assert!(f0.history.last().unwrap().ends_with("; the vault is now empty"));
+        // decline by stop slot 1 (stop key 2): Locked again, the old destination named
+        let d = follow_record(&v, &mv("decline", Some(after_decline(&pending)), false, "", 0, Some(1)));
+        assert_eq!((d.state.clone(), d.pending_to.clone()), (after_decline(&pending), None));
+        assert_eq!(d.history.last().unwrap(), "decline (stop key 2): the request for 2 KAS to kaspatest:dest is withdrawn, the vault is Locked again, fee 0.00001 KAS, tx declinetx");
+        // cancel from Pending: the record is a stop, nothing waits any more
+        let c = follow_record(&v, &mv("cancel", None, true, "kaspatest:cold", 2 * KAS, Some(2)));
+        assert_eq!(c.history.last().unwrap(), "cancel (stop key 3): everything to cold, fee 0.00001 KAS, tx canceltx");
+        assert_eq!(c.pending_to, None);
+        assert!(contract::is_stopped(&c));
+        // topup: state as it was (Pending keeps its destination)
+        let t = follow_record(&v, &mv("topup", Some(pending.clone()), false, "", KAS / 2, None));
+        assert_eq!((t.state.clone(), t.pending_to.as_deref()), (pending.clone(), Some("kaspatest:dest")));
+        assert_eq!(t.history.last().unwrap(), "topup 0.5 KAS, tx topuptx");
+        // inherit from Pending: a stop-kind record naming the pending payment and the heir
+        let i = follow_record(&v, &mv("inherit", None, true, "kaspatest:dest", 2 * KAS, None));
+        assert!(i.history.last().unwrap().starts_with("inherit from Pending: 2 KAS to kaspatest:dest (the pending request), the rest to heir kaspatest:heir"));
+        assert!(contract::is_stopped(&i));
+        // the record keeps everything else
+        assert_eq!((i.covenant_id, i.history[0].as_str()), (v.covenant_id, "fund"));
     }
 }

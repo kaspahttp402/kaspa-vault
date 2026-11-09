@@ -37,7 +37,12 @@ def run(m):
     with tempfile.NamedTemporaryFile("w", suffix=".sil", delete=False, newline="") as f:
         f.write("\n".join(mutated))
     env = dict(os.environ, VAULT_SRC=f.name)
-    r = subprocess.run([TEST_BIN], cwd=os.path.join(ROOT, "engine-tests"), env=env, capture_output=True, text=True, timeout=300)
+    try:  # a suite that hangs on a mutant did not pass it: counted as killed (by timeout), never as survived
+        r = subprocess.run([TEST_BIN], cwd=os.path.join(ROOT, "engine-tests"), env=env, capture_output=True,
+                           text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        os.unlink(f.name)
+        return i + 1, kind, old.strip(), "killed (timeout)"
     os.unlink(f.name)
     out = r.stdout + r.stderr
     if r.returncode == 0:

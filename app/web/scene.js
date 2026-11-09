@@ -15,7 +15,7 @@
    mode: 'home' | 'send' (mirrored) | 'stop' (the old collapse to a point)
          'locked'  the lines become nested hexagons, one ring after another from the outside in (HEX.spin turns them as they
                    arrive, 0 = no turning); spokes draw in, the glow gives one soft beat, then still
-         'stopped' the lines collapse into red nested triangles, glowing, pulsing slowly (a bulwark)
+         'stopped' the lines collapse into red nested triangles, glowing, pulsing slowly
          'sending' | 'receiving'  a small still core with RING.count diamonds around it: sending, each one leaves the core and
                    grows until it fades away; receiving, each one comes in from far and lands in the core; the glow beats as each leaves or lands
          one mode per protection, each a slow morph of the same lines (the *.time dials) and back:
@@ -24,7 +24,10 @@
          'notice'  notice period: a closed shape, the main lines laid end to end round it, that burns like a fuse as the time runs (NOTICE.unwind s):
                    a spark at the burn point, embers behind it, the line still ahead; when the time is up it locks solid (LOCK), holds, fades and
                    starts again. A faint track shows the whole outline
-         'stops'   emergency stops: STOPS.count calm teal nested triangles (red and the collapse stay with 'stopped')
+         'stops'   emergency stops: STOPS.count calm teal nested triangles
+         'coin'    a covenant: a coin (two rims), real covenant code stamped round its band
+         'beat'    the heir: the lines lie along one heartbeat line that runs across the top
+   lift: 0..1 moves any shape up and smaller by that share (a walk step keeps it clear of the text)
          'heir'    heir after silence: the lines thin and slow with HEIR.silence (0..1) until one carries on alone past a
                    small gap; silence back to 0 (a payment) thickens them again
          'safe'    2-of-3 paper sheets: SEAL.sheets squares fan into a star, slowly close into one square (the glow rises
@@ -70,7 +73,7 @@
     y: 0.36,
     rings: 3,
     line: 0.8,
-    glow: 24,
+    glow: 23,
     breath: 3.5,
     spin: 80,
     kick: 1.3,
@@ -96,7 +99,7 @@
     y: 0.5,
     depth: 3,
     weight: 1,
-    glow: 30,
+    glow: 29,
     period: 2.25,
     pulse: 0.055,
     time: 3,
@@ -127,7 +130,7 @@
     y: 0.25,
     speed: 0.11,
     line: 1.05,
-    glow: 30,
+    glow: 29,
     beat: 11,
     curve: 1.65,
     thin: 0.35,
@@ -168,7 +171,7 @@
     y: 0.23,
     gap: 0,
     line: 0.75,
-    glow: 30,
+    glow: 29,
     beat: 30,
     track: 0.24,
     time: 5,
@@ -198,7 +201,7 @@
     size: 88,
     x: 0.5,
     y: 0.21,
-    glow: 30,
+    glow: 29,
     period: 10,
     pulse: 0.205,
     time: 3,
@@ -231,7 +234,7 @@
     x0: 0.06,
     x1: 0.94,
     line: 1.3,
-    glow: 26,
+    glow: 25,
     time: 2,
     light: 0.08,
     lightS: 8,
@@ -258,7 +261,7 @@
     fan: 45,
     period: 12,
     /* the lock seal animates faster */ line: 1.1,
-    glow: 23,
+    glow: 22,
     pulse: 0,
     close: 0.45,
     hold: 0.15,
@@ -288,16 +291,16 @@
      them, ends always far off screen. The five main lines still make every shape; the fine tendrils dissolve as one forms. */
   var JELLY = {
     fine: 8,
-    line: 0.56,
+    line: 0.8,
     taper: 0.1,
     wave: 43,
     curl: 1.3,
     speed: 0.5,
     spread: 0.6,
-    halation: 0.15,
+    halation: 0.6,
     reach: 0.3,
-    body: 1,
-    soft: 0,
+    body: 1.6,
+    soft: 0.5,
     beads: 200,
     beadSize: 0.45,
     breath: 0.4,
@@ -307,6 +310,21 @@
   /* KVScene.pulse: s = seconds from start to end, width = share of the screen's length (the screen pulse is FLOW.width), bright = its alpha,
      tint = how far its colour goes toward white (for 'stop', from red), size = its width against the screen pulse */
   var FIRE = { s: 1.1, width: 0.04, bright: 1, tint: 0.6, size: 1.3 };
+  /* sparks: on the plain ribbon (Home and every screen without a shape) one line at a time
+     carries a comet,
+     at random: about one every `every` s, each taking `run` s to cross */
+  var SPARK = { every: 1.4, run: 1.9, size: 1.1, bright: 0.85 };
+  var GLOW_ALL = 0.85; /* every glow 15% lower (the owner's call: a little too bright) */
+  /* coin: size px, y; period s for one stamp (press, hold, lift); drop = start height (of H) */
+  var COIN = { size: 70, x: 0.5, y: 0.2, period: 3.4, drop: 0.12 };
+  /* beat: the heartbeat line; amp px, beats across, speed = beats per s, spread px between lines */
+  var BEAT = { y: 0.2, width: 0.92, amp: 40, beats: 2.2, speed: 0.55, spread: 1.4 };
+  var ECG = [[0, 0], [0.3, 0], [0.36, 0.12], [0.42, 0], [0.5, 0], [0.53, -0.18], [0.57, 1],
+    [0.61, -0.32], [0.65, 0], [0.78, 0], [0.86, 0.24], [0.94, 0], [1, 0]];
+  /* the code stamped round the coin's band: three lines of the vault's own covenant
+     (contracts/vault.sil), word for word (the owner's call: real code, not a symbol) */
+  var CODE_RING = 'require(checkSig(s, spendPk)); require(stage == 0); ' +
+    'require(checkSig(s, stopKey)); ';
   /* the finger: the lines lean a little AWAY from it (push, within radius), the lines passing near it brighten (light) and a short
      ring of that light runs outward (ring, speed = laps per s); glow = the soft bloom under it. All of it fades `fade` s after lift */
   var FINGER = { push: 0.25, radius: 1.3, glow: 0.6, light: 0.9, ring: 0.7, speed: 1.1, fade: 0.8 };
@@ -386,6 +404,18 @@
     prev = 0;
   /* People: the five lines themselves take a Celtic tree-of-life shape, nothing else drawn. size: ring radius; roots/branches: how far
      round the ring the roots (bottom) and branches (top) land, in radians per line; weave: sideways knot amplitude in the trunk; turns: crossings; sway: rad/s of the slow weave */
+  /* lock screen K (st.mark 'k'): the seal's fanned rings stay as the ring, and its inner
+     lines become our own backwards stencil K inside it: the outline and the key slot,
+     inner = the K's half-height against the ring; each traces in over draw s, stagger s apart. */
+  var KMARK = { inner: 0.48, draw: 0.6, stagger: 0.15 };
+  /* after any shape lets go (the lock K after the fingerprint, a stop, the vault seal), the
+     fine tendrils are never there already: they peel out of the main lines, starting `after` s
+     once the shape is half gone and taking `grow` s */
+  var ARRIVE = { after: 0.3, grow: 2.6 };
+  /* outline points in half-heights (y -1 top .. 1 bottom), mirrored so the K faces left */
+  var K_OUT = [[0.833, -1], [0.444, -1], [0.444, -0.167], [-0.333, -1], [-0.833, -1],
+    [0.167, 0], [-0.833, 1], [-0.333, 1], [0.444, 0.167], [0.444, 1], [0.833, 1]];
+  var K_SLOT = [[0.639, -0.611], [0.639, 0.611]];
   var PEOPLE = {
     size: 92,
     x: 0.5,
@@ -394,13 +424,20 @@
     fan: 14,
     step: 0.07,
     line: 1.05,
-    glow: 18,
+    glow: 17,
     time: 4,
     pulse: 0.02,
     pulseS: 9,
     rot: 0,
     drift: 1.2,
-  }; /* People mark: fan = degrees between the rings, step = each ring smaller by this share, drift = slow turn in deg/s */
+    bursts: 7,
+    burstRun: 0.09,
+    burstSize: 4.5,
+    burstS: 2.6,
+  }; /* People mark: fan = degrees between the rings, step = each ring smaller by this share,
+       drift = slow turn in deg/s; bursts = small lights each running back and forth along one
+       ring at its own pace (burstRun trips per s),
+       swelling and fading on their own every ~burstS s, burstSize px */
   var pageName = 'home',
     pageL = 0,
     pageA = 0,
@@ -422,7 +459,13 @@
     flowDir = 1,
     priceT = 0,
     peopleT = 0,
-    clock = 0;
+    artT = 0,
+    artAge = 0,
+    artMode = 'coin',
+    liftE = 0,
+    sparks = [],
+    clock = 0,
+    arrAge = 0; /* seconds since the last shape let go (or start): fine tendrils grow from it */
   var mixT = 0; /* weight of "some shape is on"; the per-shape weights only share it out, so one shape flows straight into the next */
   var accA = 0,
     accRGB = [112, 199, 186]; /* the eased account colour */
@@ -594,6 +637,7 @@
   }
   function stepEffects(dt) {
     clock += dt;
+    arrAge = mixT > 0.5 ? 0 : arrAge + dt;
     charge += (clamp(+st.charge || 0) - charge) * (1 - Math.exp(-dt * 4)); /* about 0.25 s */
     lclk += dt * (1 + 2 * charge);
     heat += ((typeof st.heat === 'number' ? clamp(st.heat) : 1) - heat) * (1 - Math.exp(-dt * 6));
@@ -627,6 +671,12 @@
     noticeT = toward(noticeT, m === 'notice' ? 1 : 0, td / NOTICE.time);
     priceT = toward(priceT, m === 'price' ? 1 : 0, td / PRICE.time);
     peopleT = toward(peopleT, m === 'people' ? 1 : 0, td / PEOPLE.time);
+    var art = m === 'coin' || m === 'beat';
+    if (art) artMode = m;
+    artT = toward(artT, art ? 1 : 0, td / 1.7);
+    artAge = art ? artAge + dt : 0;
+    liftE = toward(liftE, clamp(+st.lift || 0), td / 1.7);
+    stepSparks(dt, m);
     var shapeTime =
       {
         locked: HEX.time,
@@ -648,7 +698,8 @@
       m === 'receiving' ||
       m === 'notice' ||
       m === 'price' ||
-      m === 'people'
+      m === 'people' ||
+      art
         ? 1
         : 0;
     mixT = toward(mixT, shapeOn, td / shapeTime);
@@ -826,7 +877,8 @@
       return K[i][n] + (K[i + 1][n] - K[i][n]) * f;
     });
   }
-  /* stopped / stops: line j becomes the j-th of `depth` nested upright triangles (extra lines sit on the innermost).
+  /* stopped / stops: line j becomes the j-th of `depth` nested upright triangles
+     (extra lines sit on the innermost).
      O is STOP (red, the collapse) or STOPS (teal, calm, depth = count). */
   function triPt(j, U, O, depth) {
     depth = Math.max(1, Math.min(D.lines, Math.round(depth)));
@@ -834,7 +886,8 @@
     var r = O.size * scale * (1 - i / depth),
       cx = W * O.x,
       cy = H * O.y;
-    return spun(ngon(r, Math.max(3, Math.min(12, Math.round(O.sides))), -Math.PI / 2, U, cx, cy), O, cx, cy);
+    var ns = Math.max(3, Math.min(12, Math.round(O.sides)));
+    return spun(ngon(r, ns, -Math.PI / 2, U, cx, cy), O, cx, cy);
   }
   /* notice: the main lines lie end to end round one closed shape (5 lines on 4 sides: the junctions sit mid-side but one, at the start corner).
      noteAge runs a cycle of burn, hold, fade; noteFill says how far along line j the fuse has burnt; noteDone: the time is up */
@@ -881,7 +934,41 @@
   function sealLife(j) {
     return j < sealN() || j - sealN() < SEAL.inner ? 1 : 0;
   }
+  /* the point at share U (0..1) of the way round a closed polyline, by length */
+  function polyAt(P, U) {
+    var L = 0,
+      i,
+      n = P.length;
+    for (i = 0; i < n; i++) {
+      var nx = P[(i + 1) % n];
+      L += Math.hypot(nx[0] - P[i][0], nx[1] - P[i][1]);
+    }
+    var want = clamp(U) * L;
+    for (i = 0; i < n; i++) {
+      var a = P[i],
+        b = P[(i + 1) % n],
+        d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (want <= d || i === n - 1) {
+        var f = d > 0 ? Math.min(1, want / d) : 0;
+        return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+      }
+      want -= d;
+    }
+    return P[0];
+  }
+  /* the K inside the ring: the first inner line is its outline, the rest the key slot; each
+     traces in from sealAge 0 and the undrawn rest waits at the pen's tip */
+  function kPt(j, U) {
+    var k = j - sealN(),
+      R = SEAL.size * scale * KMARK.inner,
+      cx = W * SEAL.x,
+      cy = H * SEAL.y,
+      f = ease(clamp((sealAge - KMARK.stagger * k) / Math.max(0.05, KMARK.draw))),
+      p = polyAt(k ? K_SLOT : K_OUT, Math.min(U, f));
+    return spun([cx + p[0] * R, cy + p[1] * R], SEAL, cx, cy);
+  }
   function sealPt(j, U) {
+    if (st.mark === 'k' && j >= sealN()) return kPt(j, U);
     var n = sealN(),
       R = SEAL.size * scale,
       cx = W * SEAL.x,
@@ -923,6 +1010,100 @@
       cx,
       cy
     );
+  }
+  /* People: each burst rides one ring back and forth (a ping-pong of its own speed and start) and
+     swells to full light and away on its own beat, so no two move or flare together */
+  function peopleBursts(lines, e) {
+    var out = [],
+      n = Math.min(24, Math.round(PEOPLE.bursts)),
+      rad = PEOPLE.burstSize * scale;
+    if (e < 0.02) return out;
+    for (var q = 0; q < n; q++) {
+      var L = lines[q % D.lines],
+        a = (q * 0.618) % 1,
+        b = (q * 0.414) % 1,
+        f = (lclk * PEOPLE.burstRun * (0.6 + 0.8 * a) + 2 * b) % 2,
+        id = Math.floor((f < 1 ? f : 2 - f) * (S - 1)),
+        lx = L.xs[id];
+      if (L.a < 0.1 || lx === null || lx === undefined) continue;
+      var beat = (TAU * lclk) / (PEOPLE.burstS * (0.7 + 0.6 * b)) + q * 1.7,
+        flare = Math.pow(0.5 + 0.5 * Math.sin(beat), 3),
+        P = new Path2D();
+      P.arc(lx, L.ys[id], rad * (0.6 + 0.6 * flare), 0, TAU);
+      out.push({ P: P, a: e * flare });
+    }
+    return out;
+  }
+  /* lift: a shape point moved up and made smaller around the screen centre; M = its mix weight */
+  function liftPt(px, py, M) {
+    var z = 1 - liftE;
+    return [(W / 2 + (px - W / 2) * z) * M, (H / 2 + (py - H / 2) * z - H * liftE) * M];
+  }
+  /* sparks: one comet per main line at most; none on a stopped account */
+  function stepSparks(dt, m) {
+    for (var j = 0; j < D.lines; j++) {
+      var s = sparks[j];
+      if (s) sparks[j] = (s.age += dt) > SPARK.run ? null : s;
+      else if (m !== 'stopped' && Math.random() < dt / Math.max(0.2, SPARK.every * D.lines))
+        sparks[j] = { age: 0 };
+    }
+  }
+  function artPt(j, U) {
+    return artMode === 'beat' ? beatPt(j, U) : coinPt(j, U);
+  }
+  /* the heartbeat: x across the screen, y the ECG trace running left; the lines lie a hair apart */
+  function beatPt(j, U) {
+    var t = U * BEAT.beats + artAge * BEAT.speed,
+      f = t - Math.floor(t),
+      i = 1;
+    while (i < ECG.length - 1 && ECG[i][0] < f) i++;
+    var a = ECG[i - 1],
+      b = ECG[i],
+      v = a[1] + ((b[1] - a[1]) * (f - a[0])) / Math.max(1e-6, b[0] - a[0]);
+    var x = W * (0.5 + (U - 0.5) * BEAT.width);
+    return [x, H * BEAT.y - v * BEAT.amp * scale + (j - (D.lines - 1) / 2) * BEAT.spread * scale];
+  }
+  /* the stamp's height through one period: down, held, lifted away (1 = up, 0 = on the coin) */
+  function coinUp() {
+    var f = (artAge % COIN.period) / COIN.period;
+    return f < 0.35 ? 1 - ease(f / 0.35) : f < 0.75 ? 0 : ease((f - 0.75) / 0.25);
+  }
+  /* the coin: lines 0 and 1 its two rims, the rest the stamp's ring pressing down with the code */
+  function coinPt(j, U) {
+    var R = COIN.size * scale,
+      cx = W * COIN.x,
+      cy = H * COIN.y;
+    if (j < 2) return ngon(R * (j ? 0.82 : 1), 36, -Math.PI / 2, U, cx, cy);
+    var up = coinUp();
+    return ngon(R * 0.64 * (1 + 0.4 * up), 36, -Math.PI / 2, U, cx, cy - up * COIN.drop * H);
+  }
+  /* the code itself, letter by letter round the band between the rims; it presses down with the
+     stamp and lands crisp (drawn over the lines, in the ribbon's teal, a soft glow) */
+  function coinCode(g) {
+    var a = artMode === 'coin' ? ease(artT) : 0;
+    if (a < 0.02) return;
+    var up = coinUp(),
+      z = 1 - liftE,
+      c = liftPt(W * COIN.x, H * COIN.y - up * COIN.drop * H, 1),
+      r = COIN.size * scale * 0.91 * (1 + 0.4 * up) * z,
+      n = CODE_RING.length,
+      fs = Math.min(10 * scale, (TAU * r) / n / 0.6);
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    g.font = '500 ' + fs.toFixed(2) + 'px ui-monospace, Menlo, Consolas, monospace';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = 'rgba(142,232,218,' + (a * (1 - 0.55 * up)).toFixed(3) + ')';
+    g.shadowColor = 'rgba(142,232,218,' + (0.8 * GLOW_ALL).toFixed(3) + ')';
+    g.shadowBlur = 5 * scale;
+    for (var i = 0; i < n; i++) {
+      var t = -Math.PI / 2 + (TAU * i) / n;
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.translate(c[0] + Math.cos(t) * r, c[1] + Math.sin(t) * r);
+      g.rotate(t + Math.PI / 2);
+      g.fillText(CODE_RING.charAt(i), 0, 0);
+    }
+    g.restore();
   }
   /* sending / receiving: the last line is the still core, the first RING.count lines are the moving shapes, and any left over
      hide in the core. t runs 0 at the core to 1 far out, forward when sending, backward when receiving, so the same
@@ -1007,7 +1188,8 @@
       eC = ease(ringT),
       eP = ease(priceT),
       eK = ease(peopleT),
-      m = eL + eS + eN + eT + eB + eC + eP + eK;
+      eA = ease(artT),
+      m = eL + eS + eN + eT + eB + eC + eP + eK + eA;
     var mm = ease(mixT);
     if (m > 0) {
       var kk = mm / m;
@@ -1019,6 +1201,7 @@
       eC *= kk;
       eP *= kk;
       eK *= kk;
+      eA *= kk;
       m = mm;
     } else {
       m = 0;
@@ -1167,8 +1350,8 @@
     g.lineCap = 'round';
     g.lineJoin = 'round';
     var arr = ease(
-      clamp((clock - 0.5) / 2.6)
-    ); /* the fine tendrils arrive over the first seconds, out of the main lines, instead of sitting there first */
+      clamp((arrAge - ARRIVE.after) / Math.max(0.1, ARRIVE.grow))
+    ); /* fine tendrils arrive out of the main lines on every arrival, never there first */
     for (j = 0; j < count; j++) {
       var fine = j >= D.lines,
         F = fine ? FINE[j - D.lines] : null,
@@ -1240,12 +1423,19 @@
             br = eB > 0 ? sealPt(j, U) : [0, 0],
             ch = eC > 0 ? ringPt(j, U) : [0, 0],
             pr = eP > 0 ? pricePt(U) : [0, 0],
-            pk = eK > 0 ? peoplePt(j, U) : [0, 0];
+            pk = eK > 0 ? peoplePt(j, U) : [0, 0],
+            ar = eA > 0 ? artPt(j, U) : [0, 0];
           var sw = Math.max(0, CHANGE.sweep),
             M = ease(clamp(m * (1 + sw) - sw * U)),
             Mk = M / m; /* each point crosses over in its own moment, so the line pours into the shape */
-          x = x * (1 - M) + (q[0] * eL + t[0] * eS + t2[0] * eT + kn[0] * eN + br[0] * eB + ch[0] * eC + pr[0] * eP + pk[0] * eK) * Mk;
-          y = y * (1 - M) + (q[1] * eL + t[1] * eS + t2[1] * eT + kn[1] * eN + br[1] * eB + ch[1] * eC + pr[1] * eP + pk[1] * eK) * Mk;
+          var sx = q[0] * eL + t[0] * eS + t2[0] * eT + kn[0] * eN + br[0] * eB,
+            sy = q[1] * eL + t[1] * eS + t2[1] * eT + kn[1] * eN + br[1] * eB;
+          sx += ch[0] * eC + pr[0] * eP + pk[0] * eK + ar[0] * eA;
+          sy += ch[1] * eC + pr[1] * eP + pk[1] * eK + ar[1] * eA;
+          var sh = [sx * Mk, sy * Mk];
+          if (liftE > 0.001 && M > 0) sh = liftPt(sh[0] / M, sh[1] / M, M);
+          x = x * (1 - M) + sh[0];
+          y = y * (1 - M) + sh[1];
         }
         var fade = 1;
         if (heir) {
@@ -1285,6 +1475,12 @@
           fireHead
         );
         if (fc) fires.push({ P: fc.P, G: fc.G, a: Math.min(1, FIRE.bright * A) });
+      }
+      var sk = !fine && m < 0.6 ? sparks[j] : null;
+      if (sk) {
+        var sv = uOf(-0.1 + (1.3 * sk.age) / SPARK.run),
+          sc = comet(xs, ys, thick * JELLY.line * 3 * SPARK.size, sv, fw, tint, 1);
+        if (sc) fires.push({ P: sc.P, G: sc.G, a: Math.min(1, SPARK.bright * A * (1 - m)) });
       }
     }
     var bars = null,
@@ -1452,6 +1648,9 @@
       }
       shapeL.push({ P: P, a: o[1] });
     });
+    peopleBursts(lines, eK).forEach(function (b) {
+      shapeL.push(b);
+    });
     /* small copy for the glow: everything, the out-of-focus tendrils only here */
     var S0 = bloom[0],
       B = S0.g,
@@ -1519,7 +1718,8 @@
       B.fill(p.P);
     });
     B.globalAlpha = 1;
-    halate(JELLY.halation * (1 + 1.2 * charge) * (1 + glow / 16) * (1 + JELLY.breath * Math.sin((TAU * clock) / 11)));
+    var breath = 1 + JELLY.breath * Math.sin((TAU * clock) / 11);
+    halate(GLOW_ALL * JELLY.halation * (1 + 1.2 * charge) * (1 + glow / 16) * breath);
     if (touchA > 0.01 && FINGER.glow > 0) {
       /* and a smooth one on the frame itself, so the finger reads at once */
       var tr2 = 55 * scale * FINGER.glow,
@@ -1650,6 +1850,7 @@
       g.drawImage(grain, 0, 0);
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
+    coinCode(g);
     g.globalCompositeOperation = 'source-over';
     if (K > 0.9) {
       g.beginPath();
@@ -1707,12 +1908,28 @@
     }
     var dt = Math.min(0.033, (now - prev) / 1000 || 0.016),
       t0 = performance.now();
+    if (now < restUntil) {
+      /* a very slow phone: the last frame took long, so leave the main thread free a while. pace()
+         is
+         handed the slow frame's own overrun (the first skipped interval) but never the rest after
+         it */
+      if (lastRaf > prev) prev += now - lastRaf;
+      lastRaf = now;
+      return;
+    }
     for (var s = 0; s < 3; s++) step(dt / 3);
     fNo++;
     draw();
-    if (prev) pace(now - prev, performance.now() - t0);
-    prev = now;
+    var work = performance.now() - t0;
+    if (prev) pace(now - prev, work);
+    prev = lastRaf = now;
+    /* rest until 5 x work after the frame's start: at most a fifth of the time drawing, so taps and
+       the bridge
+       never wait seconds */
+    restUntil = work > 120 ? now + work * 5 : 0;
   }
+  var restUntil = 0,
+    lastRaf = 0;
 
   window.KVScene = {
     init: function (el) {
@@ -1734,7 +1951,11 @@
         if (o[n] !== undefined) {
           if (n === 'snap') {
             if (o[n]) wantSnap = true;
-          } else st[n] = o[n];
+          } else {
+            /* the K draws in on each arrival */
+            if (n === 'mark' && o[n] === 'k' && st.mark !== 'k') sealAge = 0;
+            st[n] = o[n];
+          }
         }
     },
     pulse: function (kind) {
@@ -1771,6 +1992,8 @@
       stops: STOPS,
       heir: HEIR,
       seal: SEAL,
+      kmark: KMARK,
+      arrive: ARRIVE,
       people: PEOPLE,
       price: PRICE,
       accent: ACCENT,

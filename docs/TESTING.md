@@ -2,12 +2,16 @@
 
 KaspaVault is checked in four layers. Each proves something the others cannot.
 
+Terms: this document keeps the engine's words for the covenant. The *vault* or *account* is the covenant coin; the
+*safe* is the 2-of-3 multisig address that the app calls the vault, opened by any two of the three vault seeds; each
+*stop key* sits behind one of the app's emergency stop buttons; the heir waits out the app's inactivity period.
+
 | Layer | Proves | Cannot prove |
 |---|---|---|
-| Engine proofs | The compiled covenant accepts every legitimate transaction shape and refuses every attack shape, in the real Kaspa script engine | That time really passes, or that consensus enforces the timelocks |
-| Mutation testing | Every check in the covenant is needed by some test | That the tests cover attacks nobody thought of |
-| Testnet runs | Consensus enforces the rules on a live network: timelocks, the limit, lineage, fees and storage mass | Mainnet conditions |
-| Wallet and page tests | The engine's account handling, the page's data layer and house rules, and that every screen draws without a script error | The covenant itself |
+| Engine proofs | The compiled covenant accepts each legitimate transaction shape in the test matrix and refuses each attack shape in it, in the real Kaspa script engine | Attack shapes nobody wrote down; that time really passes, or that consensus enforces the timelocks |
+| Mutation testing | Each `require` line in the covenant, and each lineage and state helper call, is needed by some test (five listed duplicates aside) | Anything in `if` conditions or arithmetic, which it does not mutate; attacks nobody thought of |
+| Testnet runs | Consensus on a live network enforces the time rules listed in section 3 (notice delay, limit window, heir delay) and the limit | Rules not run there (the hard-limit dial); mainnet conditions |
+| Wallet and page tests | The engine's account handling, the page's data layer and house rules, and that each screen the smoke test reaches draws without a script error | The covenant itself |
 
 ## 1. Engine proofs
 
@@ -25,7 +29,9 @@ that the engine accepts or refuses it.
   vault coins sharing an output, altered continuation state or script, a stripped covenant binding, two
   continuations, non-SIGHASH_ALL signatures, dust and malformed requests, early inheritance, and requests with the hard
   limit on. The current run accepts 76 legitimate transactions and refuses 244 attacks.
-- `tests/review2.rs`: proof cases written by an independent reviewer (6 accepted, 79 refused).
+- `tests/review2.rs`: proof cases written during an adversarial review (6 accepted, 79 refused). The reviewers were
+  separate AI model sessions given the code without the authors' reasons, not independent human auditors; no
+  third-party audit has been done.
 
 ```bash
 cd engine-tests
@@ -37,9 +43,11 @@ The test reads the contract from `VAULT_SRC` when set, else `../contracts/vault.
 
 ## 2. Mutation testing
 
-`tools/mutate.py` breaks one check at a time (deletes each `require`, flips each comparison, deletes each lineage and
-state check), recompiles, and reruns the engine test binary. A mutant that still passes every test marks a check that
-is untested or redundant.
+`tools/mutate.py` breaks one check at a time, recompiles, and reruns the engine test binary. It deletes each
+`require(` line, flips the comparisons inside it (the first `>=`, `<=`, `<`, `>` or `==` of each kind), and deletes
+each call to `soloVaultInput`, `soloContinuation` and `validateOutputState`. A mutant that still passes every test
+marks a check that is untested or redundant. It does not mutate `if` conditions or arithmetic, so those are covered
+only by the engine proofs.
 
 ```bash
 (cd engine-tests && cargo test --test vault --no-run)   # note the path of the test executable it prints
@@ -60,7 +68,7 @@ Mutation testing has been repeated after every contract change.
 
 ## 3. Testnet runs (testnet-10)
 
-The `testnet-client` command-line driver ran every entry against public testnet-10 nodes (node version 2.1.0), with a
+The `testnet-client` command-line driver ran each entry below against public testnet-10 nodes (node version 2.1.0), with a
 watcher following each account and, where noted, stop and safe keys signing on an offline device. Testnet dials: limit
 1 KAS per 1,200 DAA, notice delay 3,000 DAA, heir delay 3,000 DAA, fee allowance 0.05 KAS, remainder floor 1 KAS.
 
@@ -72,11 +80,11 @@ Key results:
 - **Consensus enforces the limit.** A spend over the limit forced past the wallet's own check was refused by the node
   ("script ran, but verification failed").
 - **The window resets** after a full window: a third spend opened a new window and the counter restarted.
-- **Early inheritance is refused** by the node; inheritance after the silence pays the heir, and from a Pending coin it
+- **Early inheritance is refused** by the node; inheritance after the inactivity period pays the heir, and from a Pending coin it
   pays the waiting request first.
 - **Stop keys 1, 2 and 3** each cancelled an account to the 2-of-3 safe, signed offline where noted; decline worked
   online and offline, and a request still finished normally after two declines.
-- **Keyless inheritance** was sent by the watcher itself the moment the silence passed.
+- **Keyless inheritance** was sent by the watcher itself the moment the inactivity period passed.
 
 ### Transaction ids, first contract versions
 
@@ -114,7 +122,7 @@ Three stop keys, 2-of-3 safe, top-up, inheritance; then the hardened revisions, 
 | 8 | cancel by stop key 2, signed offline | `31a8d7b8f67fd219a715a12b543fd243753d7ace7e33c1f73eb4f6168c22d19d` | accepted |
 | 9 | fund 2 | `d90d55613be50c3893941450acfef133f229dd6e435302cec0c08062c7d113de` | accepted |
 | 9 | request 0.5 | `71bd6ea5fcaa985833973d25f5bfd198c52ff515e39fe27ae59357cd002f2523` | accepted |
-| 9 | inherit after the silence | `e48fb5050afdf136b2880a0c0d4c1657f8e1db0e109ee7114ca2b5670291fae4` | accepted; on this earlier version the whole coin went to the heir |
+| 9 | inherit after the inactivity period | `e48fb5050afdf136b2880a0c0d4c1657f8e1db0e109ee7114ca2b5670291fae4` | accepted; on this earlier version the whole coin went to the heir |
 | 10 | fund 1.5 | `2f253045ea04222675ce1db023fd485fc6894da083d619327465cbf861e2e0ee` | accepted |
 | 10 | cancel by stop key 3, signed offline | `ab1bce5f93588b77a18e60770f7df5b21e943efbaa6fe18af77edad60d5b322d` | accepted |
 | 12 | fund 3 | `56c01342d5b9a520371c9455f67eb4efd83e8d34d88148b1a4d0018dc8b64691` | accepted |
@@ -128,7 +136,7 @@ Three stop keys, 2-of-3 safe, top-up, inheritance; then the hardened revisions, 
 | 13 | finish early, then after the delay | `ef058d34f63f9710ed08a3ba4e61ed50a1b95d99ea9e0a2f89be06e5915f9244` | refused by the node, then the same id accepted |
 | 14 | fund 3 | `6980b2c139db38ec0d481aa32cff5c9b20df17381c0675e0042917d12138e331` | accepted |
 | 14 | request 1 | `7c1daeaa2d10895fe298d3baebd74ad73b21bcb8a60d4fc4601a7bae92f96678` | accepted |
-| 14 | inherit from Pending, early, then after the silence | `d7a9de722c18960b2a2d6dfe069f6827ac7f1541f6c1f327daf698309cb8d5b0` | refused by the node, then the same id accepted; the request paid first, the rest to the heir |
+| 14 | inherit from Pending, early, then after the inactivity period | `d7a9de722c18960b2a2d6dfe069f6827ac7f1541f6c1f327daf698309cb8d5b0` | refused by the node, then the same id accepted; the request paid first, the rest to the heir |
 | 15 | cancel of an account at the floor, signed offline | `2b0bb37a9003029d3330319e72e84a62440e8738839154fd1ed10e484db7b366` | accepted; the account paid its own way out |
 | 16 | top-up 0.1 (staging, top-up) | `aacddd09fa8bcba5001dd1b7ecb97cc579dc3bce613aebca9f1a4c0fa2fa7989`, `7be3b5158663e2c60518b5009ca5c01eea3151b6b760cdbab9092f528786a21f` | accepted |
 | 16 | request 1 | `59aefb82d077f7204d50005924b8bbb6882d6d5884906ee4c9deb99690c992be` | accepted |
@@ -143,10 +151,26 @@ Three stop keys, 2-of-3 safe, top-up, inheritance; then the hardened revisions, 
 | 17 | keyless inheritance, early, then sent by the watcher | `b143cd8f7e611b90a46048ef7ca1bf01e7e3ba7cb9459c3eca32cd3def1767f3` | refused by the node, then the same id accepted |
 
 Account 9 ran on the version before inheritance from Pending was changed to honour the waiting payment first; account
-14 shows the corrected behaviour. All ids can be looked up on any testnet-10 explorer.
+14 shows the corrected behaviour. The full ids can be looked up on a testnet-10 explorer.
 
-Not yet on chain: the hard-limit dial (proven in the engine and by mutation testing) and the full proof round from the
+Not yet on chain: the hard-limit dial (covered by the engine proofs and mutation testing) and the full proof round from the
 phone on mainnet.
+
+### Guardians and heirs on a second phone
+
+`testnet-client/tests/link_proof.rs` drives two engines in the phone's shape (public keys held, a secret armed per
+call): an owner and a helper who is both guardian (stop slot 2) and heir. Testnet dials as above.
+
+| Step | What happened | Tx (prefix) | Result |
+|---|---|---|---|
+| link | the helper makes a link code; the owner reads it and puts the helper's stop key and heir key in the rules, then opens the account | `047b728e` | accepted |
+| watch | the owner exports a watch file; the helper's phone follows the account (open, then waiting after a payment above the limit) | `17ef305f` | follower saw it within ~20 s |
+| guardian stop | the helper stops the account; the covenant pays only the owner's safe | `d0e34ca8` | accepted |
+| owner after the stop | the owner's record never saw the stop: the engine asks the node which coin in the safe came from this account, takes out only that coin and opens again | `b7ac8f35`, `709b0b86` | accepted |
+| heir claim | after the inactivity period the helper claims; the claim lands at the helper's heir address | `088841d6` | accepted |
+| heir spends | the helper spends what the claim paid (`heir.purse`, `heir.pay`) | `4810bf50` | accepted |
+| guardian removed | the owner removes the guardian: the slot gets a key nobody holds, the account is stopped, taken out and opened again | `28e28a72`, `d5d3e099`, `2768c142` | accepted |
+| claim clock | a top-up restarts the heir clock; a claim pressed at once is refused by the app with the time left and nothing is sent; the claim when due pays | `545e7e4c`, `8c8a6ed6` | refused early, accepted on time |
 
 ## 4. Wallet engine and page tests
 

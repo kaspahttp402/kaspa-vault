@@ -69,15 +69,19 @@ import java.security.SecureRandom;
 public class MainActivity extends Activity {
     /** The only preference keys the page may read or write. */
     static final Set<String> SETTINGS = new HashSet<>(Arrays.asList(
-            "live_base", "live_on", "welcomed", "screenshots", "currency", "alert_push", "alert_email", "balance_money",
+            "welcomed", "screenshots", "currency", "alerts_seen", "balance_money",
             "only_trusted", "watch_only", "clip_check", "panic_pin", "alert_second", "watch_phone", "send_grace", "colors",
-            "live_network", "live_local", "guard_nodes", "auto_heir", "guard_on", "signer_window", "lock_after", "last_balances", "toured", "alert_ack_at", "rules_move",
-            "chart_ma20", "chart_ma50", "chart_fib", "price_saved"));
-    /** Screens that show words or move money: in Live mode they are always FLAG_SECURE, whatever Preferences says. */
-    private static final Set<String> SENSITIVE = new HashSet<>(Arrays.asList(
-            "words", "wordcheck", "restore", "movein", "send", "waiting", "sent", "pending", "stop", "stopdone", "safe", "takeout",
-            "receive", "watcher", "guard", "keys", "makekeys", "sheet", "sheetcheck", "keysdrawer",
-            "showsheets", "burnsheets", "takeoutwords", "pursepay", "topup", "fundacct", "keysmade"));
+            "live_network", "live_local", "guard_nodes", "signer_window", "lock_after", "last_balances", "toured", "alert_ack_at", "rules_move",
+            "chart_ma20", "chart_ma50", "price_saved", "helper_names",
+            "paper_shown")); // paper_shown: a reminder flag only (the page compares the code last shown)
+    /**
+     * The only screens Preferences > Allow screenshots may open to capture: no words, no keys, no
+     * money action. Any other name, unknown or added later, keeps FLAG_SECURE (fails closed).
+     */
+    private static final Set<String> SHOT_OK = new HashSet<>(Arrays.asList(
+            "welcome", "home", "price", "coins", "statements", "alerts", "people", "persondetail",
+            "watched", "protection", "heirclock", "linkcode", "watchcode", "paperprint", "glossary", "howitworks",
+            "settings", "prefs", "about"));
     /** Page console lines are cut to this many characters before they reach the device log. Dial. */
     private static final int LOG_MAX_CHARS = 200;
 
@@ -99,6 +103,7 @@ public class MainActivity extends Activity {
             if (ks.containsAlias(Signer.KEY_ALIAS_V1) || ks.containsAlias(Signer.KEY_ALIAS_V2)) { signer.forgetSecrets(); notice = Signer.REPAIR_NOTICE; }
         } catch (Exception ignored) { }
         applySecure();
+        vaultThread.execute(signer::ensureCanary); // the fingerprint check exists before any finger prompt (none needed)
         if (VaultLib.AVAILABLE) { // the engine's state lives under files/vault/<network>; a failed init is logged, never a crash
             String network = prefs.getString("live_network", "");
             if (network.isEmpty()) network = "mainnet"; // live by default; "testnet" only when the setting says so
@@ -117,6 +122,8 @@ public class MainActivity extends Activity {
             });
         }
 
+        // Remote debugging of the page only in a debuggable build (KV_DEBUGGABLE=1: test phones and emulators, never a money phone).
+        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) WebView.setWebContentsDebuggingEnabled(true);
         web = new WebView(this);
         web.setBackgroundColor(Color.parseColor("#06070c"));
         web.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -142,7 +149,8 @@ public class MainActivity extends Activity {
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 return !isAppPage(r.getUrl().toString());
             }
-            // Scripts run only on the bundled pages, and the page itself fetches nothing else: the laptop is reached through Bridge.http.
+            // Scripts run only on the bundled pages, and the page itself fetches nothing:
+            // the engine runs in the app (Bridge.vault), the price comes via Bridge.price.
             @Override public void onPageStarted(WebView v, String url, Bitmap favicon) {
                 v.getSettings().setJavaScriptEnabled(isAppPage(url));
             }
@@ -172,6 +180,8 @@ public class MainActivity extends Activity {
         });
         setContentView(insets.frame());
         web.loadUrl("file:///android_asset/web/index.html");
+        // The guard the user turned on comes back when the app opens (after an update, a restart or a kill).
+        if ("1".equals(prefs.getString(InsetsGuard.GUARD_WANTED, "")) && !GuardService.RUNNING) insets.guardOn(true);
         pendingOpen = shortcutScreen(getIntent());
 
         getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT,
@@ -219,60 +229,26 @@ public class MainActivity extends Activity {
         pendingOpen = shortcutScreen(i); openPending();
     }
 
-    boolean live() { return "1".equals(prefs.getString("live_on", "")); }
+    /**
+     * The page's own engine mode (data.js isLocal, setting live_local). Page-writable, so it only
+     * words a failed prompt (Signer); it never decides FLAG_SECURE.
+     */
+    boolean live() { return "1".equals(prefs.getString("live_local", "")); }
 
     /**
-     * FLAG_SECURE blocks screenshots and screen recording. Preferences > Allow screenshots can lift it only in Sample
-     * mode, or in Live mode on a screen with no words and no money action. Decided here, never by the page.
+     * FLAG_SECURE blocks screenshots and screen recording. Preferences > Allow screenshots lifts it
+     * only on a SHOT_OK screen, in Live and Sample alike: live_local is page-writable, so it may
+     * not open a words or money screen. Decided here, never by the page.
      */
     void applySecure() {
-        boolean allow = "on".equals(prefs.getString("screenshots", "off")) && !(live() && SENSITIVE.contains(screen));
+        boolean allow = "on".equals(prefs.getString("screenshots", "off"))
+                && SHOT_OK.contains(screen);
         if (allow) getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
         else getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
     }
 
 
     private static boolean isAppPage(String url) { return url != null && url.startsWith("file:///android_asset/"); }
-
-    /** https only, only to a home-network IPv4 address, and once a laptop address is saved only to that host. */
-    boolean allowedUrl(String url) {
-        try {
-            URL u = new URL(url);
-            if (!"https".equals(u.getProtocol())) return false;
-            if (!privateHost(u.getHost())) return false;
-            String paired = hostOf(prefs.getString("live_base", ""));
-            return paired.isEmpty() || paired.equals(u.getHost());
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    /** A dotted-quad address in a private range (RFC 1918: 10/8, 172.16/12 or the class-C /16). No names, no public hosts, no 127/8. */
-    static boolean privateHost(String host) {
-        if (host == null) return false;
-        String[] p = host.split("\\.");
-        if (p.length != 4) return false;
-        int[] q = new int[4];
-        for (int i = 0; i < 4; i++) {
-            if (!p[i].matches("\\d{1,3}")) return false;
-            q[i] = Integer.parseInt(p[i]);
-            if (q[i] > 255) return false;
-        }
-        return q[0] == 10 || (q[0] == 172 && q[1] >= 16 && q[1] <= 31) || (q[0] == 192 && q[1] == 168);
-    }
-
-    /** Host part of a saved laptop address, typed with or without a scheme; "" when there is none. */
-    static String hostOf(String base) {
-        try {
-            String b = base == null ? "" : base.trim();
-            if (b.isEmpty()) return "";
-            if (!b.matches("(?i)^https://.*")) b = "https://" + b;
-            String h = new URL(b).getHost();
-            return h == null ? "" : h;
-        } catch (Exception e) {
-            return "";
-        }
-    }
 
     /** A one-time message for the page (window.KV_notice), sent once the page is up. */
     String notice = null;
@@ -298,62 +274,17 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** host:port of a URL (default 443), the unit a pin belongs to. */
-    static String hostPort(String url) {
-        try {
-            URL u = new URL(url);
-            return u.getHost() + ":" + (u.getPort() < 0 ? 443 : u.getPort());
-        } catch (Exception e) {
-            return "";
-        }
+    /** After onCreate: an old install's laptop-pairing secrets go (Signer.dropLaptopSecrets). */
+    @Override protected void onPostCreate(Bundle state) {
+        super.onPostCreate(state);
+        signer.dropLaptopSecrets();
     }
-
-    /**
-     * The certificate hash seen by the last peek(), usable by http() for that host:port only, until the page stores the
-     * pin (the user said the words match) or clears it (the user said no). Pairing needs it: /pair and the first status
-     * are fetched before the pin is saved.
-     */
-    String pendingPin = "", pendingHost = "";
-    /** The stored pin, read at the in-app prompt that opens the secrets and kept for this run. */
-    String livePin = "";
-
-    /** No CA store: the server certificate is trusted when, and only when, its SHA-256 equals the pin. */
-    static SSLContext pinned(String pinHex, boolean[] mismatch) throws Exception {
-        TrustManager tm = new X509TrustManager() {
-            public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
-                if (chain == null || chain.length == 0) throw new CertificateException("no certificate");
-                byte[] seen = sha256Hex(chain[0]).getBytes(StandardCharsets.US_ASCII);
-                byte[] want = pinHex.getBytes(StandardCharsets.US_ASCII);
-                if (pinHex.length() != 64 || !MessageDigest.isEqual(seen, want)) { mismatch[0] = true; throw new CertificateException("pin"); }
-            }
-            public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException { throw new CertificateException(); }
-            public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-        };
-        SSLContext ctx = SSLContext.getInstance("TLS");
-        ctx.init(null, new TrustManager[]{tm}, null);
-        return ctx;
-    }
-
-    /** Trusts nothing: only records the certificate the laptop presents, for the first look at pairing. */
-    static SSLContext peeking(String[] seen) throws Exception {
-        TrustManager tm = new X509TrustManager() {
-            public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
-                if (chain == null || chain.length == 0) throw new CertificateException("no certificate");
-                seen[0] = sha256Hex(chain[0]);
-            }
-            public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException { throw new CertificateException(); }
-            public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-        };
-        SSLContext ctx = SSLContext.getInstance("TLS");
-        ctx.init(null, new TrustManager[]{tm}, null);
-        return ctx;
-    }
-
-
 
     // The page locks the moment it is put away (KV_pause / KV_resume): a paused WebView may not fire visibilitychange.
     @Override protected void onPause() { super.onPause(); web.evaluateJavascript("window.KV_pause&&KV_pause()", null); web.onPause(); }
     @Override protected void onResume() { super.onResume(); web.onResume(); web.evaluateJavascript("window.KV_resume&&KV_resume()", null); }
+    /** Put away (home, other app, screen off): a picked-up phone needs a new prompt. */
+    @Override protected void onStop() { signer.shutSigner(); super.onStop(); }
     @Override protected void onDestroy() { web.destroy(); super.onDestroy(); }
     @Override public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
         super.onRequestPermissionsResult(code, perms, res);

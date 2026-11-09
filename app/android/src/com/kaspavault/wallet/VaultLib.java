@@ -36,4 +36,10 @@ final class VaultLib {
 
     /** JNI symbol Java_com_kaspavault_wallet_VaultLib_keysNew. Makes the three keys; 96 raw bytes, never a string. */
     static native byte[] keysNew(String argsJson);
+
+    /**
+     * JNI symbol Java_com_kaspavault_wallet_VaultLib_linkMake. Makes this phone's link (docs/LINK_DESIGN.md): raw bytes
+     * [guardian 32][heir 32] then UTF-8 JSON {"heir_words":[24 words]}; an empty array on a refusal, like keysNew.
+     */
+    static native byte[] linkMake(String argsJson);
 }

@@ -38,12 +38,22 @@ public final class GuardService extends Service {
     /** Set while the guard runs (the engine accepted guard.start); the page reads it through Bridge.guardRunning(). */
     static volatile boolean RUNNING = false;
 
-    private static final String CH_GUARD = "guard", CH_ALERTS = "guard_alerts";
+    private static final String CH_GUARD = "guard", CH_ALERTS = "guard_alarms_private";
     private static final int ID_GUARD = 1, ID_REFUSED = 2, ID_ALERT_BASE = 100;
     private static final int WAIT_MS = 30000;
     private static final int POLL_AWAKE = 3, POLL_BATTERY = 15;
     /** The newest alert time already shown, kept so a restart of the service does not alarm twice. */
     private static final String LAST_ALERT_PREF = "guard_last_alert_at";
+    /** Watched accounts (this phone is someone else's guardian or heir): notification ids sit above 1000, two per account. */
+    private static final int ID_WATCH_BASE = 1000;
+    private static final long WATCH_EVERY_MS = 25000;
+    /** Per watched id: the last waiting withdrawal already shown ("id|to|kas"), and whether "can be passed to you" was shown. */
+    private static final String WATCH_PENDING_PREF = "watch_pending_", WATCH_HEIR_PREF = "watch_heir_due_";
+    /** Alarm title and text are cut to these many characters (printable). Dials. */
+    private static final int TITLE_MAX = 80;
+    static final int TEXT_MAX = 400;
+    /** All a locked screen shows of an alarm: no amount, no address, no watched name. */
+    private static final String LOCKED_TEXT = "Alert. Unlock to check your account.";
 
     private final ExecutorService guardThread = Executors.newSingleThreadExecutor();   // sits on guard.wait
     private final ExecutorService controlThread = Executors.newSingleThreadExecutor(); // guard.start / guard.poll
@@ -52,6 +62,8 @@ public final class GuardService extends Service {
     private volatile boolean looping = false;
     private int currentPoll = -1;
     private int alertCount = 0;
+    private long lastWatchCheck = 0;
+    private boolean watchErrorLogged = false;
 
     private final BroadcastReceiver powerReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) { applyPoll(); }
@@ -61,12 +73,20 @@ public final class GuardService extends Service {
         super.onCreate();
         prefs = getSharedPreferences("kaspavault", Context.MODE_PRIVATE);
         notifications = getSystemService(NotificationManager.class);
-        NotificationChannel quiet = new NotificationChannel(CH_GUARD, "Guard", NotificationManager.IMPORTANCE_LOW);
-        quiet.setDescription("Shows that the guard is watching your savings account.");
-        NotificationChannel loud = new NotificationChannel(CH_ALERTS, "Guard alarms", NotificationManager.IMPORTANCE_HIGH);
-        loud.setDescription("Sounds when money leaves your savings account or the guard loses the network.");
+        NotificationChannel quiet = new NotificationChannel(CH_GUARD, "Alerts on this phone",
+                NotificationManager.IMPORTANCE_LOW);
+        quiet.setDescription("Shows that this phone is watching your account.");
+        NotificationChannel loud = new NotificationChannel(CH_ALERTS, "Alerts",
+                NotificationManager.IMPORTANCE_HIGH);
+        loud.setDescription("Sounds when money leaves your account or this phone loses touch.");
+        // hidden on a secure lock screen whatever the phone's own setting (a channel keeps the
+        // visibility it was first made with, so this reaches new installs; the notification's own
+        // VISIBILITY_PRIVATE covers phones that hide sensitive content)
+        loud.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
         notifications.createNotificationChannel(quiet);
         notifications.createNotificationChannel(loud);
+        // Android never updates an existing channel: the old public one is replaced by the private one above.
+        notifications.deleteNotificationChannel("guard_alerts");
         IntentFilter f = new IntentFilter();
         f.addAction(Intent.ACTION_POWER_CONNECTED);
         f.addAction(Intent.ACTION_POWER_DISCONNECTED);
@@ -78,7 +98,7 @@ public final class GuardService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (!VaultLib.AVAILABLE) { Log.w(TAG, "guard: no wallet engine in this build, stopping"); stopSelf(); return START_NOT_STICKY; }
         // The foreground promise comes first (Android's deadline), then the engine work on our own threads.
-        Notification first = guardNotification("Guard starting. Reaching the network...");
+        Notification first = guardNotification("Alerts starting. Reaching the network...");
         if (Build.VERSION.SDK_INT >= 34) startForeground(ID_GUARD, first, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else startForeground(ID_GUARD, first); // API 33 has no specialUse type: the manifest's type applies
         if (!looping) {
@@ -111,19 +131,21 @@ public final class GuardService extends Service {
             JSONObject body = env.optJSONObject("body");
             String error = body == null ? null : body.optString("error", "");
             if (status == 503) {
-                refuse(error == null || error.isEmpty() ? "The guard could not reach the network. Open KaspaVault and try again." : error);
+                refuse(error == null || error.isEmpty()
+                        ? "Alerts can't reach the network. Open KaspaVault and try again." : error);
                 return;
             }
             if (status != 200 || body == null || !body.optBoolean("ok", false)) {
-                refuse(error == null || error.isEmpty() ? "The guard could not start. Open KaspaVault and try again." : error);
+                refuse(error == null || error.isEmpty()
+                        ? "Alerts could not start. Open KaspaVault and try again." : error);
                 return;
             }
             RUNNING = true;
-            notifications.notify(ID_GUARD, guardNotification("Guard on. Reaching the network..."));
+            notifications.notify(ID_GUARD, guardNotification("Alerts on. Reaching the network..."));
             guardThread.execute(this::waitLoop);
         } catch (Throwable t) {
             Log.w(TAG, "guard.start failed: " + t);
-            refuse("The guard could not start. Open KaspaVault and try again.");
+            refuse("Alerts could not start. Open KaspaVault and try again.");
         }
     }
 
@@ -131,7 +153,7 @@ public final class GuardService extends Service {
     private void refuse(String text) {
         RUNNING = false;
         looping = false;
-        notifications.notify(ID_REFUSED, alertNotification("Guard off", text));
+        notifications.notify(ID_REFUSED, alertNotification("Alerts off", text));
         stopSelf();
     }
 
@@ -146,7 +168,8 @@ public final class GuardService extends Service {
                 int status = env.optInt("status", 0);
                 JSONObject body = env.optJSONObject("body");
                 if (status == 503 || body == null) {
-                    notifications.notify(ID_GUARD, guardNotification("Guard on. Waiting for the network..."));
+                    notifications.notify(ID_GUARD,
+                            guardNotification("Alerts on. Waiting for the network..."));
                     Thread.sleep(3000);
                     continue;
                 }
@@ -154,7 +177,8 @@ public final class GuardService extends Service {
                 String heard = body.isNull("seen_at") ? "Nothing heard from the network yet."
                         : "Last heard from the network " + Math.max(0, now - body.optLong("seen_at", now)) + " s ago";
                 boolean running = body.optBoolean("running", false);
-                notifications.notify(ID_GUARD, guardNotification((running ? "Guard on. " : "Guard stopped. ") + heard));
+                String head = running ? "Alerts on. " : "Alerts stopped. ";
+                notifications.notify(ID_GUARD, guardNotification(head + heard));
 
                 JSONArray alerts = body.optJSONArray("alerts");
                 long newest = lastShown;
@@ -164,15 +188,18 @@ public final class GuardService extends Service {
                     long at = a.optLong("at", 0);
                     if (at <= lastShown) continue;
                     String text = a.optString("text", "");
-                    if (text.isEmpty()) text = "The guard raised an alarm. Open KaspaVault.";
-                    notifications.notify(ID_ALERT_BASE + (alertCount++ % 50), alertNotification("Guard alarm", text));
+                    if (text.isEmpty()) text = "Caught by your alerts. Open KaspaVault.";
+                    notifications.notify(ID_ALERT_BASE + (alertCount++ % 50),
+                            alertNotification("Caught by your alerts", text));
                     if (at > newest) newest = at;
                 }
                 if (newest != lastShown) { lastShown = newest; prefs.edit().putLong(LAST_ALERT_PREF, lastShown).apply(); }
+                checkWatched();
 
                 if (!running) {
                     String exited = body.isNull("exited") ? "" : body.optString("exited", "");
-                    refuse(exited.isEmpty() ? "The guard stopped. Open KaspaVault to start it again." : exited);
+                    refuse(exited.isEmpty()
+                            ? "Alerts stopped. Open KaspaVault to start them again." : exited);
                     return;
                 }
             } catch (InterruptedException e) {
@@ -182,6 +209,91 @@ public final class GuardService extends Service {
                 try { Thread.sleep(3000); } catch (InterruptedException e) { return; }
             }
         }
+    }
+
+    /**
+     * Accounts this phone watches for other people (guardian and/or heir): at most every 25 s, watch.list then watch.status
+     * per id. A new waiting withdrawal (id + to + kas, kept in prefs so a restart does not repeat it) and heir_due turning
+     * true each raise one alarm. Any failure here (an engine without watch.*, no network) is logged once and otherwise
+     * ignored, so it never disturbs the own-account guard above.
+     */
+    private void checkWatched() {
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - lastWatchCheck < WATCH_EVERY_MS) return;
+        lastWatchCheck = nowMs;
+        try {
+            JSONObject list = watchBody("watch.list", "{}");
+            if (list == null) return;
+            JSONArray watched = list.optJSONArray("watched");
+            if (watched == null) return;
+            for (int i = 0; i < watched.length(); i++) {
+                JSONObject w = watched.optJSONObject(i);
+                if (w == null) continue;
+                String id = w.optString("id", "");
+                if (id.isEmpty()) continue;
+                JSONObject args = new JSONObject();
+                args.put("id", id);
+                JSONObject st = watchBody("watch.status", args.toString());
+                if (st == null) continue;
+                String name = st.optString("name", "");
+                if (name.isEmpty()) name = w.optString("name", "");
+                if (name.isEmpty()) name = "A watched";
+                JSONObject roles = st.optJSONObject("roles");
+                if (roles == null) roles = w.optJSONObject("roles");
+                boolean guardian = roles != null && roles.has("guardian") && !roles.isNull("guardian");
+                int base = ID_WATCH_BASE + (id.hashCode() & 0x3fff) * 2;
+
+                JSONObject pending = st.optJSONObject("pending");
+                if (pending != null) {
+                    String kas = kasText(pending.opt("kas"));
+                    String key = id + "|" + pending.optString("to", "") + "|" + kas;
+                    if (!key.equals(prefs.getString(WATCH_PENDING_PREF + id, ""))) {
+                        String text = "A withdrawal of " + kas + " KAS is waiting." + (guardian ? " Open the wallet to stop it." : "");
+                        notifications.notify(base, alertNotification(name + "'s account", text));
+                        prefs.edit().putString(WATCH_PENDING_PREF + id, key).apply();
+                    }
+                }
+
+                boolean due = st.optBoolean("heir_due", false);
+                boolean shown = prefs.getBoolean(WATCH_HEIR_PREF + id, false);
+                if (due && !shown) {
+                    notifications.notify(base + 1, alertNotification(name + "'s account",
+                            name + "'s account can now be passed to you. Open the wallet to claim it."));
+                    prefs.edit().putBoolean(WATCH_HEIR_PREF + id, true).apply();
+                } else if (!due && shown) {
+                    prefs.edit().putBoolean(WATCH_HEIR_PREF + id, false).apply();
+                }
+            }
+        } catch (Throwable t) {
+            watchFailed("watch check failed: " + t);
+        }
+    }
+
+    /** One watch.* call: the body when the envelope is 200 and ok, else null (logged once, never thrown). */
+    private JSONObject watchBody(String method, String args) {
+        try {
+            String answer = VaultLib.call(method, args);
+            JSONObject env = new JSONObject(answer);
+            JSONObject body = env.optJSONObject("body");
+            if (env.optInt("status", 0) == 200 && body != null && body.optBoolean("ok", false)) return body;
+            watchFailed(method + " -> " + brief(answer));
+        } catch (Throwable t) {
+            watchFailed(method + " failed: " + t);
+        }
+        return null;
+    }
+
+    private void watchFailed(String what) {
+        if (watchErrorLogged) return;
+        watchErrorLogged = true;
+        Log.w(TAG, "guard: " + what + " (further watch errors are not logged)");
+    }
+
+    /** A KAS amount as plain text with no trailing zeros, whether the engine sent a number or a string. */
+    private static String kasText(Object kas) {
+        if (kas == null || kas == JSONObject.NULL) return "?";
+        try { return new java.math.BigDecimal(String.valueOf(kas)).stripTrailingZeros().toPlainString(); }
+        catch (Exception e) { return String.valueOf(kas); }
     }
 
     /** 3 s while charging or the screen is on, 15 s on battery with the screen off (the design's two speeds). */
@@ -212,7 +324,7 @@ public final class GuardService extends Service {
     private Notification guardNotification(String text) {
         return new Notification.Builder(this, CH_GUARD)
                 .setSmallIcon(R.drawable.icon_mono)
-                .setContentTitle("KaspaVault guard")
+                .setContentTitle("KaspaVault alerts")
                 .setContentText(text)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
@@ -220,16 +332,57 @@ public final class GuardService extends Service {
                 .build();
     }
 
+    /**
+     * An alarm. Title and text may carry the engine's words or a watched name from another phone,
+     * so they pass through printable(). A locked screen shows only lockedVersion().
+     */
     private Notification alertNotification(String title, String text) {
+        String head = printable(title, TITLE_MAX), body = printable(text, TEXT_MAX);
         return new Notification.Builder(this, CH_ALERTS)
                 .setSmallIcon(R.drawable.icon_mono)
-                .setContentTitle(title)
-                .setContentText(text)
-                .setStyle(new Notification.BigTextStyle().bigText(text))
+                .setContentTitle(head)
+                .setContentText(body)
+                .setStyle(new Notification.BigTextStyle().bigText(body))
                 .setCategory(Notification.CATEGORY_ALARM)
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
+                .setPublicVersion(lockedVersion())
                 .setAutoCancel(true)
                 .setContentIntent(openApp())
                 .build();
+    }
+
+    /** Every alarm's public version: the app's name and LOCKED_TEXT, nothing from an account. */
+    private Notification lockedVersion() {
+        return new Notification.Builder(this, CH_ALERTS)
+                .setSmallIcon(R.drawable.icon_mono)
+                .setContentTitle("KaspaVault")
+                .setContentText(LOCKED_TEXT)
+                .setCategory(Notification.CATEGORY_ALARM)
+                .setContentIntent(openApp())
+                .build();
+    }
+
+    /**
+     * Text from the engine, the page or another phone, made safe to show: format characters (Cf:
+     * bidi overrides and isolates, zero-width marks), lone surrogates and unassigned code points
+     * are dropped, so a name cannot reorder or hide the words around it; controls and line breaks
+     * become spaces. Cut to max characters.
+     */
+    static String printable(String s, int max) {
+        if (s == null) return "";
+        StringBuilder b = new StringBuilder(Math.min(s.length(), max));
+        for (int i = 0; i < s.length() && b.length() < max; ) {
+            int c = s.codePointAt(i);
+            i += Character.charCount(c);
+            int t = Character.getType(c);
+            boolean hidden = t == Character.FORMAT || t == Character.SURROGATE
+                    || t == Character.UNASSIGNED;
+            if (hidden) continue;
+            boolean breaks = t == Character.CONTROL || t == Character.LINE_SEPARATOR
+                    || t == Character.PARAGRAPH_SEPARATOR;
+            b.appendCodePoint(breaks ? ' ' : c);
+        }
+        return b.toString();
     }
 
     @Override public void onDestroy() {

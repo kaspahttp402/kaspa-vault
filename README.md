@@ -1,13 +1,16 @@
 # KaspaVault
 
-KaspaVault is a self-custody Kaspa wallet for Android. Its savings account is not an ordinary address: it is a
+KaspaVault is a self-custody Kaspa app for Android. Its savings account is not an ordinary address: it is a
 covenant, a set of spending rules carried by the coin itself and enforced by the Kaspa network. The account has a
-daily limit, a notice period on any larger payment, an emergency stop that sends everything to a 2-of-3 safe, and an
-heir who can claim the money after a long silence. Beside it sits an everyday purse for small, unrestricted payments.
+daily limit, a notice period on any larger payment, an emergency stop that sends everything to a 2-of-3 vault, and an
+heir who can claim the funds after a long inactivity period. Beside it sits an everyday purse for small, unrestricted payments.
 The wallet engine runs on the phone; there is no server, no account with anyone, and nothing to sign up for.
 
-> Status: every rule has been proven against the real Kaspa script engine and exercised on testnet-10. The
-> real-money (mainnet) proof round has not been run yet. See [TESTING.md](TESTING.md).
+> Status: each covenant entry is checked against the real Kaspa script engine by the test matrix in
+> [docs/TESTING.md](docs/TESTING.md). Testnet-10 runs showed the network itself enforcing the time rules listed there
+> (notice period, limit window, inactivity period before a claim) and the daily limit, and exercised the emergency
+> stop, decline and claim, including guardians and heirs on a second phone. The hard-limit dial has not run on chain
+> yet. The app runs on mainnet; a mainnet proof round has not been run.
 
 ## Features
 
@@ -15,38 +18,48 @@ The wallet engine runs on the phone; there is no server, no account with anyone,
   refreshes once a full window has passed since the last payment, not at midnight.
 - **Notice period.** A payment above the limit is first *requested*: the destination and amount are written on chain
   and nothing leaves. It can be completed only after the notice period, only to that destination, only for that amount.
-- **Decline.** Any of three stop keys can send a waiting payment back to the account. Nothing moves.
-- **Emergency stop.** Any of three stop keys moves the whole account to the safe, from any state. The stop can only
-  ever pay the safe; a stop key in the wrong hands can freeze the account, never take from it.
-- **2-of-3 safe.** The safe is an ordinary Kaspa multisig address opened by any two of three paper sheets of 24 words.
-- **Heir.** After a silence you choose (six months by default on mainnet), an heir can take the account. Any payment,
-  request, completion, decline or top-up restarts the clock. Optionally the guard sends the inheritance by itself.
+- **Decline.** Any of the three emergency stop buttons (each one a stop key) can send a waiting payment back to the
+  account. Nothing moves.
+- **Emergency stop.** Any of the three emergency stop buttons moves the whole account to the vault, from any state.
+  The stop can only ever pay the vault; a stop key in the wrong hands can freeze the account, never take from it.
+- **2-of-3 vault.** The vault is an ordinary Kaspa multisig address opened by any two of three vault seeds of 24 words.
+- **Heir.** After an inactivity period you choose (six months by default on mainnet), an heir can claim the account.
+  Any payment, request, completion, decline or top-up restarts the clock; a claim pressed early is refused with the
+  time left. Optionally the guard sends the inheritance by itself.
+- **Guardians and heirs on their own phones.** A person you trust installs KaspaVault and gives you a link code. As a
+  guardian they hold one of your stop keys: they can decline a waiting payment or stop the account to your vault,
+  never take from it. As an heir they hold the heir key and can claim after the inactivity period; what a claim pays
+  lands in their own heir purse, which they spend like any address. A watch code lets their phone follow your account
+  without holding anything that can spend. Removing a guardian puts a key nobody holds in their stop slot.
 - **Hard limit (optional).** A dial that switches large withdrawals off for good: the daily limit becomes the only
   way out for the card, and the rest leaves only through the stop or the heir.
 - **Guard.** A foreground service on the phone follows the account on two independent Kaspa nodes and raises an
   alarm when money moves, when a withdrawal is requested, when the nodes disagree, or when it stops hearing from them.
   A second, watch-only guard can run on another device from a public file; it holds nothing that can spend.
 - **Everyday purse.** A plain address for small payments and for topping up the account.
-- **Several accounts**, each with its own rules. Changing the rules means stopping the account to the safe and
-  opening a new one with the new numbers; the app walks through it.
+- **Several accounts**, each with its own rules. Changing the rules (limit, notice, guardians, heir) means closing the
+  account and opening it again under the new rules. With the vault seeds on the phone, Update now does it at once
+  (stop to the vault, take out with a fingerprint, reopen); otherwise the update waits out the notice period.
 - **Sample mode.** Every screen can be tried with made-up money before any keys exist.
 
 ## How it works
 
-There are three places money can be.
+There are three places funds can be.
 
 - **The purse** is an ordinary single-key address on the phone. It has no rules; treat it like pocket cash.
 - **The account** is a covenant coin. The phone holds the *card* (the spend key) and one *stop key*. The card can
   spend within the limit or request a larger payment; it cannot skip the notice period, change the destination of a
-  waiting payment, or touch the safe. The two other stop keys live elsewhere: with a person you trust, or on a device
-  kept at home.
-- **The safe** is a 2-of-3 multisig address. Its keys are three paper sheets kept in three places. The account's rules
-  know only the safe's address. The safe keys can be made on a separate offline device, or made on the phone, shown
-  once to be written down, and then burned from the phone.
+  waiting payment, or touch the vault. Each of the two other stop slots holds a guardian's key (a person you trust,
+  on their own phone) or a key nobody holds.
+- **The vault** is a 2-of-3 multisig address. Its keys are three vault seeds of 24 words, written on paper and kept in
+  three places. The account's rules know only the vault's address. The phone makes the vault seeds, keeps them sealed
+  so they can be shown again, and can delete them from the phone once the paper copies are safe. (The command-line
+  client can also make them on a separate offline device.)
 
 Every key on the phone is sealed by the Android Keystore behind a strong biometric (or the device credential). It is
-unsealed for the moment of a signature and wiped. Moves that cannot be undone (taking money out of the safe, showing
-or burning the sheets, resetting the keys, changing the heir) need a fresh fingerprint every time.
+unsealed for the moment of a signature and wiped. Moves that cannot be undone (taking funds out of the vault, showing
+or deleting the vault seeds, resetting the keys, changing the heir, a guardian's stop, an heir's claim) need a fresh
+fingerprint every time.
 
 The engine is the same Rust program used for the testnet proofs, built as a native library and called from a thin
 Java shell. The screens are a local web page under a strict content security policy. The only network traffic is to
@@ -55,10 +68,10 @@ Kaspa nodes and to one price feed for the KAS chart.
 ## Self-custody
 
 KaspaVault keeps no copy of anything. There is no company, server or support desk that can see a balance, reverse a
-payment, reset a key or restore a lost sheet. If the keys on the phone are lost, the money in the account is reached
-through another stop key and the safe; if two of the three safe sheets are lost, the money in the safe cannot be
-recovered by anyone. Adding a fingerprint to the phone clears the everyday keys the app keeps on it, by design; the phone's copy of
-the safe sheets stays. Still keep at least two safe sheets on paper: the phone can be lost.
+payment, reset a key or restore a lost vault seed. If the keys on the phone are lost, the funds in the account are reached
+through another stop key and the vault; if two of the three vault seeds are lost, the funds in the vault cannot be
+recovered by anyone. Adding a fingerprint to the phone clears the everyday keys the app keeps on it, by design; the
+phone's copy of the vault seeds stays. Still keep at least two vault seeds on paper: the phone can be lost.
 
 ## Repository layout
 
@@ -70,24 +83,38 @@ the safe sheets stays. Still keep at least two safe sheets on paper: the phone c
 | `app/android/` | The Android shell: activity, signer, guard service, manifest, and the Gradle-free build scripts |
 | `app/web/` | The app's screens: one local HTML page with its scripts and styles |
 | `app/web-tests/` | Tests for the page: data layer against a fake engine, house-rule lint, headless smoke test |
-| `tools/` | `mutate.py`, the mutation tester for the covenant |
-| `vendor/` | The SilverScript compiler and a patched `kaspa-hashes`, used as path dependencies |
-| `docs/public/` | This documentation: [CONTRACT.md](CONTRACT.md), [SECURITY.md](SECURITY.md), [TESTING.md](TESTING.md) |
+| `tools/` | `fetch_vendor.sh` (fetches the SilverScript compiler, see Building), `mutate.py` (the mutation tester for the covenant), `surface_check.py` (fails when the page's routes, the bridge's allow-lists, the settings keys and the engine's methods drift apart) |
+| `vendor/` | Path dependencies: a patched `kaspa-hashes` (in this repository) and the SilverScript compiler (fetched into `vendor/silverscript/` by `tools/fetch_vendor.sh`) |
+| `docs/` | [CONTRACT.md](docs/CONTRACT.md), the covenant entry by entry, and [TESTING.md](docs/TESTING.md), what each test layer proves; [SECURITY.md](SECURITY.md) sits at the top level |
 
 ## Building
 
-The build has two steps: the Rust engine as an Android library, then the APK. No Gradle is used. The scripts are bash
+After a one-time fetch of the compiler, the build has two steps: the Rust engine as an Android library, then the
+APK. No Gradle is used. The scripts are bash
 and currently expect the Windows layout of the Android SDK (`%LOCALAPPDATA%\Android\Sdk`, tools with `.exe`/`.bat`
 suffixes), run from Git Bash.
 
 Requirements:
 
-- Rust (edition 2024, so Rust 1.85 or newer) with the `aarch64-linux-android` target:
-  `rustup target add aarch64-linux-android`
+- Rust 1.94 or newer (the SilverScript compiler's minimum; the repository's `rust-toolchain.toml` pins it, so
+  rustup selects it by itself) with the `aarch64-linux-android` target: `rustup target add aarch64-linux-android`
 - [cargo-ndk](https://github.com/bbqsrc/cargo-ndk) (the scripts are written against 4.1.2): `cargo install cargo-ndk`
 - Android SDK with build-tools 36.1.0, platform `android-36`, and an NDK (Android Studio, SDK Manager). The newest
   NDK under the SDK is used unless `ANDROID_NDK_HOME` is set.
 - A JDK providing `javac`, `jar` and `keytool` (the scripts put Android Studio's bundled JBR on the path)
+- git, for the one-time fetch below
+
+Step 0, the vendored compiler (once, before building or running any Rust check):
+
+```bash
+bash tools/fetch_vendor.sh
+```
+
+This clones `kaspanet/silverscript` at a pinned commit into `vendor/silverscript/` and applies
+`tools/silverscript-443d519.patch` (`kaspa-hashes` without its assembly, a crates.io patch, and an optional
+zero-knowledge feature). It then checks that `vendor/kaspa-hashes-patched` (`kaspa-hashes` 2.1.0 whose build script
+honours the no-asm feature, shipped in this repository) is present. The engine and the covenant proofs build against
+both as path dependencies, so nothing compiles without this step.
 
 Step 1, the engine library (slow the first time: it compiles about 400 crates):
 
@@ -123,6 +150,8 @@ The app runs on Android 13 and later (minSdk 33, targetSdk 35), arm64 only.
 ## Running the checks
 
 ```bash
+# Once, before any Rust check: bash tools/fetch_vendor.sh (see Building)
+
 # Wallet engine unit tests (from testnet-client/)
 cargo test --lib
 cargo clippy
@@ -142,7 +171,10 @@ KV_CHROME=<path to a headless Chromium> node app/web-tests/smoke.js          # S
 KV_CHROME=<path to a headless Chromium> node app/web-tests/smoke.js --live   # phone page with a fake bridge
 ```
 
-What each layer proves, and the testnet transaction ids, are in [TESTING.md](TESTING.md).
+What each layer proves, and the testnet transaction ids, are in [docs/TESTING.md](docs/TESTING.md). It also says what
+each layer cannot prove: the engine proofs cover the cases in their matrix, mutation testing mutates the covenant's
+`require` lines (not `if` conditions or arithmetic), and the adversarial reviews were separate AI model sessions
+given the code without the authors' reasons, not independent human auditors.
 
 ## License
 

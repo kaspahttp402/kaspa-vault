@@ -2,10 +2,28 @@
    engine inside the app). Screens only read KVData.state and call the actions; nothing else knows which is on. */
 (function () {
   var bridge = window.KaspaVaultBridge || null;
-  /* The wallet engine inside the app (the Rust program as a library, no laptop). Java says whether the library loaded. */
+  /* The wallet engine inside the app (the Rust program built as a library). Java says whether the
+     library loaded. */
   var engine = !!(bridge && bridge.engine && bridge.engine());
   function isLocal() {
     return engine && getSetting('live_local') === '1';
+  }
+  /* every amount the page shows or sends: at most 8 decimals, never 1e-7; a digit string keeps its
+     digits */
+  function kasText(n) {
+    var s = typeof n === 'number' ? n.toFixed(8) : String(n == null ? '' : n).trim();
+    if (/e/i.test(s)) s = Number(s).toFixed(8);
+    var m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(s);
+    if (!m || !/\d/.test(s)) return s;
+    var f = (m[3] || '').slice(0, 8).replace(/0+$/, '');
+    return m[1] + (m[2] || '0') + (f ? '.' + f : '');
+  }
+  /* an amount box: '' = everything (0); digits with at most 8 decimals (".5" and "5." too) = that
+     amount; else NaN */
+  function amountOf(text) {
+    var t = String(text == null ? '' : text).trim();
+    if (t === '') return 0;
+    return /^(\d+\.?\d{0,8}|\.\d{1,8})$/.test(t) && +t > 0 ? +t : NaN;
   }
   var RATE = 0.085,
     FEE = 0.02,
@@ -13,7 +31,8 @@
     GRACE = 60; /* GRACE: seconds an on-the-spot send waits on the phone, stoppable (stop any send after it was sent) */
   var listeners = [];
   /* Developer preview only: ?demo=alert or ?demo=quiet in the page address shows the watcher's banners on Sample data, so a
-     prover can screenshot them with no service. The phone never opens the page with a query, so Sample mode is unchanged. */
+     prover can screenshot them with no engine. The phone never opens the page with a query, so
+     Sample mode is unchanged. */
   var DEMO = (function () {
     var m = /[?&]demo=(alert|quiet|sample)/.exec(location.search || '');
     return m ? m[1] : '';
@@ -22,6 +41,19 @@
     QUIET_AFTER = 180; /* spend kinds */
 
   /* ---- settings: phone storage through the bridge, browser storage otherwise ---- */
+  /* the guard's "cannot reach the network" comes after every phone sleep or network switch
+     (repetitive): keep only the newest, and none once the guard has heard the
+     network since */
+  function quietSilence(list, seenAt) {
+    var newest = 0;
+    list.forEach(function (a) {
+      if (a.kind === 'watcher_silent' && a.at > newest) newest = a.at;
+    });
+    return list.filter(function (a) {
+      if (a.kind !== 'watcher_silent') return true;
+      return a.at === newest && !(typeof seenAt === 'number' && seenAt > a.at);
+    });
+  }
   function getSetting(k) {
     try {
       return (bridge ? bridge.getSetting(k) : localStorage.getItem('kv_' + k)) || '';
@@ -60,10 +92,10 @@
       })
     : null;
   function notHere() {
-    return Promise.resolve({ ok: false, error: 'Not on this phone.' });
+    return Promise.resolve({ ok: false, error: 'Not available on this device.' });
   }
 
-  /* ---- words that must never reach a screen, whatever the service sends ---- */
+  /* ---- words that must never reach a screen, whatever the engine sends ---- */
   var BANNED = /contract|\bkeys?\b|utxo|script|\bdaa\b|sompi|on-?chain|blockchain|crypto/i;
   function plain(text, fallback) {
     if (!text) return fallback;
@@ -144,6 +176,62 @@
     var d = priceLive.day;
     if (d && Date.now() - d.at < PRICE_LIVE_MS) state.rate = d.values[d.values.length - 1];
   }
+  /* -> the price screen's summary of a period's [time, price] points: now, change, high, low and
+     the average of the last 7 days (from the 1-week points when given, else the period's own;
+     avgHours says how far back it reached) */
+  var DAY_MS = 86400000;
+  function priceSummary(points, week) {
+    if (!points || points.length < 2) return null;
+    var vals = points.map(function (p) {
+        return p[1];
+      }),
+      first = vals[0],
+      now = vals[vals.length - 1];
+    var src = week && week.length >= 2 ? week : points,
+      end = src[src.length - 1][0];
+    var last7 = src.filter(function (p) {
+      return p[0] >= end - 7 * DAY_MS;
+    });
+    var sum = last7.reduce(function (a, p) {
+      return a + p[1];
+    }, 0);
+    return {
+      now: now,
+      change: now - first,
+      pct: ((now - first) / first) * 100,
+      high: Math.max.apply(null, vals),
+      low: Math.min.apply(null, vals),
+      avg: sum / last7.length,
+      avgHours: Math.round((end - last7[0][0]) / 3600000),
+      fromWeek: src === week,
+    };
+  }
+  /* the engine's market.supply answer -> plain numbers, or null (refused, old engine, nonsense):
+     null hides the block */
+  function supplyOf(j) {
+    if (!j || !j.ok) return null;
+    function n(v) {
+      var x = typeof v === 'number' || typeof v === 'string' ? Number(v) : NaN;
+      return isFinite(x) && x >= 0 ? x : null;
+    }
+    var o = {
+      mined: n(j.mined_kas),
+      max: n(j.max_kas),
+      reward: n(j.reward_kas),
+      next: n(j.next_reward_kas),
+      cutAt: typeof j.next_cut_at === 'string' ? j.next_cut_at.slice(0, 40) : '',
+    };
+    return o.mined !== null && o.max ? o : null;
+  }
+  var SAMPLE_SUPPLY = {
+    ok: true,
+    mined_kas: 26934120554,
+    max_kas: 28704026601,
+    reward_kas: 3.27,
+    next_cut_at: 'Dec 7, 2026',
+    next_reward_kas: 3.09,
+    error: null,
+  };
   function fetchPrices(range) {
     priceLoad();
     var days = PRICE_DAYS[range] || 30,
@@ -160,21 +248,11 @@
         if (status !== 200) priceRest = Date.now() + 120000;
         resolve(status === 200 ? j : null);
       }
-      if (bridge && bridge.price) {
-        var id = ++seq;
-        waiting[id] = got;
-        bridge.price('__kvHttp', id, url);
-        return;
-      }
-      fetch(url)
-        .then(function (r) {
-          return r.text().then(function (t) {
-            got(r.status, t);
-          });
-        })
-        .catch(function () {
-          resolve(null);
-        });
+      /* no bridge (a plain browser): no price */
+      if (!(bridge && bridge.price)) return resolve(null);
+      var id = ++seq;
+      waiting[id] = got;
+      bridge.price('__kvHttp', id, url);
     })
       .then(function (j) {
         var out = priceKeep(range, (j && j.prices) || [], Date.now());
@@ -217,6 +295,7 @@
       heirSecondsLeft: null,
       heirDelaySeconds: null,
       heirWarnShare: 0.9,
+      watched: [] /* accounts this phone helps: {id, name, roles, address, st} (st = watch.status) */,
       hardLimit: false,
       outgoing: null,
       everyday: null,
@@ -251,12 +330,29 @@
   /* One fingerprint through the phone's prompt; a desktop browser has no sensor and says yes. */
   function unlock(why) {
     if (!bridge) return Promise.resolve(true);
+    return phonePrompt(function () {
+      bridge.confirmWithBiometric('__kvUnlock', why);
+    });
+  }
+  /* One phone prompt at a time: its answer comes back through the one name __kvUnlock, so a
+     second prompt while one is up says no at once (its caller shows its own refusal). 'away'
+     (the phone took the prompt down: the app was put away) tells the page, which locks then. */
+  var prompting = false;
+  function phonePrompt(ask) {
+    if (prompting) return Promise.resolve(false);
+    prompting = true;
     return new Promise(function (resolve) {
       window.__kvUnlock = function (st) {
         window.__kvUnlock = null;
+        prompting = false;
+        if (st === 'away' && window.KVData.onAway) window.KVData.onAway();
         resolve(st === 'ok');
       };
-      bridge.confirmWithBiometric('__kvUnlock', why);
+      try {
+        ask();
+      } catch (e) {
+        window.__kvUnlock('refused');
+      }
     });
   }
   window.__kvHttp = function (id, status, text) {
@@ -269,7 +365,8 @@
      service: without the engine a request simply fails as unreachable (status 0). */
   function request(method, path, body) {
     return new Promise(function (resolve) {
-      if (!isLocal()) {
+      /* duress view: every engine change but a purse payment fails like an unreachable engine */
+      if (!isLocal() || (duress && method !== 'GET' && path !== '/api/pursepay')) {
         resolve({ status: 0, text: '' });
         return;
       }
@@ -285,12 +382,12 @@
       bridge.vault('__kvHttp', lid, m.name, JSON.stringify(m.args));
     });
   }
-  /* Route -> engine method. GET /api/status -> status {}, GET /api/quote?kind=..&amount=..&to=.. -> quote {kind, amount, to},
+  /* Page path -> engine method; the /api paths are only names inside the page, never web addresses.
+     GET /api/status -> status {}, GET /api/keys|funding -> keys.public|funding {},
      POST /api/send|finish|stop|decline -> that word with the body as args. Anything else is not a thing the engine does. */
   function localMethod(method, path, body) {
     var q = path.indexOf('?'),
-      p = q < 0 ? path : path.slice(0, q),
-      args = {};
+      p = q < 0 ? path : path.slice(0, q);
     if (method === 'GET' && p === '/api/status') {
       /* ?account=N picks the account */
       var am = /[?&]account=(\d+)/.exec(path);
@@ -299,36 +396,98 @@
     if (method === 'GET' && p === '/api/keys')
       return { name: 'keys.public', args: {} }; /* this phone's rule block; answers without keys too */
     if (method === 'GET' && p === '/api/funding') return { name: 'funding', args: {} };
-    if (method === 'POST' && p === '/api/sheets') return { name: 'keys.sheets', args: {} }; /* the sealed sheets, after a fingerprint */
-    if (method === 'POST' && p === '/api/burn') return { name: 'keys.burn', args: body || {} }; /* wipe the sealed sheets on purpose */
+    if (method === 'GET' && p === '/api/coins') return { name: 'coins.info', args: {} }; /* purse */
+    /* the sealed vault seeds, after a fingerprint */
+    if (method === 'POST' && p === '/api/sheets') return { name: 'keys.sheets', args: {} };
+    /* wipe the sealed vault seeds on purpose */
+    if (method === 'POST' && p === '/api/burn') return { name: 'keys.burn', args: body || {} };
     if (method === 'POST' && p === '/api/pursepay') return { name: 'purse.pay', args: body || {} };
     if (method === 'POST' && p === '/api/reset')
-      return { name: 'keys.reset', args: body || {} }; /* the purse: where test KAS is received before the account opens */
-    if (method === 'GET' && p === '/api/quote') {
-      if (q >= 0)
-        path
-          .slice(q + 1)
-          .split('&')
-          .forEach(function (kv) {
-            var i = kv.indexOf('=');
-            if (i < 0) return;
-            args[decodeURIComponent(kv.slice(0, i))] = decodeURIComponent(kv.slice(i + 1).replace(/\+/g, ' '));
-          });
-      return { name: 'quote', args: args };
-    }
+      /* new keys; leave_safe = give up a vault whose seeds are lost */
+      return { name: 'keys.reset', args: body || {} };
     if (method === 'POST' && /^\/api\/(send|finish|stop|decline|fund|topup|takeout)$/.test(p))
       return { name: p.slice(5), args: body || {} };
     if (method === 'POST' && p === '/api/rules.change')
       return { name: 'rules.change', args: body || {} }; /* keyless; stores the new dials, moves nothing */
     if (method === 'POST' && p === '/api/heir.set')
       return { name: 'heir.set', args: body || {} }; /* keyless; only while every account is stopped and empty */
+    if (
+      /^\/api\/(link\.(code|read|heir_words)|guard\.export|heir\.(purse|pay))$/.test(p) ||
+      /^\/api\/watch\.(import|list|status|stop|decline|claim|forget|code)$/.test(p)
+    )
+      return { name: p.slice(5), args: body || {} }; /* guardians and heirs (docs/LINK_DESIGN.md) */
+    if (method === 'POST' && p === '/api/market.supply')
+      return { name: 'market.supply', args: {} }; /* keyless, read-only: the coin's supply */
+    if (method === 'POST' && /^\/api\/paper\.(make|confirm|sheet|check|stop|takeout)$/.test(p))
+      return { name: p.slice(5), args: body || {} }; /* the paper stop (docs/PAPER_STOP.md) */
     return null;
   }
+  /* a short hash of a public text (the watch code last printed): FNV-1a, 8 hex digits */
+  function shortHash(s) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < s.length && i < 16384; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return ('0000000' + h.toString(16)).slice(-8);
+  }
+  /* paper_shown = "<short hash of the code last printed>|<Your papers marks>"; a bare hash
+     still reads */
+  function paperParts() {
+    var v = String(getSetting('paper_shown') || '').split('|');
+    return { hash: v[0] || '', marks: (v[1] || '').split(',').filter(Boolean).slice(0, 16) };
+  }
+  function paperSave(hash, marks) {
+    setSetting('paper_shown', hash + (marks.length ? '|' + marks.join(',') : ''));
+  }
+  function paperCode(code) {
+    var c = String(code || '').trim();
+    return c.length <= 4096 ? c : '';
+  }
+  /* Sample: a vault seed that starts "abandon" stands for seeds that do not open the vault */
+  var SAMPLE_WATCH = '{"kind":"kaspavault.watch","public_sha256":"1a2b3c4d5e6f"}';
+  function sampleTakeout(s, to) {
+    if (/^abandon\b/.test(s[0]) || /^abandon\b/.test(s[1]))
+      return { ok: false, error: "These vault seeds do not open this account's vault." };
+    var t = to || state.purseAddress || 'kaspa:qsamplepurse00000000000000000';
+    return { ok: true, tx: 'sample', kas: +state.safe || 5, to: t, confirmed: false };
+  }
+  function hasPaper(k) {
+    var st = (k && k.ok && k.stops) || [];
+    return [].some.call(st, function (s) {
+      return !!s && s.holder === 'paper';
+    });
+  }
   function reachError(status) {
-    if (status === -4) return 'The wallet engine is not ready. Close and reopen the app.'; /* the library did not load */
+    /* the library did not load */
+    if (status === -4) return 'The app is not ready. Close and reopen it.';
     if (status === -3) return 'Unlock first: touch the sensor and try again.'; /* the phone's store was shut; nothing was sent */
-    if (status === 0 || status === 503) return "Can't reach the Kaspa network from this phone. Check its internet and try again.";
+    if (status === 0 ||
+      status === 503) return "Unable to connect to the Kaspa network. Check your internet " +
+        "connection and try again.";
     return 'Something went wrong (' + status + '). Try again in a moment.';
+  }
+  /* Sample's Everyday coins in coins.info's shape (KAS, not sompi); the fee is demo.js's */
+  function sampleCoins(c) {
+    var total = c.reduce(function (a, x) {
+      return a + x;
+    }, 0);
+    return { ok: true, count: c.length, total: total, amounts: c.slice(),
+      fee: c.length > 1 ? Math.round(c.length * 0.4) / 100 : 0 };
+  }
+  /* coins.info answer -> KAS; a refusal keeps only plain words */
+  function liveCoins(r) {
+    var j = liveJson(r),
+      kas = function (n) {
+        return (Number(n) || 0) / 1e8;
+      };
+    if (!j) return { ok: false, error: reachError(r.status) };
+    if (!j.ok)
+      return { ok: false, error: /^The purse isn.t set up/.test(j.error || '') ? j.error :
+        'Your coins could not be counted. Try again in a moment.' };
+    return { ok: true, count: j.count | 0, total: kas(j.total_sompi),
+      amounts: (j.amounts_sompi || []).map(kas),
+      fee: j.fee_sompi == null ? null : kas(j.fee_sompi) }; /* null: it cannot be priced */
   }
   function liveJson(r) {
     try {
@@ -351,7 +510,8 @@
     state.stopKeys = s.stop_keys || 1;
     state.heir = !!s.heir;
     state.sheets = s.sheets || 1;
-    /* v6: the heir clock as the engine counts it; null without an heir or from an older service. The whole delay
+    /* v6: the heir clock as the engine counts it; null without an heir or from an older engine. The
+       whole delay
        (heir_delay_seconds) is optional: an engine that does not send it makes Live warn by share only. */
     state.heirSecondsLeft = typeof s.heir_seconds_left === 'number' ? s.heir_seconds_left : null;
     state.heirDelaySeconds = typeof s.heir_delay_seconds === 'number' && s.heir_delay_seconds > 0 ? s.heir_delay_seconds : null;
@@ -395,6 +555,7 @@
     state.accounts = s.accounts && s.accounts.length ? s.accounts.slice() : [1];
     state.nextAccount = typeof s.next_account === 'number' ? s.next_account : null;
     state.rulesNext = s.rules_next || null;
+    state.peopleNext = s.people_next || null; /* guardian/heir changes waiting for the account to open again */
     state.oldRules = !!s.old_rules;
     state.oldRulesNotice = state.oldRules ? plain(s.notice, 'This account was opened by a newer version of the app.') : '';
     if (state.oldRules) state.unopened = false; /* nothing alarming: the record exists, this app just cannot read its rules */
@@ -414,9 +575,14 @@
         }
       : null;
     state.history = (s.history || []).map(function (h) {
-      return { text: plain(h.text, 'Account activity'), tx: h.tx, go: '', when: '' };
+      /* kind, kas and at (unix s) come from newer engines; each is kept only when well typed */
+      return { text: plain(h.text, 'Account activity'), tx: h.tx, go: '', when: '',
+        kind: typeof h.kind === 'string' ? h.kind : '',
+        kas: typeof h.kas === 'number' && isFinite(h.kas) ? h.kas : undefined,
+        at: typeof h.at === 'number' && h.at > 0 ? h.at : undefined };
     });
-    /* field contract: both optional; an older service leaves them out and the app stays quiet about them */
+    /* field contract: both optional; an older engine leaves them out and the app stays quiet about
+       them */
     state.alerts = Array.isArray(s.alerts)
       ? s.alerts
           .filter(function (a) {
@@ -426,6 +592,7 @@
             return { at: a.at, kind: String(a.kind || ''), text: plain(a.text, 'Something needs your attention.') };
           })
       : [];
+    state.alerts = quietSilence(state.alerts, s.watcher_seen_at);
     state.watcherSeenAt = 'watcher_seen_at' in s ? s.watcher_seen_at : undefined;
     state.network = typeof s.network === 'string' ? plain(s.network, '') : ''; /* which network the engine is on; the screen shows it */
   }
@@ -497,7 +664,8 @@
       if (j && j.ok === false) {
         /* the engine on this phone refuses plainly; "no keys yet" is a state, not an error */
         state.connected = true;
-        state.noKeys = /no keys yet/i.test(j.error || '');
+        /* the flag first; old and new wording */
+        state.noKeys = j.no_keys === true || /no keys yet|not set up yet/i.test(j.error || '');
         state.error = state.noKeys ? '' : plain(j.error, 'Your account could not be read.');
         emit();
         return false;
@@ -507,7 +675,8 @@
         adoptStatus(j);
       } else {
         state.connected = false;
-        state.error = j === null && r.status === 200 ? 'Your account sent something unreadable.' : reachError(r.status);
+        state.error = j === null && r.status === 200 ?
+          'Your account details could not be read. Please try again.' : reachError(r.status);
       }
       emit();
       return !!j;
@@ -530,10 +699,77 @@
     return request('POST', path, body).then(function (r) {
       var j = liveJson(r);
       if (r.status === 0 || !j) return { ok: false, error: reachError(r.status) };
-      if (!j.ok) return { ok: false, error: plain(j.error, 'That could not be done. Nothing has moved.') };
+      if (!j.ok) return { ok: false, error: plain(j.error,
+        'The action could not be completed. No funds were moved.') };
       return poll().then(function () {
         return j;
       });
+    });
+  }
+  /* an engine question that moves no money (link.*, watch.list/status/import/forget): the answer as
+     given, no status poll */
+  function askEngine(path, body, fallback) {
+    return request('POST', path, body).then(function (r) {
+      var j = liveJson(r);
+      if (r.status === 0 || !j) return { ok: false, error: reachError(r.status) || fallback };
+      if (!j.ok) return { ok: false, error: plain(j.error, fallback) };
+      return j;
+    });
+  }
+  function helperNames() {
+    try {
+      var m = JSON.parse(getSetting('helper_names') || '{}');
+      if (!m || typeof m !== 'object') return {};
+      for (var k in m) m[k] = safeName(m[k]);
+      return m;
+    } catch (e) {
+      return {};
+    }
+  }
+  /* a name someone else chose (link code, watched account, helper_names): display only, so
+     control and direction marks go and it stops at 40 characters */
+  function safeName(v) {
+    var bad = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+    var t = String(v == null ? '' : v).replace(bad, '');
+    return t.length > 40 ? t.slice(0, 39) + '\u2026' : t;
+  }
+  /* the watched accounts and each one's status; an account that cannot be read keeps its last status */
+  function loadWatched() {
+    if (!isLocal()) return Promise.resolve(state.watched);
+    return askEngine('/api/watch.list', {}, '').then(function (r) {
+      if (!r.ok) return state.watched;
+      var old = {};
+      state.watched.forEach(function (w) {
+        old[w.id] = w.st;
+      });
+      var list = (r.watched || []).map(function (w) {
+        var nm = safeName(w.name),
+          st = old[w.id] || null;
+        return { id: w.id, name: nm, roles: w.roles || {}, address: w.address || '', st: st };
+      });
+      return Promise.all(
+        list.map(function (w) {
+          return askEngine('/api/watch.status', { id: w.id }, '').then(function (s) {
+            if (s.ok) w.st = s;
+          });
+        })
+      ).then(function () {
+        state.watched = list;
+        emit();
+        return list;
+      });
+    });
+  }
+  var watchedAt = 0; /* the watched accounts are read once a minute beside the status poll */
+  function watchTick() {
+    if (!isLocal() || Date.now() - watchedAt < 60000) return;
+    watchedAt = Date.now();
+    loadWatched();
+  }
+  function watchMove(why, path, id) {
+    return fingerAction(why, path, { id: id }).then(function (r) {
+      loadWatched();
+      return r;
     });
   }
   /* keyless engine calls (rules.change, heir.set): no fingerprint, the engine's answer as given, a status poll on ok */
@@ -547,28 +783,56 @@
       });
     });
   }
+  /* rules.change fields that change who can stop or inherit the account (Bridge PEOPLE_FIELDS and
+     any paper field): such a call needs a fingerprint given just now. heir_delay alone does not. */
+  var PEOPLE_FIELD = /^(guardian_x|guardian_which|heir_x|heir_address)$|^paper/;
+  function namesPeople(a) {
+    return Object.keys(a || {}).some(function (k) {
+      return PEOPLE_FIELD.test(k);
+    });
+  }
+  /* a keyless change that wants a fresh fingerprint (heir.set, people in rules.change): one prompt
+     right before, then plainAction; once more on the engine's fresh-fingerprint refusal */
+  function freshPlain(why, path, body, fallback) {
+    return fingerAction(why, path, body, function (p, b) {
+      return plainAction(p, b, fallback);
+    });
+  }
+  /* paper.check / paper.stop: askEngine's answer, but a refusal keeps the account's vault address
+     and code (filled once the printed code is read) for the owner to compare with the paper */
+  function askPaper(path, body, fallback) {
+    return request('POST', path, body).then(function (r) {
+      var j = liveJson(r);
+      if (r.status === 0 || !j) return { ok: false, error: reachError(r.status) || fallback };
+      if (j.ok) return j;
+      return { ok: false, error: plain(j.error, fallback), vault_address: j.vault_address || null,
+        code: j.code || null };
+    });
+  }
   /* Money on Live (send, finish, emergency stop). The sealed signer on this phone opens for ONE
      engine call after a fingerprint; Java takes the key for that move itself, so no key ever reaches this page. Without
      confirmSigner (an older shell) the plain fingerprint prompt stands in. */
   function signerUnlock(why) {
     if (!bridge) return Promise.resolve(true);
-    return new Promise(function (resolve) {
-      window.__kvUnlock = function (st) {
-        window.__kvUnlock = null;
-        resolve(st === 'ok');
-      };
+    return phonePrompt(function () {
       if (bridge.confirmSigner) bridge.confirmSigner('__kvUnlock', why);
       else bridge.confirmWithBiometric('__kvUnlock', why);
     });
   }
   var FRESH_FINGER =
-    'This one needs your fingerprint again. Try once more.'; /* the engine's answer when an irreversible move wants a fingerprint newer than the signer window */
+    /* matched word for word: the engine's answer when an irreversible move wants a fingerprint
+       newer than the signer window */
+    'Fingerprint confirmation required. Please try again.';
   function moneyAction(why, path, body) {
     body = body || {};
     if (body.account == null) body.account = account; /* every money call names its account */
+    return fingerAction(why, path, body);
+  }
+  function fingerAction(why, path, body, run) {
+    var call = run || liveAction;
     function once() {
       return signerUnlock(why).then(function (ok) {
-        return ok ? liveAction(path, body) : { ok: false, error: NEED_FINGER };
+        return ok ? call(path, body) : { ok: false, error: NEED_FINGER };
       });
     }
     return once().then(function (r) {
@@ -623,9 +887,77 @@
     for (var i = 0; i < b.length; i++) s += ('0' + b[i].toString(16)).slice(-2);
     return s;
   }
+  /* ---- the panic PIN: six digits typed on the lock screen open the duress view (the purse only).
+     Kept as 's1:' + salt + ':' + SHA-256(salt + ':' + PIN), never as the digits; a phone without
+     crypto.subtle cannot keep one. While the duress view is open, request() refuses every engine
+     change except a purse payment, whatever a screen asks. */
+  var duress = false;
+  /* 'p2' = PBKDF2-SHA-256, 150,000 rounds (slow to guess all million PINs); 's1' = one SHA-256 of
+     salt:pin, kept only so a PIN set on build 0462cf5 still opens */
+  var PANIC_ROUNDS = 150000,
+    PANIC_KEPT = /^(s1|p2):[0-9a-f]{32}:[0-9a-f]{64}$/;
+  function hexOf(buf) {
+    var a = new Uint8Array(buf),
+      h = '';
+    for (var i = 0; i < a.length; i++) h += ('0' + a[i].toString(16)).slice(-2);
+    return h;
+  }
+  function panicHash(kind, salt, pin) {
+    var enc = new TextEncoder();
+    if (kind === 's1')
+      return crypto.subtle.digest('SHA-256', enc.encode(salt + ':' + pin)).then(hexOf);
+    return crypto.subtle.importKey('raw', enc.encode(pin), 'PBKDF2', false, ['deriveBits'])
+      .then(function (k) {
+        return crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode(salt),
+          iterations: PANIC_ROUNDS, hash: 'SHA-256' }, k, 256);
+      }).then(hexOf);
+  }
+  function panicKept() {
+    var v = getSetting('panic_pin');
+    /* an old plain one (Sample kept the digits) is wiped */
+    if (v && !PANIC_KEPT.test(v)) setSetting('panic_pin', '');
+    return PANIC_KEPT.test(getSetting('panic_pin')) ? getSetting('panic_pin') : '';
+  }
+  function panicCan() {
+    return !!(window.crypto && crypto.subtle && window.TextEncoder);
+  }
+  function panicSet(pin) {
+    if (!/^\d{6}$/.test(pin) || !panicCan()) return Promise.resolve(false);
+    var salt = randomHex(32);
+    return panicHash('p2', salt, pin).then(function (h) {
+      setSetting('panic_pin', 'p2:' + salt + ':' + h);
+      return true;
+    });
+  }
+  function panicMatch(pin) {
+    var v = panicKept().split(':');
+    if (v.length !== 3 || !/^\d{6}$/.test(pin) || !panicCan()) return Promise.resolve(false);
+    return panicHash(v[0], v[1], pin).then(function (h) {
+      return h === v[2];
+    });
+  }
   function wait(ms) {
     return new Promise(function (r) {
       setTimeout(r, ms);
+    });
+  }
+
+  /* finishRules' last step: open the account from the purse, less a fee margin */
+  function rulesFund(api, f) {
+    if (!f || f.ok === false) return { ok: false, error: (f && f.error) ||
+      'The purse could not be read. Try again.' };
+    var floor = typeof f.min_kas === 'number' ? f.min_kas : 1.05,
+      kas = Math.floor(((+f.kas || 0) - 0.05) * 10000) / 10000;
+    if (!(kas >= floor)) {
+      return {
+        ok: false,
+        error: 'Your purse balance is too low to update your rules. Minimum required: ' +
+          kasText(floor) + ' KAS.',
+      };
+    }
+    return api.fund(kas, null, account).then(function (x) {
+      if (x && x.ok) setSetting('rules_move', '');
+      return x;
     });
   }
 
@@ -656,9 +988,17 @@
       var l = priceLive[range];
       return l ? l.at : 0;
     } /* when the prices shown for the period were fetched; 0 = none, saved or new */,
+    /* the price screen's top block for a period (7-day average from the 1-week prices if loaded) */
+    priceSummary: function (range) {
+      return priceSummary(this.pricePoints(range), this.pricePoints('week'));
+    },
+    /* keyless, read-only: mined, maximum, reward per block, next reduction; null hides the block */
+    marketSupply: function () {
+      if (!isLocal()) return Promise.resolve(supplyOf(SAMPLE_SUPPLY));
+      return askEngine('/api/market.supply', {}, '').then(supplyOf);
+    },
     getSetting: getSetting,
     setSetting: setSetting,
-    plain: plain,
     subscribe: function (f) {
       listeners.push(f);
     },
@@ -666,8 +1006,25 @@
       return state.source === 'live';
     },
     phase: phase /* the page's one state model; see the list above phase() */,
+    panicIsSet: function () {
+      return !!panicKept();
+    },
+    panicCan: panicCan,
+    panicSet: panicSet /* (six digits) -> Promise<bool>; the caller asks for a fingerprint */,
+    panicClear: function () {
+      setSetting('panic_pin', '');
+    },
+    panicMatch: panicMatch /* (digits) -> Promise<bool> */,
+    setDuress: function (on) {
+      duress = !!on;
+    },
+    inDuress: function () {
+      return duress;
+    },
     canMove: canMove /* money screens: a fresh network answer, whatever the phase */,
     isLocal: isLocal /* Live on this phone's own engine */,
+    kasText: kasText,
+    amountOf: amountOf,
     isMainnet: function () {
       return isLocal() && getSetting('live_network') !== 'testnet';
     } /* the shell's default network is mainnet */,
@@ -687,10 +1044,11 @@
     fund: function (kas, dials, acctId) {
       /* acctId opens that account (default the current one) */
       var a = dials || {};
-      a.kas = kas;
+      a.kas = kasText(kas);
       var n = typeof acctId === 'number' ? acctId : account;
       a.account = n;
-      return moneyAction('Open ' + (n > 1 ? 'account ' + n : 'your account') + ' with ' + kas + ' KAS', '/api/fund', a);
+      return moneyAction('Open ' + (n > 1 ? 'account ' + n : 'your account') + ' with ' + a.kas +
+        ' KAS', '/api/fund', a);
     },
     /* the new dials for this account; the engine keeps them and status.rules_next shows them until the account is opened again */
     changeRules: function (dials) {
@@ -698,7 +1056,10 @@
       var a = { account: account },
         d = dials || {};
       for (var k in d) if (d.hasOwnProperty(k) && d[k] != null) a[k] = d[k];
-      return plainAction('/api/rules.change', a, 'The rules could not be changed. Nothing has moved.');
+      var fb = 'The rules could not be changed. Nothing has moved.';
+      var path = '/api/rules.change';
+      if (namesPeople(a)) return freshPlain('Change your guardian or heir', path, a, fb);
+      return plainAction(path, a, fb);
     },
     /* the heir on this phone's keys: a kaspa: address or a 64-hex x-only key; '' removes the heir */
     setHeir: function (input, autoHeir) {
@@ -710,7 +1071,202 @@
       else if (/^kaspa(test)?:[a-z0-9]{20,}$/.test(v.toLowerCase())) a.heir_address = v.toLowerCase();
       else return Promise.resolve({ ok: false, error: 'That is not a Kaspa address.' });
       if (typeof autoHeir === 'boolean') a.auto_heir = autoHeir;
-      return plainAction('/api/heir.set', a, 'The heir could not be set. Nothing has moved.');
+      return freshPlain('Change your heir', '/api/heir.set', a,
+        'The heir could not be set. Nothing has moved.');
+    },
+    /* ---- guardians and heirs (docs/PEOPLE_SCREENS.md) ---- */
+    helperNames: helperNames,
+    /* a guarded setting (guard servers, wider signer window) changes only right after this */
+    confirmFresh: function (why) {
+      return signerUnlock(why);
+    },
+    prompting: function () {
+      return prompting;
+    },
+    nameHelper: function (x, name) {
+      var m = helperNames();
+      if (name) m[x] = String(name).slice(0, 40);
+      else delete m[x];
+      setSetting('helper_names', JSON.stringify(m));
+    },
+    linkCode: function () {
+      return askEngine('/api/link.code', {}, 'This phone has no link code yet.');
+    },
+    readLink: function (text) {
+      if (String(text || '').length > 4096) return Promise.resolve({ ok: false,
+        error: 'That code is too long to be a KVault code.' });
+      var ask = { text: String(text || '') };
+      return askEngine('/api/link.read', ask, 'That is not a link code.').then(function (r) {
+        if (r && r.name) r.name = safeName(r.name);
+        return r;
+      });
+    },
+    /* the helper's link: Java seals a guardian key and an heir key after a finger; the heir words come back once */
+    makeLink: function (name) {
+      var n = String(name || '').trim();
+      if (n.length < 1 || n.length > 40) return Promise.resolve({ ok: false, error: 'Type a name of 1 to 40 letters.' });
+      if (duress || !bridge || !bridge.linkMake)
+        return Promise.resolve({ ok: false, error: 'A link code can only be made on the phone.' });
+      return signerUnlock('Make your link code').then(function (ok) {
+        if (!ok) return { ok: false, error: NEED_FINGER };
+        return new Promise(function (resolve) {
+          var id = ++seq;
+          waiting[id] = function (status, text) {
+            var j = +status === 200 ? liveJson({ text: text }) : null;
+            if (!j && +status === 200 && text) j = { ok: false, error: plain(text, 'The link code could not be made.') };
+            resolve(j || { ok: false, error: reachError(+status) || 'The link code could not be made.' });
+          };
+          bridge.linkMake('__kvHttp', id, JSON.stringify({ name: n }));
+        });
+      });
+    },
+    heirWords: function () {
+      return fingerAction('Show your heir seed', '/api/link.heir_words', {});
+    },
+    /* the owner's watch code: the public part of this account for a helper to scan (guard.export answers the file itself) */
+    watchCode: function (name) {
+      var a = { account: account };
+      if (name) a.name = name;
+      return request('POST', '/api/guard.export', a).then(function (r) {
+        var j = liveJson(r);
+        if (j && j.kind) return { ok: true, code: JSON.stringify(j) };
+        return { ok: false, error: (j && plain(j.error, '')) || reachError(r.status) || 'The watch code could not be made.' };
+      });
+    },
+    /* ---- the paper stop (docs/PAPER_STOP.md): emergency stop button 2 or 3 as 24 words ---- */
+    /* one fresh fingerprint; the 24 words come back once and only a pending stop is kept.
+       slot 2|3 only when the engine could not tell which button is free and the owner chose */
+    paperMake: function (slot) {
+      if (!isLocal()) return notHere();
+      var a = { account: account };
+      if (slot === 2 || slot === 3) a.slot = slot;
+      return fingerAction('Make your paper stop', '/api/paper.make', a);
+    },
+    /* one more fresh fingerprint: the 24 words read back store the change (rules.change's answer,
+       its lines in rule_words), then Update now. The words ride in this call only. */
+    paperConfirm: function (words) {
+      var w = words && words.length === 24 ? words.join(' ') : '';
+      if (!w) return Promise.resolve({ ok: false, error: 'Please enter all 24 words.' });
+      if (!isLocal()) return notHere();
+      var a = { account: account, words: w };
+      return freshPlain('Add your paper stop', '/api/paper.confirm', a,
+        'The paper stop could not be added. Nothing has changed.').then(function (r) {
+        a.words = null;
+        return r;
+      });
+    },
+    /* keyless: this account's watch code as it is now, to print with the words */
+    paperSheet: function () {
+      if (!isLocal()) return notHere();
+      return askEngine('/api/paper.sheet', { account: account }, 'The code could not be made.');
+    },
+    /* no keys, no fingerprint, moves nothing: the account the code names, followed to today */
+    paperCheck: function (code) {
+      var c = paperCode(code);
+      if (!c) return Promise.resolve({ ok: false, error: 'That is not a KVault code.' });
+      if (!isLocal()) return notHere();
+      return askPaper('/api/paper.check', { watch_code: c }, 'The account could not be found.');
+    },
+    /* no keys, no fingerprint: the words are the authority. They live in this one call's
+       arguments, emptied once the request is on its way (the caller's array too); never a
+       setting, never the log */
+    paperStop: function (words, code) {
+      var w = words && words.length === 24 ? words.join(' ') : '',
+        c = paperCode(code);
+      if (words) words.length = 0;
+      if (!w) return Promise.resolve({ ok: false, error: 'Please enter all 24 words.' });
+      if (!c) return Promise.resolve({ ok: false, error: 'That is not a KVault code.' });
+      if (!isLocal()) return notHere();
+      var a = { words: w, watch_code: c },
+        sent = askPaper('/api/paper.stop', a, 'The stop did not go through. No funds were moved.');
+      a.words = null;
+      return sent;
+    },
+    /* no keys, no fingerprint: two vault seeds open the vault. The seeds live in this one call's
+       arguments, emptied once the request is on its way (the caller's array too). `to` empty pays
+       this phone's purse and is left out of the call, never sent as null */
+    paperTakeout: function (seeds, code, to) {
+      var s = seeds && seeds.length === 2 ? [String(seeds[0]), String(seeds[1])] : [],
+        c = paperCode(code),
+        t = String(to || '').trim();
+      if (seeds) seeds.length = 0;
+      if (s.length !== 2 || s[0].length + s[1].length > 2000)
+        return Promise.resolve({ ok: false, error: 'Type two vault seeds of 24 words each.' });
+      if (!c) return Promise.resolve({ ok: false, error: 'That is not a KVault code.' });
+      if (!isLocal()) return Promise.resolve(sampleTakeout(s, t));
+      var a = { seeds: s, watch_code: c };
+      if (t) a.to = t;
+      var sent = askPaper('/api/paper.takeout', a,
+        'The funds could not be moved. Nothing was sent.');
+      a.seeds = null;
+      return sent;
+    },
+    /* keyless: a watched account's code as it is now */
+    watchedCode: function (id) {
+      if (!isLocal()) return Promise.resolve({ ok: true, watch_code: SAMPLE_WATCH });
+      return askEngine('/api/watch.code', { id: id }, 'The code could not be made.');
+    },
+    /* the paper stop for Home and Your papers: has (keys.public stops holder 'paper'), due (the
+       watch code differs from the one last printed), printed (some code was printed before) */
+    paperState: function () {
+      if (!isLocal()) return Promise.resolve({ has: false, pub: null });
+      var api = this;
+      return api.keysPublic().then(function (k) {
+        var pub = (k && k.ok && k.public) || null;
+        if (!hasPaper(k)) return { has: false, pub: pub };
+        return api.paperSheet().then(function (r) {
+          var code = String((r && r.ok && r.watch_code) || ''),
+            last = paperParts().hash;
+          return { has: true, pub: pub, printed: !!last,
+            due: !!code && shortHash(code) !== last };
+        });
+      });
+    },
+    paperDue: function () {
+      return this.paperState().then(function (s) {
+        return !!s.due;
+      });
+    },
+    paperShown: function (code) {
+      paperSave(shortHash(String(code || '')), paperParts().marks);
+    },
+    /* Your papers: what the person confirmed (s1-s3 vault seeds, h their own heir seed,
+       o their heir has an heir seed, p kept in separate places) */
+    paperMarks: function () {
+      return paperParts().marks;
+    },
+    paperMark: function (tok, on) {
+      var p = paperParts(),
+        m = p.marks.filter(function (t) {
+          return t !== tok;
+        });
+      if (on !== false) m.push(tok);
+      paperSave(p.hash, m);
+    },
+    watchImport: function (text) {
+      if (String(text || '').length > 4096) return Promise.resolve({ ok: false,
+        error: 'That code is too long to be a KVault code.' });
+      return askEngine('/api/watch.import', { text: String(text || '') }, 'That is not a watch code.').then(function (r) {
+        if (r.ok) loadWatched();
+        return r;
+      });
+    },
+    loadWatched: loadWatched,
+    watchTick: watchTick /* Home asks; at most once a minute */,
+    watchStop: function (id) {
+      return watchMove('Stop this account', '/api/watch.stop', id);
+    },
+    watchDecline: function (id) {
+      return watchMove('Send the withdrawal back', '/api/watch.decline', id);
+    },
+    watchClaim: function (id) {
+      return watchMove('Claim this account', '/api/watch.claim', id);
+    },
+    watchForget: function (id) {
+      return askEngine('/api/watch.forget', { id: id }, 'That could not be done.').then(function (r) {
+        if (r.ok) loadWatched();
+        return r;
+      });
     },
     /* which account the page is on; setAccount switches and polls at once */
     get account() {
@@ -727,7 +1283,8 @@
       return poll();
     },
     makeKeys: function (args) {
-      if (!bridge || !bridge.keysNew) return Promise.resolve({ ok: false, error: 'Keys can only be made on the phone.' });
+      if (duress || !bridge || !bridge.keysNew)
+        return Promise.resolve({ ok: false, error: 'Keys can only be made on the phone.' });
       return signerUnlock('Make the keys for this phone')
         .then(function (ok) {
           if (!ok) return { ok: false, error: NEED_FINGER };
@@ -767,15 +1324,21 @@
       var p = state.pending;
       if (!p) return { ok: true };
       if (state.source === 'live') return moneyAction('Decline this withdrawal', '/api/decline', {});
-      return demo ? demo.declinePending() : { ok: false, error: 'Not on this phone.' };
+      return demo ? demo.declinePending() : { ok: false, error: 'Not available on this device.' };
+    },
+    /* Coins: how many, the total and the cost of combining (Live: the purse, engine coins.info) */
+    coinsInfo: function () {
+      if (state.source !== 'live') return Promise.resolve(sampleCoins(state.coins || []));
+      return request('GET', '/api/coins').then(liveCoins);
     },
     /* Coins: Everyday's small coins become one (sample); the engine has no consolidate call yet */
     combineCoins: function () {
       if (state.source === 'live') return { ok: false, error: 'Combining coins is not in this build yet.' };
-      return demo ? demo.combineCoins() : { ok: false, error: 'Not on this phone.' };
+      return demo ? demo.combineCoins() : { ok: false, error: 'Not available on this device.' };
     },
     send: function (to, kas, label, mustWait) {
       if (state.source === 'live') {
+        kas = kasText(kas); /* the engine takes digits, never 1e-7 */
         /* the id lets the engine pay once when its answer was lost and the user slides again */
         if (!sendId || sendId.to !== to || sendId.kas !== kas) sendId = { to: to, kas: kas, id: randomHex(16) };
         var id = sendId.id;
@@ -787,10 +1350,6 @@
       return demo ? demo.send(to, kas, label, mustWait) : notHere();
     },
 
-    /* the Send draft was dropped: the next send is a new payment with its own id */
-    dropSend: function () {
-      sendId = null;
-    },
     finish: function () {
       if (state.source === 'live') return moneyAction('Finish your withdrawal', '/api/finish', {});
       return demo ? demo.finish() : notHere();
@@ -806,8 +1365,11 @@
       var o = state.outgoing;
       if (!o) return { ok: true };
       if (state.source === 'live')
-        return { ok: false, error: 'Your account sends at once; the minute to change your mind is not there yet.' };
-      return demo ? demo.stopOutgoing() : { ok: false, error: 'Not on this phone.' };
+        return { ok: false,
+          error:
+          'The one-minute cancellation window is not yet available; payments are sent ' +
+            'immediately.' };
+      return demo ? demo.stopOutgoing() : { ok: false, error: 'Not available on this device.' };
     },
 
     stop: function () {
@@ -867,27 +1429,22 @@
             if (!state.rulesNext) return { ok: true, done: true };
             say('fund');
             return api.funding().then(function (f) {
-              if (!f || f.ok === false) return { ok: false, error: (f && f.error) || 'The purse could not be read. Try again.' };
-              var floor = typeof f.min_kas === 'number' ? f.min_kas : 1.05,
-                kas = Math.floor(((+f.kas || 0) - 0.05) * 10000) / 10000;
-              if (!(kas >= floor))
-                return { ok: false, error: 'Your purse holds too little to update your rules. It needs at least ' + floor + ' KAS.' };
-              return api.fund(kas, null, account).then(function (x) {
-                if (x && x.ok) setSetting('rules_move', '');
-                return x;
-              });
+              return rulesFund(api, f);
             });
           });
         });
     },
-    /* "Update now" (rules.change answered now.ok): stop, take this account's own stop coin out of the safe to the purse,
+    /* "Update now" (rules.change answered now.ok): stop, take this account's own stop coin out of
+       the vault to the purse,
        open the same account from it under the stored rules. The marker records each step, so a refusal or a closed app
        picks up where it stopped (a second take-out would wait for a coin already taken). onStep as in finishRules. */
     updateNow: function (onStep) {
       var api = this,
         say = onStep || function () {},
         m = moveMarker();
-      if (!m || !m.now) m = { account: account, kas: 0, now: true };
+      /* a take-out marker on an account open and current again is left over: start afresh */
+      var stale = m && m.out && state.connected && !state.stale && !state.stopped;
+      if (!m || !m.now || stale) m = { account: account, kas: 0, now: true };
       function mark(k, v) {
         if (k) m[k] = v;
         setSetting('rules_move', JSON.stringify(m));
@@ -912,7 +1469,9 @@
         });
       }
       function openStep() {
-        if (!state.rulesNext) return Promise.resolve({ ok: true, done: true });
+        /* after a take-out the account reopens: under the new rules, or after a stop under its own
+           (engine opening_dials) */
+        if (!state.rulesNext && !m.out) return Promise.resolve({ ok: true, done: true });
         if (!(m.open > 0))
           return api.funding().then(function (f) {
             mark('open', Math.floor(((+(f && f.kas) || 0) - 0.05) * 10000) / 10000); /* the take-out's answer was lost: the purse less a fee margin */
@@ -950,7 +1509,8 @@
       if (state.source === 'live') return;
       if (demo) demo.skipHeir();
     },
-    /* Out of the vault: two of the three sheets, typed once, go to the engine for this one call and are
+    /* Out of the vault: two of the three vault seeds, typed once, go to the engine for this one
+       call and are
        not kept; the engine signs the 2-of-3 spend from the vault to `to` (empty = this phone's purse) of `kas` (0 = everything). */
     takeOut: function (sheets, to, kas) {
       if (state.source !== 'live') {
@@ -960,7 +1520,8 @@
       var a = {};
       if (sheets && sheets.length) a.sheets = sheets;
       if (to) a.to = to;
-      if (kas > 0) a.kas = kas; /* no sheets = the phone signs with its own sealed ones */
+      /* no seeds typed = the phone signs with its own sealed ones */
+      if (kas > 0) a.kas = kasText(kas);
       return moneyAction('Take money out of your vault', '/api/takeout', a).then(function (r) {
         a.sheets = null;
         sheets.length = 0;
@@ -970,21 +1531,34 @@
     /* Purse -> the open account (engine topup, the funding key) */
     topup: function (kas) {
       if (state.source !== 'live') return Promise.resolve({ ok: false, error: 'Not in Sample.' });
+      kas = kasText(kas);
       return moneyAction('Add ' + kas + ' KAS to your account', '/api/topup', { kas: kas });
     },
     sheets: function () {
-      return moneyAction('Show your sheets', '/api/sheets', {});
+      return moneyAction('Show your seeds', '/api/sheets', {});
     },
     burnSheets: function () {
-      return moneyAction('Burn the sheets on this phone', '/api/burn', { confirm: true });
+      return moneyAction('Delete the seeds on this phone', '/api/burn', { confirm: true });
+    },
+    /* the heir's own purse: where a claim pays (heir.purse, keyless), and a plain payment out of it
+       (heir.pay, this
+       phone's heir key; not an account, so no account number rides along) */
+    heirPurse: function () {
+      return askEngine('/api/heir.purse', {}, 'Your inheritance could not be read.');
+    },
+    heirPay: function (to, kas) {
+      var a = { to: to };
+      if (kas > 0) a.kas = kasText(kas);
+      return fingerAction('Send your inheritance', '/api/heir.pay', a);
     },
     pursePay: function (to, kas) {
       var a = { to: to };
-      if (kas > 0) a.kas = kas;
+      if (kas > 0) a.kas = kasText(kas);
       return moneyAction('Pay from your purse', '/api/pursepay', a);
     },
     resetKeys: function (leaveSafe) {
-      return moneyAction('Start fresh keys', '/api/reset', leaveSafe ? { confirm: true, leave_safe: true } : { confirm: true }).then(
+      return moneyAction('Replace your keys', '/api/reset', leaveSafe ? { confirm: true,
+        leave_safe: true } : { confirm: true }).then(
         function (r) {
           if (r.ok) {
             state.noKeys = true;

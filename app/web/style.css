@@ -1,20 +1,22 @@
 @font-face{font-family:"Outfit";src:url(fonts/Outfit-Variable.woff2) format("woff2");font-weight:100 900;font-display:swap}
 
 :root{
-  --ground:#06070c; --hair:rgba(255,255,255,.14); --ink:#eef2f4; --dim:#b9d9d0; --teal:#4dffe4; --stop:#e5352a; --red-glow:0 0 14px rgba(229,53,42,.75),0 0 32px rgba(229,53,42,.35);
+  --ground:#06070c; --hair:rgba(255,255,255,.14); --ink:#eef2f4; --dim:#b9d9d0; --teal:#4dffe4; --acct-glow:#c8ece7; --role:#ffa94d; --stop:#e5352a; --red-glow:0 0 14px rgba(229,53,42,.75),0 0 32px rgba(229,53,42,.35);
   --font:"Outfit",system-ui,-apple-system,"Roboto","Segoe UI",sans-serif;
   --n-t:0px; --n-r:0px; --n-b:0px; --n-l:0px; --ime:0px;
   --sat:max(env(safe-area-inset-top,0px),var(--n-t)); --sab:max(env(safe-area-inset-bottom,0px),var(--n-b));
   --sal:max(env(safe-area-inset-left,0px),var(--n-l)); --sar:max(env(safe-area-inset-right,0px),var(--n-r));
   --ease:cubic-bezier(.22,.8,.24,1);
   /* the dials from the tune page: glass, layout, text */
-  --glass-blur:34px; --glass-sat:0.95; --glass-bright:0.5; --glass-rgb:0,0,0; --glass-a:0.16; --glass-sheen:0; --glass-edge:220px; --glass-h:20vh; --glass-top:26px;
+  --glass-blur:18px; --glass-sat:0.95; --glass-bright:0.5; --glass-rgb:0,0,0; --glass-a:0.16; --glass-sheen:0; --glass-edge:220px; --glass-h:20vh; --glass-top:26px;
+  --text-ring:0 0 1px rgba(0,0,0,.9),0 0 3px rgba(0,0,0,.75),0 1px 6px rgba(0,0,0,.5); --icon-ring:drop-shadow(0 0 1px rgba(0,0,0,.9)) drop-shadow(0 0 3px rgba(0,0,0,.75)) drop-shadow(0 1px 6px rgba(0,0,0,.5));
   --pad:15px; --type:1.0; --weight:280; --scene-dim:0.42;
   color-scheme:dark;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%;overflow:hidden;background:var(--ground);color:var(--ink);font:var(--weight) 16px/1.5 var(--font);
   -webkit-font-smoothing:antialiased;user-select:none;-webkit-user-select:none;overscroll-behavior:none}
+body{text-shadow:var(--text-ring)} /* a soft dark outline: text never melts into the ribbon behind it */
 button,input,textarea{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;outline:0;border-radius:0}
 button{cursor:pointer;text-align:left}
 :focus-visible{outline:2px solid var(--teal);outline-offset:2px;border-radius:6px}
@@ -36,12 +38,20 @@ button{cursor:pointer;text-align:left}
   padding:10px calc(var(--sar) + var(--pad)) calc(var(--sab) + 14px) calc(var(--sal) + var(--pad));left:0;right:0;border-top:1px solid var(--hair);
   background:linear-gradient(to top,rgba(6,7,12,.94),rgba(6,7,12,.82) 60%,rgba(6,7,12,.55));-webkit-backdrop-filter:blur(16px) saturate(1.1);backdrop-filter:blur(16px) saturate(1.1); /* dark glass, so the words behind never clash */
   transition:opacity .45s var(--ease),transform .55s var(--ease)}
-#tabs button{font-size:15px;padding:8px 0;color:var(--dim);transition:color .35s}
-#tabs button.on{color:var(--teal)}
+#tabs button{font-size:14px;padding:8px 0;color:var(--dim);transition:color .35s}
+#tabs button.on{color:var(--teal);text-shadow:0 0 1px rgba(160,255,240,.85),0 0 6px rgba(77,255,228,.75),0 0 14px rgba(77,255,228,.4)} /* the open tab, halated */
+/* the Vault tab: the word alone, in line with the other tabs, in halated red */
+#tabs .vtab{color:#ff4b3e;font-size:12.5px;text-transform:uppercase;letter-spacing:.05em;animation:vpulse 2.4s ease-in-out infinite}
+#tabs .vtab.on{color:#ff7a6e}
+@keyframes vpulse{0%,100%{text-shadow:0 0 1px rgba(255,120,110,.8),0 0 5px rgba(255,59,46,.7),0 0 12px rgba(255,59,46,.35)}
+  50%{text-shadow:0 0 1px rgba(255,140,130,1),0 0 7px rgba(255,59,46,.95),0 0 18px rgba(255,59,46,.6)}}
+@media (prefers-reduced-motion:reduce){#tabs .vtab{animation:none;text-shadow:0 0 1px rgba(255,120,110,.8),0 0 6px rgba(255,59,46,.8)}}
 body.notabs #tabs{opacity:0;transform:translateY(12px);pointer-events:none}
 
 /* the How-it-works walk-through: thin progress marks, one step at a time, swipe or Next */
 .ui.walk{touch-action:pan-y}
+/* Back / Next stay in view and clear of the phone's own buttons (3-button navigation) */
+.ui.walk .twobtn{position:sticky;bottom:0;margin-bottom:24px}
 .marks{display:flex;gap:4px;flex:none}
 .marks i{flex:1;height:1px;background:var(--hair);transition:background-color .45s}
 .marks i.on{background:var(--teal)}
@@ -54,9 +64,6 @@ body.notabs #tabs{opacity:0;transform:translateY(12px);pointer-events:none}
 .step .howlink{margin-top:10px}
 .twobtn .slide{flex:1 1 0;margin-top:0} /* an armed slide inside the two-button row keeps its width */
 /* a small live copy of the screen a step talks about: the real screen at .42, one hairline round it, nothing else */
-.peek{position:relative;width:158px;height:341px;margin-top:16px;overflow:hidden;border-radius:14px;box-shadow:0 0 0 1px var(--hair);pointer-events:none}
-.peek .ui{position:absolute;inset:auto;left:0;top:0;width:375px;height:812px;overflow:hidden;transform:scale(.42);transform-origin:0 0;transition:none;padding:14px var(--pad) 24px var(--pad)}
-.peek .ui.tabbed{padding-bottom:78px}
 
 /* type, from the wave mock */
 .top{display:flex;align-items:center;justify-content:space-between;min-height:40px;flex:none;text-shadow:0 0 12px var(--ground),0 0 4px var(--ground)}
@@ -67,9 +74,10 @@ body.notabs #tabs{opacity:0;transform:translateY(12px);pointer-events:none}
 .bell{font-size:15px;color:var(--dim);padding:8px 0;position:relative}
 .bell.has{color:var(--teal)}
 .bell.has::after{content:'';position:absolute;top:6px;right:-3px;width:8px;height:8px;border-radius:50%;background:var(--teal);box-shadow:0 0 8px var(--teal)}
+/* amber: an alert newer than the last look at Alerts; it breathes until Alerts is opened */
+.bell.new::after{content:'';position:absolute;top:6px;right:-3px;width:8px;height:8px;border-radius:50%;background:var(--role);animation:bellnew 1.6s ease-in-out infinite}
+@keyframes bellnew{0%,100%{opacity:.7;box-shadow:0 0 4px var(--role)}50%{opacity:1;box-shadow:0 0 14px var(--role),0 0 26px rgba(255,169,77,.45)}}
 .bell.loud::after{background:var(--stop);box-shadow:0 0 10px var(--stop)}
-.help{flex:none;width:26px;height:26px;border-radius:50%;border:1px solid var(--hair);color:var(--dim);font-size:14px;text-align:center;line-height:24px;padding:0}
-.help:active{color:var(--teal);border-color:var(--teal)}
 .howlink[hidden],.pill[hidden]{display:none} /* a hidden pill stays hidden (otherwise 'Tap here to open' shows on every Home) */
 .howlink{display:block;font-size:14px;color:var(--dim);padding:6px 0 0;text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--hair)}
 .story{margin-top:22px}
@@ -90,6 +98,9 @@ body.notabs #tabs{opacity:0;transform:translateY(12px);pointer-events:none}
 .row{display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding-top:12px;border-top:1px solid var(--hair);font-size:15px;gap:12px}
 .row button{padding:5px 0;white-space:nowrap}
 .row .s{color:var(--stop)}
+/* Home: Vault, the cold place, centred and red with a soft halation (kept low, like every glow) */
+.row{position:relative}.row .vault{position:absolute;left:50%;transform:translateX(-50%);font-size:19px;font-weight:500;letter-spacing:.12em;text-transform:uppercase;color:#ff5a4d;text-shadow:0 0 1px rgba(0,0,0,.9),0 0 10px rgba(229,53,42,.55),0 0 26px rgba(229,53,42,.28)}
+.row:has(.vault){justify-content:flex-end;min-height:38px}
 .pill{display:block;width:max-content;max-width:100%;margin:18px auto 0;text-align:center;padding:14px 26px; /* a pill hugs its label, centred */border:1px solid var(--teal);color:var(--teal);border-radius:999px;box-shadow:0 0 14px rgba(142,232,218,.18); /* one style, a slight halo */transition:opacity .3s,background-color .3s,transform .25s var(--ease)}
 .pill:active{background-color:rgba(142,232,218,.12);transform:scale(.985)}
 .pill[disabled]{opacity:.38}
@@ -103,6 +114,11 @@ body.notabs #tabs{opacity:0;transform:translateY(12px);pointer-events:none}
 .notice:empty{display:none}
 .notice.quiet{color:var(--ink)}
 .notice.amber{color:#e8a33a} /* Home: the heir clock approaching */
+/* red over the ribbon: a thin black outline under a bright red halation */
+.notice.red,.item .r.old,.oldline{color:#ff4b3e;text-shadow:0 0 1px #000,0 0 1px #000,0 0 2px rgba(0,0,0,.85),0 0 6px rgba(255,59,46,.95),0 0 16px rgba(255,59,46,.6)}
+.notice.red{font-weight:600} /* Home: the paper stop's code is out of date; Your papers: out of date */
+/* Heir Unlock: calm ink to stop red in five steps as the inactivity period runs out */
+.h0{color:var(--ink)}.h1{color:#f1dfb8}.h2{color:var(--role)}.h3{color:#ff7a4a}.h4{color:var(--stop);text-shadow:0 0 1px rgba(0,0,0,.9),0 0 10px rgba(229,53,42,.4)}
 /* Home: everything you hold, one row each; a row with a chevron opens (a row must look like a button) */
 .parts{margin-top:14px}
 .part{display:flex;width:100%;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid var(--hair);text-align:left;font-size:15px}
@@ -115,12 +131,14 @@ body.notabs #tabs{opacity:0;transform:translateY(12px);pointer-events:none}
 .guards{margin-top:14px}
 .pips{display:flex;width:100%;justify-content:space-between;gap:6px;padding:0;background:none;border:0;color:inherit;text-align:left}
 .pip{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0;color:var(--dim);padding:6px 0;background:none;border:0;text-align:left;font:inherit}
-.piphint{font-size:12px;color:var(--dim);margin-top:2px}
 .pip i{display:block;height:3px;border-radius:2px;background:var(--dim);opacity:.25}
 .pip.on{color:var(--ink)}.pip.on i{background:var(--ink);opacity:.9}
 .pips.stopped .pip.on i{background:#d33}
-.pip .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase}.pip .v{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pip{text-align:center}.pip .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase}.pip .v{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chart{margin-top:14px}
+.psum{margin-top:18px}.pbig{font-weight:200;font-size:56px;line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums} /* the price screen summary: big light price, hairline rows */
+.pch{margin-top:8px;font-size:15px}.pch.up{color:#7fcf9a}.pch.down{color:#e07070}.pch .d{color:var(--dim);margin-left:8px}
+.prow{margin-top:12px;padding-top:10px}.prow .d{color:var(--dim)}.prow .v{text-align:right;font-variant-numeric:tabular-nums}.prow small{display:block;font-size:12px;color:var(--dim)}
 .chart .ch{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--dim);flex-wrap:wrap}
 .chart .ch .k{color:var(--ink)}.chart .up{color:#7fcf9a}.chart .down{color:#e07070}
 .chart .seg{margin-left:auto}
@@ -193,10 +211,15 @@ body.notabs #tabs{opacity:0;transform:translateY(12px);pointer-events:none}
 .list{margin-top:14px}
 .item{display:flex;width:100%;gap:14px;align-items:center;justify-content:space-between;padding:14px 0;border-bottom:1px solid var(--hair)}
 .item:last-child{border-bottom:0}
+.item.hot .d{color:var(--stop);text-shadow:var(--red-glow)} /* a watched account with a withdrawal waiting */
 .item .t{display:block;font-size:17px;line-height:1.3}
 .item .d{display:block;font-size:14px;line-height:1.38;color:var(--dim);margin-top:2px}
 .item .r{flex:none;font-size:14.5px;color:var(--dim)}
 .item .r.go{color:var(--teal)}
+.role,.item .d.role{color:var(--role)} /* guardian and heir words: amber, never the stop red */
+.lines{white-space:pre-line} /* one fact per line */
+.lab{color:var(--teal)} /* Home brief: the label, so the number it names stands apart */
+.pip .hl{font-size:11px;white-space:nowrap} /* Home Heir pip: the inactivity countdown under the name */
 .item>span:first-child{min-width:0;overflow-wrap:anywhere}
 .switch{flex:none;width:42px;height:24px;border-radius:999px;border:1px solid var(--dim);position:relative;transition:border-color .35s}
 .switch::after{content:"";position:absolute;left:3px;top:3px;width:16px;height:16px;border-radius:50%;background:var(--dim);transition:transform .38s var(--ease),background-color .35s}
@@ -206,9 +229,6 @@ body.notabs #tabs{opacity:0;transform:translateY(12px);pointer-events:none}
 .seg button{padding:4px 0;color:var(--dim);transition:color .3s}
 .seg button.on{color:var(--teal)}
 
-.plan{display:block;width:100%;padding:13px 0;border-bottom:1px solid var(--hair);transition:color .4s}
-.plan:last-child{border-bottom:0}
-.plan .n{display:block;font-weight:200;font-size:32px;line-height:1.15;color:var(--dim);transition:color .4s}
 .plan.on .n{color:var(--teal)}
 .plan .d{display:grid;grid-template-rows:1fr;font-size:15px;line-height:1.42;color:var(--dim);transition:color .4s}
 .plan .d b{font-weight:inherit;color:var(--ink)}
@@ -248,6 +268,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
 body.qrscreen #scene{opacity:.85} /* Receive: a touch back so the square code reads; the diamonds stay visible */
 .qr{width:min(58vw,224px);height:min(58vw,224px);background:var(--ink);border-radius:18px;padding:12px;margin:0}
 .qr svg{display:block;width:100%;height:100%}
+.qr.big{width:min(80vw,420px);height:min(80vw,420px);padding:14px} /* long codes: big squares for the other phone's camera */
 .addr{font-size:15px;line-height:1.5;overflow-wrap:anywhere;margin-top:16px;color:var(--dim);user-select:text;-webkit-user-select:text}
 /* Receive (planned, not piled): the code, the address, one line, two buttons */
 .code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:19px;letter-spacing:.08em;line-height:1.7;text-align:center;margin-top:28px;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text}
@@ -261,9 +282,9 @@ body.qrscreen #scene{opacity:.85} /* Receive: a touch back so the square code re
 .acctbtn{display:inline-flex;align-items:center;gap:9px;font-size:20px;color:var(--ink);padding:8px 0}
 .acctbtn span{position:relative;z-index:0}
 /* halation, not a glow: a blurred copy of the name breathes under it */
-.acctbtn span::before{content:attr(data-t);position:absolute;left:0;top:0;z-index:-1;color:var(--teal);filter:blur(9px);animation:acctglow 3.6s ease-in-out infinite;pointer-events:none}
-.acctbtn span::after{content:attr(data-t);position:absolute;left:0;top:0;z-index:-1;color:var(--teal);filter:blur(22px);opacity:.5;animation:acctglow 3.6s ease-in-out infinite;pointer-events:none}
-@keyframes acctglow{0%,100%{opacity:.25}50%{opacity:1}}
+.acctbtn span::before{content:attr(data-t);position:absolute;left:0;top:0;z-index:-1;color:var(--acct-glow);filter:blur(9px);animation:acctglow 3.6s ease-in-out infinite;pointer-events:none}
+.acctbtn span::after{content:attr(data-t);position:absolute;left:0;top:0;z-index:-1;color:var(--acct-glow);filter:blur(22px);opacity:.3;animation:acctglow 3.6s ease-in-out infinite;pointer-events:none}
+@keyframes acctglow{0%,100%{opacity:.15}50%{opacity:.55}}
 .log{margin-top:12px}.log .item{padding:9px 0}
 /* the explainer: nothing is laid over the screen. Each explained thing gets a teal hairline under it; a tap
    lights that one and one sentence about it shows in a glass strip above the tabs. */
@@ -280,9 +301,12 @@ body.explaining #xbar{display:flex}body.notabs #xbar{bottom:calc(var(--sab) + 8p
 .acctbtn svg{width:14px;height:14px;fill:none;stroke:var(--teal);stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .bell svg{display:block;width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
 .menu{display:flex;flex-direction:column;gap:4px;padding:8px 0 8px 6px}.menu i{display:block;width:18px;height:1.4px;background:var(--ink);border-radius:1px}
+/* the same dark ring as the words, so the menu lines and the bell never get lost in the ribbon */
+.menu,.bell svg{filter:var(--icon-ring)}
 .item.on .t{color:var(--teal)}
 .pip i{height:4px}.pip.on i{box-shadow:0 0 8px rgba(238,242,244,.3)}
 .dial.focus{box-shadow:0 0 0 1px var(--teal),0 0 22px rgba(77,255,228,.25);border-radius:14px;padding:8px 10px;margin:0 -10px}
+.readmore{color:var(--teal);font-size:inherit;padding:0}
 .item .rowmain{flex:1;display:flex;text-align:left;min-width:0;padding:0}.stopbtn{flex:none;color:var(--stop);text-shadow:var(--red-glow);padding:6px 0 6px 14px}
 .swatches{display:flex;gap:14px;margin-top:8px}
 .swatch{width:34px;height:34px;border-radius:50%;border:2px solid transparent;opacity:.75;background:var(--teal)}.swatch.on{opacity:1;border-color:var(--ink);box-shadow:0 0 14px rgba(255,255,255,.35)}
@@ -295,14 +319,20 @@ body.explaining #xbar{display:flex}body.notabs #xbar{bottom:calc(var(--sab) + 8p
 .sealtap[hidden]{display:none}
 .sealed .acctbtn,.sealed .big,.sealed .denom,.sealed .guards,.sealed .log,.sealed .row,.sealed .line{visibility:hidden} /* Home while locked: the seal alone */
 .treegap{height:40vh;flex:none}
+.treegap.short{height:30vh} /* People on the phone: both columns in view */
+.door{display:block;width:100%;text-align:left;padding:12px 0;font-size:16px;color:var(--teal)} /* People: a plain line under its list */
 .notice[hidden],.qrbox[hidden]{display:none} /* People: the weave lives in the scene behind this space */
-.lockline{display:block;width:100%;text-align:left;font-size:15px;color:var(--dim);padding:10px 0 2px}
 .ghost.small{font-size:13px;padding:6px 0 0}
 .field[hidden]{display:none}
 /* the code scanner */
 .scanbox{position:relative;width:min(78vw,300px);aspect-ratio:1;margin:18px auto 0;border-radius:24px;overflow:hidden;background:#000}
 .scanbox video{width:100%;height:100%;object-fit:cover;display:block}
 .scanframe{position:absolute;inset:18%;border:1.5px solid var(--teal);border-radius:14px;opacity:.8;box-shadow:0 0 18px rgba(77,255,228,.35)}
+/* Scan: the camera fills the whole screen behind the words, the frame marks where to hold the code */
+body.scanning #scene{opacity:0}
+body.scanning .scanbox{position:fixed;inset:0;width:auto;aspect-ratio:auto;margin:0;border-radius:0;z-index:-1}
+body.scanning .scanframe{inset:auto;left:50%;top:44%;width:min(72vw,420px);aspect-ratio:1;transform:translate(-50%,-50%)}
+body.scanning .scanbox + .sub{margin-top:calc(44vh + min(36vw,210px) - 40px)}
 
 .clock{font-weight:200;font-size:var(--big,68px);line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums;white-space:nowrap}
 .twobtn{display:flex;gap:10px;margin-top:18px;justify-content:center}
@@ -349,6 +379,10 @@ body.explaining #xbar{display:flex}body.notabs #xbar{bottom:calc(var(--sab) + 8p
   -webkit-backdrop-filter:blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright));backdrop-filter:blur(var(--glass-blur)) saturate(var(--glass-sat)) brightness(var(--glass-bright))}
 #sheet .pane::before{content:"";position:absolute;inset:0;z-index:-1;
   -webkit-mask-image:linear-gradient(to bottom,rgba(0,0,0,0) 0,#000 90px);mask-image:linear-gradient(to bottom,rgba(0,0,0,0) 0,#000 90px)}
+/* every page under Settings: the glass runs from the top bar down and is dark, so long text reads */
+.ui.dark{--glass-a:.74;--glass-edge:24px}
+.ui.dark .glass{flex:1 0 auto}
+.ui.dark .glass .push{flex:1 0 14px} /* buttons stay low, in thumb reach */
 .ui.tabbed .glass{margin-bottom:calc(-1 * (var(--sab) + 78px + var(--ime)));padding-bottom:calc(var(--sab) + 78px + var(--ime))}
 .glass>:first-child{margin-top:0}
 /* the watcher's banner on Home, above the glass sheet, never in the scene */
@@ -373,4 +407,25 @@ body.qrscreen .twobtn .pill{padding:10px 16px}
 .plan.soon{opacity:.55;cursor:default}.plan.soon i{font-style:normal;font-size:12px;color:var(--dim);margin-left:8px}
 
 .more[hidden]{display:none} /* Details folds */
+/* Home and People: a long block folded to one tappable line; the chevron turns down when open */
+.foldhd{display:flex;width:100%;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--hair);font-size:16px}
+.foldhd .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.foldhd .chev{flex:none;width:14px;height:14px;fill:none;stroke:var(--teal);stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;transform:rotate(-90deg);transition:transform .2s}
+.foldhd .chev.on{transform:none}
+.foldhd.bare{display:inline-flex;width:auto;max-width:100%;padding:0;border:0;font-size:inherit;line-height:inherit;vertical-align:top}
+.foldhd[aria-expanded="false"]:last-child{border-bottom:0}
+.door[hidden],.list[hidden]{display:none}
 .more{padding-top:2px}
+
+/* wide screens (tablets, foldables, a phone on its side): the words keep to one centred 560 px
+   column; the scene, the glass and the bars stay edge to edge. */
+@media (min-width:700px){
+  :root{--colL:max(calc(var(--sal) + var(--pad)),calc(50vw - 280px));
+    --colR:max(calc(var(--sar) + var(--pad)),calc(50vw - 280px))}
+  .ui,#tabs,#xbar{padding-left:var(--colL);padding-right:var(--colR)}
+  .glass{margin-left:calc(var(--sal) - var(--colL));margin-right:calc(var(--sar) - var(--colR));
+    padding-left:calc(var(--colL) - var(--sal));padding-right:calc(var(--colR) - var(--sar))}
+  .savebar{left:var(--colL);right:var(--colR)}
+  #sheet .pane{max-width:616px;margin:0 auto}
+}
+[data-wp]{position:sticky;bottom:0;z-index:2;padding:10px 0;background:var(--ground)} /* the word picker stays above the keyboard */
