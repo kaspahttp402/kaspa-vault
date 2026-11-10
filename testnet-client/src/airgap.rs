@@ -587,26 +587,56 @@ pub async fn takeout(ctx: &Ctx, amount: Option<u64>, to: &str, only_tx: Option<&
         }
     }
     let (req, _) = cold_send_request(ctx, coins, amount, to_spk)?;
-    let c = KeysErased(sign_here(ctx, &req)?);
-    ctx.verify(&c.0.tx, &c.0.entries)?;
-    let paid = c.0.tx.outputs.last().map_or(0, |o| o.value);
-    let id = ctx.try_submit(&c.0.tx, "takeout (two sheets on this device)").await?;
+    let c = sign_here(ctx, &req)?;
+    ctx.verify(&c.tx, &c.entries)?;
+    let paid = c.tx.outputs.last().map_or(0, |o| o.value);
+    let id = ctx.try_submit(&c.tx, "takeout (two sheets on this device)").await?;
     Ok((id, paid, to.to_string()))
 }
 
-/// A signed take-out whose Keypair copies are erased when it drops, on every path (errors too).
-struct KeysErased(Checked);
+/// Signing Keypair copies, erased when this drops: on a refusal inside `check`, on "Not signed", and
+/// after the answer is written.
+struct Erased(Vec<Keypair>);
 
-impl Drop for KeysErased {
-    fn drop(&mut self) {
-        for k in &mut self.0.keys {
+impl Erased {
+    fn wipe(&mut self) {
+        for k in &mut self.0 {
             k.non_secure_erase();
         }
     }
 }
 
+impl Drop for Erased {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+/// The two cold keys that sign and their sheet numbers: the first two present, or the two `sheets` names.
+/// Every Keypair in `present` is erased here; only the two copies that sign leave, inside `Erased`.
+fn two_cold(mut present: Vec<(usize, Keypair)>, sheets: &Option<Vec<usize>>) -> Result<(Vec<String>, Erased), String> {
+    let missing = sheets.iter().flatten().find(|s| !present.iter().any(|(n, _)| n == *s)).copied();
+    let mut keep = Erased(vec![]);
+    let mut names = vec![];
+    for (n, k) in present.iter_mut() {
+        let wanted = sheets.as_ref().is_none_or(|w| w.contains(n));
+        if missing.is_none() && wanted && keep.0.len() < 2 {
+            names.push(n.to_string());
+            keep.0.push(*k);
+        }
+        k.non_secure_erase();
+    }
+    if let Some(s) = missing {
+        return Err(format!("cold sheet {s} is not on this device"));
+    }
+    if keep.0.len() < 2 {
+        return Err(format!("Taking money out of the vault needs two of its three seeds on this device; found {}.", keep.0.len()));
+    }
+    Ok((names, keep))
+}
+
 /// `check` for a request made on this same device (no file, no fingerprint to compare by eye): the signed,
-/// budgeted transaction and its coins, keys erased by the caller.
+/// budgeted transaction and its coins; the signing keys erase themselves when the answer drops.
 fn sign_here(ctx: &Ctx, req: &SignRequest) -> Result<Checked, String> {
     let fp = fingerprint(&borsh::to_vec(req).unwrap());
     let c = check(ctx, req, &fp, None)?;
@@ -698,7 +728,9 @@ fn choose_cold_coins(ctx: &Ctx, mut coins: Vec<Coin>, amount: u64, to_spk: Scrip
 struct Checked {
     tx: Transaction,
     entries: Vec<UtxoEntry>,
-    keys: Vec<Keypair>,
+    /// Held so the copies are erased when this drops; only the laptop's `sign` also counts them.
+    #[cfg_attr(not(feature = "laptop"), allow(dead_code))]
+    keys: Erased,
     #[cfg_attr(not(feature = "laptop"), allow(dead_code))]
     name: &'static str,
     lines: Vec<String>,
@@ -721,8 +753,12 @@ fn check(ctx: &Ctx, req: &SignRequest, fp: &str, sheets: Option<Vec<usize>>) -> 
     ctx.keys.check_self()?;
     lines.push(format!("Rule block:   code {} (the online fund printed the same)", ctx.keys.public().sha256()));
     // 1. What kind of action, with which key(s). Card payments, withdrawals and the heir never come here.
-    let keys: Vec<Keypair> = match req.kind {
+    let keys = match req.kind {
         CANCEL | DECLINE => {
+            // The request's dials price this move (fee allowance, the amount that must stay), so a set
+            // that cannot be a real account's is refused in words. The heir rule is a funding rule and is
+            // not judged here: an emergency stop must never be refused over it.
+            req.dials.check(false, ctx.network.is_mainnet())?;
             let slot = req.which as usize;
             if slot >= 3 {
                 return Err(format!("the request names stop slot {}; there are three (1, 2, 3)", req.which));
@@ -733,30 +769,17 @@ fn check(ctx: &Ctx, req: &SignRequest, fp: &str, sheets: Option<Vec<usize>>) -> 
             } else {
                 format!("Action:       DECLINE by stop key {} (the waiting withdrawal is withdrawn; the account stays open, Locked again; nothing leaves but the fee)", slot + 1)
             });
-            vec![key]
+            Erased(vec![key])
         }
         _ if ctx.keys.public().cold_external => return Err(COLD_EXTERNAL.into()),
         _ if ctx.keys.legacy_safe() => {
             lines.push("Action:       SAFE WITHDRAWAL with the one cold key (legacy single-key safe)".to_string());
-            vec![ctx.keys.cold_key()]
+            Erased(vec![ctx.keys.cold_key()])
         }
         _ => {
-            let mut present = ctx.keys.cold_keys();
-            if let Some(want) = &sheets {
-                for s in want {
-                    if !present.iter().any(|(n, _)| n == s) {
-                        return Err(format!("cold sheet {s} is not on this device"));
-                    }
-                }
-                present.retain(|(n, _)| want.contains(n));
-            }
-            if present.len() < 2 {
-                return Err(format!("Taking money out of the vault needs two of its three seeds on this device; found {}.", present.len()));
-            }
-            present.truncate(2);
-            let names: Vec<String> = present.iter().map(|(n, _)| n.to_string()).collect();
+            let (names, two) = two_cold(ctx.keys.cold_keys(), &sheets)?;
             lines.push(format!("Action:       SAFE WITHDRAWAL with sheets {} (2-of-3 safe)", names.join(",")));
-            present.into_iter().map(|(_, k)| k).collect()
+            two
         }
     };
     // 2. The account, and that the coin really belongs to it. The input script is derived here from this
@@ -836,7 +859,7 @@ fn check(ctx: &Ctx, req: &SignRequest, fp: &str, sheets: Option<Vec<usize>>) -> 
     // 4. Sign in memory and measure what the engine itself needs; trim output 0 only within the contract's allowance.
     let do_sign = |tx: &mut Transaction| -> Result<(), String> {
         ctx.try_sign_and_budget(tx, &entries, &|i, t| {
-            let sigs: Vec<Vec<u8>> = keys.iter().map(|k| ctx.sign_input(t, &entries, i, k)).collect();
+            let sigs: Vec<Vec<u8>> = keys.0.iter().map(|k| ctx.sign_input(t, &entries, i, k)).collect();
             req.sigscript(ctx, &sigs)
         })
     };
@@ -958,7 +981,7 @@ pub fn sign(ctx: &Ctx, request: &Path, sheets: Option<Vec<usize>>, answer: &mut 
         return Ok(false);
     }
     let tx = c.tx;
-    let sigs = first_pushes(&tx.inputs[0].signature_script, c.keys.len());
+    let sigs = first_pushes(&tx.inputs[0].signature_script, c.keys.0.len());
     let resp = SignResponse {
         kind: c.name.into(),
         txid: tx.id().to_string(),
@@ -969,7 +992,7 @@ pub fn sign(ctx: &Ctx, request: &Path, sheets: Option<Vec<usize>>, answer: &mut 
         more: tx.inputs[1..]
             .iter()
             .map(|input| InputSigs {
-                signatures: first_pushes(&input.signature_script, c.keys.len()).iter().map(|s| faster_hex::hex_string(s)).collect(),
+                signatures: first_pushes(&input.signature_script, c.keys.0.len()).iter().map(|s| faster_hex::hex_string(s)).collect(),
                 budget: input.compute_commit.compute_budget().expect("v1 input has a budget"),
             })
             .collect(),
@@ -1458,6 +1481,25 @@ mod tests {
         };
         let err = no_panic(|| run(&ctx, &over, "y\n")).unwrap_err();
         assert!(err.contains("add up to more than the coin"), "{err}");
+        // a decline whose dials no account could have: refused in words before a key is picked
+        let wild = SignRequest { output0: 9 * KAS, dials: Dials { max_fee: -1, ..Dials::testnet() }, ..over.clone() };
+        let err = no_panic(|| run(&ctx, &wild, "y\n")).unwrap_err();
+        assert!(err.contains("max fee dial must be above zero"), "{err}");
+        let wild = SignRequest { output0: 9 * KAS, dials: Dials { min_remainder: 1, ..Dials::testnet() }, ..over.clone() };
+        let err = no_panic(|| run(&ctx, &wild, "y\n")).unwrap_err();
+        assert!(err.contains("must be below the min remainder dial"), "{err}");
+        // the two cold keys that sign: a sheet that is not here, or one sheet alone, is refused; the keys
+        // that leave are the named two, and wiping them leaves no secret behind
+        let key = |b: u8| keypair(&[b; 32]);
+        let three = || vec![(1, key(11)), (2, key(12)), (3, key(13))];
+        assert!(two_cold(vec![(1, key(1)), (2, key(2))], &Some(vec![1, 3])).err().unwrap().contains("cold sheet 3 is not on this device"));
+        assert!(two_cold(vec![(2, key(2))], &None).err().unwrap().contains("found 1."));
+        assert!(two_cold(three(), &Some(vec![3])).err().unwrap().contains("found 1."));
+        let (names, mut two) = two_cold(three(), &Some(vec![3, 1])).unwrap();
+        assert_eq!((names, two.0.clone()), (vec!["1".to_string(), "3".to_string()], vec![key(11), key(13)]));
+        assert_eq!(two_cold(three(), &None).unwrap().0, vec!["1".to_string(), "2".to_string()]);
+        two.wipe();
+        assert!(two.0.iter().all(|k| *k != key(11) && *k != key(13)), "wiped keys hold no secret");
         // another network's request is refused before its fee rate reaches this device's pricing
         let floor = ctx.network.fee_floor;
         let mainnet = crate::network::MAINNET.to_string();

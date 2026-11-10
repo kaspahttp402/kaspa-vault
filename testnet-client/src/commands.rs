@@ -28,6 +28,36 @@ use std::path::{Path, PathBuf};
 /// Fee reserve staged with a top-up; the contract allows one output, so what the fee does not use grows the vault.
 const TOPUP_RESERVE: u64 = 2_000_000;
 
+/// Why a spend did not go out. Only the builder's own limit and kept-minimum refusals are `NeedsNotice`;
+/// a refusal from anywhere else is `Other`, whatever its words say.
+#[derive(Debug, PartialEq)]
+pub enum SpendRefusal {
+    /// Over the daily limit, or it would leave less than the account must keep: a withdrawal with
+    /// notice can still carry this payment.
+    NeedsNotice(String),
+    Other(String),
+}
+
+impl From<String> for SpendRefusal {
+    fn from(words: String) -> Self {
+        SpendRefusal::Other(words)
+    }
+}
+
+impl From<&str> for SpendRefusal {
+    fn from(words: &str) -> Self {
+        SpendRefusal::Other(words.into())
+    }
+}
+
+impl From<SpendRefusal> for String {
+    fn from(r: SpendRefusal) -> String {
+        match r {
+            SpendRefusal::NeedsNotice(words) | SpendRefusal::Other(words) => words,
+        }
+    }
+}
+
 /// fund and topup: a vault below VAULT_FLOOR (minRemainder + maxFee) could never cancel, inherit or
 /// request on its own (vault.sil L6), so money must not be born stuck. `have` is what the vault holds now.
 fn floor_check(d: &Dials, have: u64, adding: u64) -> Result<(), String> {
@@ -355,7 +385,7 @@ impl Ctx {
     }
 
     /// `fund`: pin the contract source into this folder, then open a vault (genesis covenant) from the funding coins.
-    pub async fn do_fund(&self, amount_kas: f64) -> Result<String, String> {
+    pub async fn do_fund(&self, amount: u64) -> Result<String, String> {
         // A rule change keeps the same account: the retired record's lines carry over, then "Rules updated".
         let carried = match self.try_load_vault()? {
             // Written at once: an opening that fails after this point (floor, fee, network) keeps the lines.
@@ -369,7 +399,7 @@ impl Ctx {
             None => read_carry(&self.dir, self.account),
         };
         let reopen = !carried.is_empty();
-        let amount = sompi(amount_kas);
+        let amount_kas = kas(amount);
         let has_heir = !self.keys.public().heir_x.is_empty();
         self.dials.check(has_heir, self.network.is_mainnet())?;
         floor_check(&self.dials, 0, amount)?;
@@ -527,18 +557,21 @@ impl Ctx {
 
     /// Pays from the vault under the per-window cap; returns the tx id. `self.force` sends
     /// an over-cap spend anyway so the node's own rejection can be seen.
-    pub async fn do_spend(&self, amount_kas: f64, to: &str) -> Result<String, String> {
+    pub async fn do_spend(&self, amount: u64, to: &str) -> Result<String, SpendRefusal> {
         let force = self.force;
+        // Set by the builder when it refuses for the limit or the kept minimum, cleared on every try: the
+        // one refusal a withdrawal with notice can still carry.
+        let notice = std::cell::Cell::new(false);
         let mut v = self.open_vault()?;
         if v.state.stage != 0 {
             return Err("vault is Pending; finish or cancel first".into());
         }
-        let amount = sompi(amount_kas);
+        let amount_kas = kas(amount);
         let to_script = self.network.try_to_spk(to)?;
         let coin = self.try_vault_coin(&v).await?;
         let lock_time = self.try_daa().await?.saturating_sub(20);
         if lock_time >= DAA_DOMAIN_LIMIT {
-            return Err(format!("DAA score {lock_time} is past the DAA domain"));
+            return Err(format!("DAA score {lock_time} is past the DAA domain").into());
         }
         let in_daa = coin.1.block_daa_score as i64;
         let next_for = |fee: u64| {
@@ -555,24 +588,28 @@ impl Ctx {
         // of the payment, whichever is larger (a tiny payee output has a huge storage mass).
         let ceiling = (v.dials.max_fee as u64).max(amount / 10);
         let (tx, fee) = self.try_with_fee(std::slice::from_ref(&coin.1), Some(ceiling), &|fee| {
+            notice.set(false);
             let next = next_for(fee);
             if next.spent > v.dials.cap {
                 if !force {
+                    notice.set(true);
                     return Err(format!("{OVER_CAP}: {} > {} sompi in the current window (use --force to let the node say so)", next.spent, v.dials.cap));
                 }
                 println!("over the cap ({} > {} sompi); sending anyway because of --force", next.spent, v.dials.cap);
             }
             let left = coin.1.amount.checked_sub(amount + fee).ok_or("the vault does not hold that much")?;
             if left < v.dials.min_remainder as u64 && !force {
+                notice.set(true);
                 return Err(format!("{LOW_REMAINDER}: {left} < {} sompi", v.dials.min_remainder));
             }
             let outputs = vec![TransactionOutput::new(amount, to_script.clone()), self.continuation(left, &next, &v)];
             self.vault_tx(&v, &coin, "spend", Some(&spend_key), &[], outputs, 0, lock_time)
         })
         .map_err(|e| {
-            fee_words(e, |need, _| {
+            let words = fee_words(e, |need, _| {
                 format!("the network fee for this payment would be {:.5} KAS, more than a tenth of the payment. Pay a larger amount or add to the vault first.", kas(need))
-            })
+            });
+            if notice.get() { SpendRefusal::NeedsNotice(words) } else { SpendRefusal::Other(words) }
         })?;
         let id = self.try_submit(&tx, "spend").await?;
         v.state = next_for(fee);
@@ -582,7 +619,7 @@ impl Ctx {
     }
 
     /// First half of a withdrawal with notice; returns the tx id.
-    pub async fn do_request(&self, amount_kas: f64, to: &str) -> Result<String, String> {
+    pub async fn do_request(&self, amount: u64, to: &str) -> Result<String, String> {
         let mut v = self.open_vault()?;
         // v6 hard-limit dial: the contract's request entry fails outright; say so first.
         if self.keys.public().hard_limit {
@@ -591,7 +628,7 @@ impl Ctx {
         if v.state.stage != 0 {
             return Err("vault is already Pending".into());
         }
-        let amount = sompi(amount_kas);
+        let amount_kas = kas(amount);
         // Contract v3 (L3): a request below minRemainder could never finish into a minable
         // output, so the contract refuses it; say so here instead of a bare engine VerifyError.
         if (amount as i64) < v.dials.min_remainder {
@@ -768,12 +805,12 @@ impl Ctx {
     /// address, then the vault coin (input 0) and that staged coin go into one continuation of
     /// old amount + staged coin - fee, state unchanged (the unused part of the reserve stays in the
     /// vault). Locked (stage=0) only, signed with the spend key.
-    pub async fn do_topup(&self, amount_kas: f64) -> Result<String, String> {
+    pub async fn do_topup(&self, amount: u64) -> Result<String, String> {
         let mut v = self.open_vault()?;
         if v.state.stage != 0 {
             return Err("vault is Pending; finish or cancel first (topup is stage=0 only)".into());
         }
-        let amount = sompi(amount_kas);
+        let amount_kas = kas(amount);
         if amount == 0 {
             return Err("topup needs an amount above zero".into());
         }
@@ -1162,6 +1199,11 @@ mod tests {
         let over = fee_words(FeeError::OverCeiling { need: 1, ceiling: 2 }, |n, c| format!("over {n} {c}"));
         assert_eq!(over, "over 1 2");
         assert_eq!(fee_words(FeeError::Build(format!("{OVER_CAP}: x")), |_, _| String::new()), format!("{OVER_CAP}: x"));
+        // words alone never choose the withdrawal-with-notice route: a refusal that only reads like the
+        // limit (a node's text, say) is Other, and both kinds give their words back unchanged
+        assert_eq!(SpendRefusal::from(format!("{OVER_CAP}: x")), SpendRefusal::Other(format!("{OVER_CAP}: x")));
+        assert_eq!(SpendRefusal::from(LOW_REMAINDER), SpendRefusal::Other(LOW_REMAINDER.into()));
+        assert_eq!(String::from(SpendRefusal::NeedsNotice("a".into())), "a");
         assert!(fee_words(FeeError::NotSettled, |_, _| String::new()).starts_with("The network charge could not be worked out"));
     }
 

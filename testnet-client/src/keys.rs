@@ -328,8 +328,14 @@ pub const PUBLIC_EXPORT_KIND: &str = "vault-public";
 pub const PASSPHRASE_ENV: &str = "KASPAVAULT_PASSPHRASE";
 /// Key stretching rounds (PBKDF2-HMAC-SHA256) for a new locked keys.json; the file records its own count.
 pub const KEY_STRETCH_ROUNDS: u32 = 600_000;
-/// Fewest rounds a locked file may claim; fewer and the file is refused as tampered.
+/// Fewest rounds a locked file may claim; fewer and the file is refused as tampered. This program has
+/// only ever written KEY_STRETCH_ROUNDS; the tests use a small floor so they stay quick.
+#[cfg(not(test))]
+pub const KEY_STRETCH_FLOOR: u32 = 100_000;
+#[cfg(test)]
 pub const KEY_STRETCH_FLOOR: u32 = 1_000;
+/// Most rounds a locked file may claim: an edited count must not hold the program for hours.
+pub const KEY_STRETCH_CEILING: u32 = 10_000_000;
 const LOCK_FORM: &str = "kv-lock-1";
 
 /// A locked keys.json: the secrets sealed under the passphrase, the public block beside them in the
@@ -667,15 +673,19 @@ impl Keys {
     }
     /// The locked form of this file: secrets sealed under `pass`, the public block in the clear.
     pub fn lock(&self, pass: &str, rounds: u32) -> Result<String, String> {
-        let secrets = Keys { public: None, public_sha256: None, ..self.clone() };
-        let mut ct = serde_json::to_string(&secrets).map_err(|e| format!("keys: {e}"))?.into_bytes();
+        let mut secrets = Keys { public: None, public_sha256: None, ..self.clone() };
+        let json = serde_json::to_string(&secrets);
+        secrets.wipe();
+        let mut ct = json.map_err(|e| format!("keys: {e}"))?.into_bytes();
         let (mut salt, mut nonce) = ([0u8; 16], [0u8; 16]);
         secp256k1::rand::thread_rng().fill_bytes(&mut salt);
         secp256k1::rand::thread_rng().fill_bytes(&mut nonce);
-        let (enc_key, mac_key) = stretch(pass.as_bytes(), &salt, rounds);
+        let (mut enc_key, mut mac_key) = stretch(pass.as_bytes(), &salt, rounds);
         keystream_xor(&enc_key, &nonce, &mut ct);
         let aad = self.public.as_ref().map(|p| serde_json::to_string(p).expect("public block is plain JSON")).unwrap_or_default();
         let tag = seal_tag(&mac_key, &salt, &nonce, aad.as_bytes(), &ct);
+        enc_key.zeroize();
+        mac_key.zeroize();
         let l = Locked {
             locked: LOCK_FORM.into(),
             rounds,
@@ -689,20 +699,26 @@ impl Keys {
         serde_json::to_string_pretty(&l).map_err(|e| format!("keys: {e}"))
     }
     fn unlock(l: &Locked, pass: &str) -> Result<Keys, String> {
-        if l.rounds < KEY_STRETCH_FLOOR {
+        if !(KEY_STRETCH_FLOOR..=KEY_STRETCH_CEILING).contains(&l.rounds) {
             return Err("rounds".into());
         }
         let salt = try_unhex(&l.salt)?;
         let nonce = try_unhex(&l.nonce)?;
         let mut ct = try_unhex(&l.secrets)?;
         let tag = try_unhex(&l.tag)?;
-        let (enc_key, mac_key) = stretch(pass.as_bytes(), &salt, l.rounds);
+        let (mut enc_key, mut mac_key) = stretch(pass.as_bytes(), &salt, l.rounds);
         let aad = l.public.as_ref().map(|p| serde_json::to_string(p).expect("public block is plain JSON")).unwrap_or_default();
-        if !same_bytes(&seal_tag(&mac_key, &salt, &nonce, aad.as_bytes(), &ct), &tag) {
+        let good = same_bytes(&seal_tag(&mac_key, &salt, &nonce, aad.as_bytes(), &ct), &tag);
+        mac_key.zeroize();
+        if !good {
+            enc_key.zeroize();
             return Err("tag".into());
         }
         keystream_xor(&enc_key, &nonce, &mut ct);
-        let mut keys: Keys = serde_json::from_slice(&ct).map_err(|_| "json".to_string())?;
+        enc_key.zeroize();
+        let opened = serde_json::from_slice::<Keys>(&ct);
+        ct.zeroize();
+        let mut keys = opened.map_err(|_| "json".to_string())?;
         keys.public = l.public.clone();
         keys.public_sha256 = l.public_sha256.clone();
         Ok(keys)
@@ -717,8 +733,10 @@ impl Keys {
         let text = if plain {
             serde_json::to_string_pretty(self).map_err(|e| format!("keys: {e}"))?
         } else {
-            let pass = passphrase("Choose a passphrase for keys.json: ", true)?;
-            self.lock(&pass, KEY_STRETCH_ROUNDS)?
+            let mut pass = passphrase("Choose a passphrase for keys.json: ", true)?;
+            let locked = self.lock(&pass, KEY_STRETCH_ROUNDS);
+            pass.zeroize();
+            locked?
         };
         write_private(path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
     }
@@ -788,11 +806,13 @@ impl Keys {
             if l.locked != LOCK_FORM {
                 return Err(format!("{} is locked in a form this program does not know (`{}`). Use a newer program.", path.display(), l.locked));
             }
-            let pass = match pass {
+            let mut pass = match pass {
                 Some(p) => p.to_string(),
                 None => passphrase("Passphrase for keys.json: ", false)?,
             };
-            return Self::unlock(&l, &pass).map_err(|_| format!("The passphrase is wrong, or {} was changed. Try again, or restore the original file.", path.display()));
+            let opened = Self::unlock(&l, &pass);
+            pass.zeroize();
+            return opened.map_err(|_| format!("The passphrase is wrong, or {} was changed. Try again, or restore the original file.", path.display()));
         }
         // A fixed message: the parser's own would echo the field it tripped on, secrets included.
         let keys: Keys = serde_json::from_str(&text).map_err(|_| format!("{} is not a keys.json this program can read. Restore the original file.", path.display()))?;
@@ -1509,6 +1529,14 @@ mod tests {
         let mut l: Locked = serde_json::from_str(&text).unwrap();
         l.tag = "zz".into();
         assert!(Keys::unlock(&l, "pw").is_err(), "non-hex tag");
+        // a count past the ceiling is refused at once, before any stretching (it would run for hours)
+        let mut l: Locked = serde_json::from_str(&text).unwrap();
+        l.rounds = u32::MAX;
+        assert_eq!(Keys::unlock(&l, "pw").unwrap_err(), "rounds");
+        l.rounds = KEY_STRETCH_CEILING + 1;
+        assert_eq!(Keys::unlock(&l, "pw").unwrap_err(), "rounds");
+        l.rounds = KEY_STRETCH_FLOOR - 1;
+        assert_eq!(Keys::unlock(&l, "pw").unwrap_err(), "rounds");
     }
 
     #[test]

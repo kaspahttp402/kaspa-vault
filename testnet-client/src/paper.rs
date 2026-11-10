@@ -1106,7 +1106,9 @@ mod tests {
         let d = make(&core, &json!({})).await;
         assert_eq!(d["slot"], json!(3), "the waiting paper stop is replaced, not doubled");
         let (hex, phrase) = (faster_hex::hex_string(&secret), wb.join(" "));
-        assert!(!c.to_string().contains(&hex) && !c.to_string().contains(&wb[0]));
+        // two words in a row, not one: a short word ("add", "bed", "ok"...) turns up in the answer's own
+        // field names and hex by chance, which failed this test now and then
+        assert!(!c.to_string().contains(&hex) && !c.to_string().contains(&wb[..2].join(" ")) && !c.to_string().contains(&phrase));
         assert!(!d.to_string().contains(&phrase));
         for e in std::fs::read_dir(&dir).unwrap().flatten() {
             let text = std::fs::read_to_string(e.path()).unwrap_or_default();

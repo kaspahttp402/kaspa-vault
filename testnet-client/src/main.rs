@@ -44,7 +44,7 @@ use vault_core::{airgap, commands, serve, tx, watch};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use vault_core::autostop::AutoStop;
-use vault_core::contract::Dials;
+use vault_core::contract::{Dials, sompi};
 use vault_core::core::{Core, Slot};
 use vault_core::keys::Keys;
 use vault_core::network::Network;
@@ -373,15 +373,15 @@ async fn main() {
         Cmd::ColdSend { kas: amount_kas, to, airgap: true } => airgap::prepare_cold_send(&ctx, amount_kas, &to).await.unwrap_or_else(|e| refuse(e)),
         Cmd::ColdSend { airgap: false, .. } => fail("cold-send needs --airgap: the cold key lives on the offline device".into()),
         Cmd::Status => ctx.do_status().await.unwrap_or_else(|e| refuse(e)),
-        Cmd::Fund { kas, .. } => drop(ctx.do_fund(kas).await.unwrap_or_else(|e| refuse(e))),
+        Cmd::Fund { kas, .. } => drop(ctx.do_fund(sompi(kas)).await.unwrap_or_else(|e| refuse(e))),
         Cmd::Pay { kas, to } => drop(ctx.do_pay(kas, &to).await.unwrap_or_else(|e| refuse(e))),
-        Cmd::Spend { kas, to, .. } => drop(ctx.do_spend(kas, &to).await.unwrap_or_else(|e| refuse(e))),
-        Cmd::Request { kas, to } => drop(ctx.do_request(kas, &to).await.unwrap_or_else(|e| refuse(e))),
+        Cmd::Spend { kas, to, .. } => drop(ctx.do_spend(sompi(kas), &to).await.unwrap_or_else(|e| refuse(e.into()))),
+        Cmd::Request { kas, to } => drop(ctx.do_request(sompi(kas), &to).await.unwrap_or_else(|e| refuse(e))),
         Cmd::Finish => drop(ctx.do_finish().await.unwrap_or_else(|e| refuse(e))),
         Cmd::Cancel { airgap: false, which } => drop(ctx.do_cancel(which).await.unwrap_or_else(|e| refuse(e))),
         Cmd::Decline { airgap: false, which } => drop(ctx.do_decline(which).await.unwrap_or_else(|e| refuse(e))),
         Cmd::InheritOpen => drop(ctx.do_inherit_open().await.unwrap_or_else(|e| refuse(e))),
-        Cmd::Topup { kas } => drop(ctx.do_topup(kas).await.unwrap_or_else(|e| refuse(e))),
+        Cmd::Topup { kas } => drop(ctx.do_topup(sompi(kas)).await.unwrap_or_else(|e| refuse(e))),
         Cmd::Inherit => drop(ctx.do_inherit().await.unwrap_or_else(|e| refuse(e))),
         Cmd::Watch {
             node,

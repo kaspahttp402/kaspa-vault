@@ -1362,7 +1362,7 @@ impl Core {
     /// account from the top-up purse with this Core's dials turned by the request (commands.rs do_fund).
     /// Needs the funding key: `Slot::Funding` on the phone, keys.json on the laptop.
     async fn fund(&self, args: &Value) -> Value {
-        let Some(amount_kas) = parse_kas(&args["kas"]).map(kas) else { return result(Err(BAD_AMOUNT.into())) };
+        let Some(amount) = parse_kas(&args["kas"]) else { return result(Err(BAD_AMOUNT.into())) };
         let base = match opening_dials(&self.ctx, args) {
             Ok(d) => d,
             Err(e) => return result(Err(e)),
@@ -1388,7 +1388,7 @@ impl Core {
                 return result(Err(e));
             }
         };
-        let funded = ctx.do_fund(amount_kas).await;
+        let funded = ctx.do_fund(amount).await;
         ctx.keys.wipe();
         if funded.is_ok() {
             clear_rules_next(&self.ctx.dir, self.ctx.account);
@@ -1444,7 +1444,7 @@ impl Core {
         let Some(amount) = parse_kas(&args["kas"]) else { return fail(BAD_AMOUNT) };
         let Ok(_money) = self.money.try_lock() else { return fail(BUSY) };
         let mut ctx = self.ctx.clone();
-        let added = ctx.do_topup(kas(amount)).await;
+        let added = ctx.do_topup(amount).await;
         ctx.keys.wipe();
         if added.is_ok() {
             self.settle().await;
@@ -2110,7 +2110,7 @@ impl Core {
         let to = self.ctx.funding_addr()?.to_string();
         let keep = v.dials.min_remainder as u64 + v.dials.max_fee as u64 * 2;
         let amount = coin.1.amount.checked_sub(keep).filter(|a| *a > 0).ok_or("This account holds too little to move; stop it and open again instead.")?;
-        let (fee, kind, _) = self.quote_send(kas(amount), &to).await?;
+        let (fee, kind, _) = self.quote_send(amount, &to).await?;
         Ok((amount, to, if kind == "spend" || kind == "now" { "now" } else { "notice" }, fee))
     }
 
@@ -2254,11 +2254,11 @@ impl Core {
         if self.ctx.network.address(&to).is_err() {
             return send_result(Err(BAD_ADDRESS.into()));
         }
-        let Some(amount_kas) = parse_kas(&parsed["kas"]).map(kas) else {
+        let Some(amount) = parse_kas(&parsed["kas"]) else {
             return send_result(Err(BAD_AMOUNT.into()));
         };
         let Ok(_money) = self.money.try_lock() else { return send_result(Err(BUSY.into())) };
-        let sent = self.route_send(amount_kas, &to).await;
+        let sent = self.route_send(amount, &to).await;
         if sent.is_ok() {
             self.settle().await;
         }
@@ -2273,29 +2273,29 @@ impl Core {
         answer
     }
 
-    async fn route_send(&self, amount_kas: f64, to: &str) -> Result<(String, &'static str, Option<f64>), String> {
+    async fn route_send(&self, amount: u64, to: &str) -> Result<(String, &'static str, Option<f64>), String> {
         let v = self.open_vault()?;
         if v.state.stage != 0 {
             return Err("A withdrawal is already waiting. Finish it first.".into());
         }
         let balance = self.ctx.try_vault_coin(&v).await?.1.amount;
-        if sompi(amount_kas) >= balance {
+        if amount >= balance {
             return Err("The account doesn't hold that much.".into());
         }
-        let (tx, kind) = match self.ctx.do_spend(amount_kas, to).await {
+        let (tx, kind) = match self.ctx.do_spend(amount, to).await {
             Ok(tx) => (tx, "now"),
             // The leftover and fee rules request and finish meet on chain live in the client
             // (commands.rs do_request), in its words; the service no longer keeps a copy.
-            Err(e) if e.starts_with(OVER_CAP) || e.starts_with(LOW_REMAINDER) => {
+            Err(crate::commands::SpendRefusal::NeedsNotice(e)) => {
                 // v6 hard-limit dial: nothing above the limit may wait; the same words as `request`.
                 if self.ctx.keys.public().hard_limit {
                     println!("not a spend ({e}); the hard limit is on, so no withdrawal with notice");
                     return Err(HARD_LIMIT.into());
                 }
                 println!("not a spend ({e}); trying a withdrawal with notice");
-                (self.ctx.do_request(amount_kas, to).await?, "pending")
+                (self.ctx.do_request(amount, to).await?, "pending")
             }
-            Err(e) => return Err(e),
+            Err(crate::commands::SpendRefusal::Other(e)) => return Err(e),
         };
         Ok((tx, kind, self.paid_fee()))
     }
@@ -2387,10 +2387,10 @@ impl Core {
                 if self.ctx.network.address(&to).is_err() {
                     return quote_result(Err(BAD_ADDRESS.into()));
                 }
-                let Some(amount_kas) = parse_kas(&args["amount"]).map(kas) else {
+                let Some(amount) = parse_kas(&args["amount"]) else {
                     return quote_result(Err(BAD_AMOUNT.into()));
                 };
-                self.quote_send(amount_kas, &to).await
+                self.quote_send(amount, &to).await
             }
             "finish" => self.quote_finish().await,
             "stop" => self.quote_stop().await,
@@ -2402,13 +2402,12 @@ impl Core {
 
     /// Prices a send the way `route_send` sends it: a spend now, else a withdrawal with notice.
     /// Returns (fee, kind, what leaves the vault) in sompi.
-    async fn quote_send(&self, amount_kas: f64, to: &str) -> Result<(u64, &'static str, u64), String> {
+    async fn quote_send(&self, amount: u64, to: &str) -> Result<(u64, &'static str, u64), String> {
         let v = self.open_vault()?;
         if v.state.stage != 0 {
             return Err("A withdrawal is already waiting. Finish it first.".into());
         }
         let ctx = &self.ctx;
-        let amount = sompi(amount_kas);
         let to_script = ctx.network.try_to_spk(to)?;
         let coin = ctx.try_vault_coin(&v).await?;
         if amount >= coin.1.amount {
@@ -2420,7 +2419,9 @@ impl Core {
         let (ctx, coin, spend_key) = self.sized(&coin, &v.state, pick_spend);
         let ctx = &ctx;
         // Spend (commands.rs do_spend): the ceiling is the vault's allowance or a tenth of the payment.
+        let notice = std::cell::Cell::new(false); // the builder refused for the limit or the kept minimum (as do_spend)
         let spend = ctx.quote(std::slice::from_ref(&coin.1), Some((v.dials.max_fee as u64).max(amount / 10)), &|fee| {
+            notice.set(false);
             let outflow = (amount + fee) as i64;
             let next = if lock_time as i64 >= v.state.window_start + v.dials.window && lock_time as i64 >= in_daa + v.dials.window {
                 State { window_start: lock_time as i64, spent: outflow, ..v.state.clone() }
@@ -2428,10 +2429,12 @@ impl Core {
                 State { spent: v.state.spent + outflow, ..v.state.clone() }
             };
             if next.spent > v.dials.cap {
+                notice.set(true);
                 return Err(format!("{OVER_CAP}: {} > {} sompi in the current window", next.spent, v.dials.cap));
             }
             let left = coin.1.amount.checked_sub(amount + fee).ok_or("The account doesn't hold that much.")?;
             if left < v.dials.min_remainder as u64 {
+                notice.set(true);
                 return Err(format!("{LOW_REMAINDER}: {left} < {} sompi", v.dials.min_remainder));
             }
             let outputs = vec![TransactionOutput::new(amount, to_script.clone()), ctx.continuation(left, &next, &v)];
@@ -2439,7 +2442,7 @@ impl Core {
         });
         match spend {
             Ok(q) => return Ok((q.fee, "now", amount + q.fee)),
-            Err(FeeError::Build(e)) if e.starts_with(OVER_CAP) || e.starts_with(LOW_REMAINDER) => {}
+            Err(FeeError::Build(_)) if notice.get() => {}
             Err(e) => return Err(e.to_string()),
         }
         // Withdrawal with notice (commands.rs do_request).
@@ -3037,6 +3040,11 @@ mod tests {
         assert_eq!(parse_kas(&json!("1.")), Some(KAS));
         assert_eq!(parse_kas(&json!("0.00000001")), Some(1));
         assert_eq!(parse_kas(&json!("1000000000")), Some(1_000_000_000 * KAS));
+        // Why the money commands take sompi and never a float: past about 90 million KAS a float no
+        // longer holds every sompi, so text -> float -> sompi would send a different amount.
+        let big = 90_000_000_000_000_001u64;
+        assert_eq!(parse_kas(&json!("900000000.00000001")), Some(big));
+        assert_ne!(crate::contract::sompi(kas(big)), big);
         for bad in [json!("1.123456789"), json!("1e3"), json!("-1"), json!(0), json!("0"), json!("."), json!(""), json!("1000000000.00000001"), json!(null), json!(true), json!("1,5"),
                     json!("abc"), json!("-5"), json!(-5), json!("1e999"), json!(1e300), json!("NaN"), json!("inf"), json!(" "), json!([1]), json!({"kas": 1})] {
             assert_eq!(parse_kas(&bad), None, "{bad}");
