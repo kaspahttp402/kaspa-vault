@@ -23,6 +23,26 @@ test('amounts: at most 8 decimals and never 1e-7, the same shown (fmt) and sent'
   assert.equal(h.callsOf('send')[0].args.kas, '0.0000001');
 });
 
+test('euros come from the price feed, asked only while the Euros setting is on', async () => {
+  const h = load({ engine: okEngine() });
+  const asked = [];
+  h.ctx.KaspaVaultBridge.price = (cb, id, url) => {
+    asked.push(url);
+    setImmediate(() => h.ctx[cb](id, 200, JSON.stringify({ prices: [[1, 0.05], [2, 0.061]] })));
+  };
+  h.D.setSetting('currency', 'usd');
+  await tick();
+  assert.equal(asked.length, 0, 'dollars never ask for euros');
+  h.D.setSetting('currency', 'eur');
+  await tick();
+  assert.equal(asked.length, 1);
+  assert.match(asked[0], /vs_currency=eur&days=1$/);
+  assert.equal(h.D.state.rateEur, 0.061, 'the last point of the series');
+  h.D.setSetting('currency', 'eur');
+  await tick();
+  assert.equal(asked.length, 1, 'kept ten minutes');
+});
+
 test('an amount box takes ".5" and "5.", and refuses more than 8 decimals', () => {
   const D = load({ engine: okEngine() }).D;
   assert.equal(D.amountOf('.5'), 0.5);

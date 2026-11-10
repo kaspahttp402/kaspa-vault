@@ -692,12 +692,13 @@ impl Keys {
         if l.rounds < KEY_STRETCH_FLOOR {
             return Err("rounds".into());
         }
-        let salt = unhex(&l.salt);
-        let nonce = unhex(&l.nonce);
-        let mut ct = unhex(&l.secrets);
+        let salt = try_unhex(&l.salt)?;
+        let nonce = try_unhex(&l.nonce)?;
+        let mut ct = try_unhex(&l.secrets)?;
+        let tag = try_unhex(&l.tag)?;
         let (enc_key, mac_key) = stretch(pass.as_bytes(), &salt, l.rounds);
         let aad = l.public.as_ref().map(|p| serde_json::to_string(p).expect("public block is plain JSON")).unwrap_or_default();
-        if !same_bytes(&seal_tag(&mac_key, &salt, &nonce, aad.as_bytes(), &ct), &unhex(&l.tag)) {
+        if !same_bytes(&seal_tag(&mac_key, &salt, &nonce, aad.as_bytes(), &ct), &tag) {
             return Err("tag".into());
         }
         keystream_xor(&enc_key, &nonce, &mut ct);
@@ -908,19 +909,45 @@ impl Keys {
     }
 }
 
-/// Writes a file only its owner may read: mode 600 on Unix, set on create and again on an existing
-/// file. Windows has no mode bits; a file under the user's own profile is already closed to other accounts.
+/// Writes a file only its owner may read, whole or not at all: the bytes go to a sibling `.tmp` file,
+/// reach the disk, and only then take the place of `path`. A stop half way leaves the old file as it was.
+/// Mode 600 on Unix, set on create and again on an existing file. Windows has no mode bits; a file under
+/// the user's own profile is already closed to other accounts.
 pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    let done = write_closed(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
+    if done.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    done
+}
+
+/// The owner-only write itself, ended with a sync so the bytes are on the disk before the rename.
+fn write_closed(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
-        f.write_all(bytes)?;
-        return f.set_permissions(std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
     }
-    #[cfg(not(unix))]
-    std::fs::write(path, bytes)
+    let mut f = open.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+/// `unhex` for text read from a file: damaged hex is an error, not a panic.
+fn try_unhex(s: &str) -> Result<Vec<u8>, String> {
+    let mut v = vec![0u8; s.len() / 2];
+    faster_hex::hex_decode(s.as_bytes(), &mut v).map_err(|_| "hex".to_string())?;
+    Ok(v)
 }
 
 pub fn unhex(s: &str) -> Vec<u8> {
@@ -1457,6 +1484,31 @@ mod tests {
         wrong.cold_address = "kaspatest:q".into();
         assert!(Keys::fresh_online(&Network::testnet(), &wrong, None, false, false).unwrap_err().contains("safe address"));
         assert!(Keys { cancel: off.cancel, ..Default::default() }.offline_export(&Network::testnet()).unwrap_err().contains("cold"));
+    }
+
+    #[test]
+    fn a_write_that_fails_leaves_the_old_file_whole() {
+        let dir = std::env::temp_dir().join(format!("kv-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        write_private(&path, b"first").unwrap();
+        assert!(!dir.join("keys.json.tmp").exists(), "no temp file is left after a good write");
+        // A folder where the temp file must go makes the write fail before the old file is touched.
+        std::fs::create_dir(dir.join("keys.json.tmp")).unwrap();
+        assert!(write_private(&path, b"second").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first", "the old file is untouched");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_locked_file_with_damaged_hex_is_refused_not_panicked() {
+        let text = Keys::fresh(&Network::testnet()).lock("pw", KEY_STRETCH_FLOOR).unwrap();
+        let mut l: Locked = serde_json::from_str(&text).unwrap();
+        l.salt.push('z');
+        assert!(Keys::unlock(&l, "pw").is_err(), "odd, non-hex salt");
+        let mut l: Locked = serde_json::from_str(&text).unwrap();
+        l.tag = "zz".into();
+        assert!(Keys::unlock(&l, "pw").is_err(), "non-hex tag");
     }
 
     #[test]

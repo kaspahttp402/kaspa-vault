@@ -66,6 +66,7 @@
       if (bridge) bridge.setSetting(k, v);
       else localStorage.setItem('kv_' + k, v);
     } catch (e) {}
+    if (k === 'currency') fetchEuro();
   }
 
   /* ---- Sample lives in demo.js, which only demo.html loads (before this file). The phone page never loads it: there
@@ -109,6 +110,7 @@
      one host only and sends nothing of ours. */
   var priceLive = {},
     priceRest = 0 /* no price asks before this time, after a refused one */,
+    euroAt = 0 /* when the euro price was last asked for */,
     priceLoaded = false,
     PRICE_LIVE_MS = 3600000 /* prices younger than this count as current (the dollar view uses them) */,
     PRICE_SAVE_POINTS = 240 /* points per period kept across restarts in setting price_saved */,
@@ -232,8 +234,33 @@
     next_reward_kas: 3.09,
     error: null,
   };
+  /* the real KAS price in euros, asked only while the Euros setting is on: the last point of
+     a one-day series, kept ten minutes. Until it lands the money lines stay in dollars
+     (app.js money), never a euro figure worked out from dollars */
+  var EURO_URL = 'https://api.coingecko.com/api/v3/coins/kaspa/market_chart?vs_currency=eur&days=1';
+  function fetchEuro() {
+    var now = Date.now();
+    if (getSetting('currency') !== 'eur' || now - euroAt < 600000 || now < priceRest) return;
+    if (!(bridge && bridge.price)) return;
+    euroAt = now;
+    var id = ++seq;
+    waiting[id] = function (status, text) {
+      var j = null;
+      try {
+        j = JSON.parse(text);
+      } catch (e) {}
+      var list = status === 200 && j && Array.isArray(j.prices) ? j.prices : [],
+        p = list.length ? list[list.length - 1][1] : 0;
+      if (status !== 200) priceRest = Date.now() + 120000;
+      if (!(p > 0)) return;
+      state.rateEur = p;
+      emit();
+    };
+    bridge.price('__kvHttp', id, EURO_URL);
+  }
   function fetchPrices(range) {
     priceLoad();
+    fetchEuro();
     var days = PRICE_DAYS[range] || 30,
       had = priceLive[range];
     if (had && Date.now() - had.at < 600000) return Promise.resolve(had.values);
@@ -285,6 +312,7 @@
       stopped: false,
       safe: null,
       rate: RATE /* dollars per KAS for the money lines until a real price lands */,
+      rateEur: 0 /* euros per KAS from the price feed; 0 until it lands */,
       fee: null,
       stopKeys: null,
       heir: false,

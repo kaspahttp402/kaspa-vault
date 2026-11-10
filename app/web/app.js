@@ -155,8 +155,8 @@
   }
   var AMOUNT_BAD = 'Enter an amount like 12.5, with up to 8 decimals.';
   function money(kas) {
-    var eur = D.getSetting('currency') === 'eur',
-      v = kas * D.state.rate * (eur ? 0.92 : 1);
+    var eur = D.getSetting('currency') === 'eur' && D.state.rateEur > 0,
+      v = kas * (eur ? D.state.rateEur : D.state.rate);
     return (eur ? '€' : '$') + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
   function under(kas) {
