@@ -35,14 +35,22 @@ if [ -n "${KV_KEYSTORE:-}" ]; then
   KV_KEY_PASS="${KV_KEY_PASS:-$KV_STORE_PASS}"
   SIGNING="release key $KV_KEYSTORE, alias $KV_KEY_ALIAS"
 else
-  KV_KEYSTORE=kaspavault-debug.keystore; KV_KEY_ALIAS=kaspavault; KV_STORE_PASS=kaspavault; KV_KEY_PASS=kaspavault
+  # One copy of the debug key, outside every checkout and build folder, when it exists; a fresh clone makes its own beside this script.
+  KV_KEYSTORE="${KV_DEBUG_KEYSTORE:-$HOME/.kaspavault/kaspavault-debug.keystore}"
+  [ -f "$KV_KEYSTORE" ] || KV_KEYSTORE=kaspavault-debug.keystore
+  KV_KEY_ALIAS=kaspavault; KV_STORE_PASS=kaspavault; KV_KEY_PASS=kaspavault
   [ -f "$KV_KEYSTORE" ] || keytool -genkeypair -keystore "$KV_KEYSTORE" -storepass "$KV_STORE_PASS" -keypass "$KV_KEY_PASS" -alias "$KV_KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=KaspaVault Debug"
   SIGNING="DEBUG"
 fi
 export KV_STORE_PASS KV_KEY_PASS   # read by apksigner from the environment, never shown
 # android:debuggable is OPT-IN: KV_DEBUGGABLE=1 bash build.sh (debug key only) passes aapt2 --debug-mode so adb run-as can push test
 # data and read the app files. Never the default: a debuggable APK lets anyone with adb read SharedPreferences and the wrapped blobs.
-if [ "${KV_DEBUGGABLE:-0}" = 1 ] && [ "$SIGNING" = DEBUG ]; then LINK_DEBUG="--debug-mode"; echo "DEBUGGABLE build (KV_DEBUGGABLE=1): for test pushes only"; else LINK_DEBUG=""; fi
+# A debuggable build signs with its own test key (emulators only): it can never install over the real app and keep its keys.
+if [ "${KV_DEBUGGABLE:-0}" = 1 ] && [ "$SIGNING" = DEBUG ]; then
+  LINK_DEBUG="--debug-mode"; KV_KEYSTORE=kaspavault-test.keystore; SIGNING="TEST"
+  [ -f "$KV_KEYSTORE" ] || keytool -genkeypair -keystore "$KV_KEYSTORE" -storepass "$KV_STORE_PASS" -keypass "$KV_KEY_PASS" -alias "$KV_KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=KaspaVault Test"
+  echo "DEBUGGABLE build (KV_DEBUGGABLE=1): test key, emulators only"
+else LINK_DEBUG=""; fi
 
 # ---- version code: the manifest holds the last built one; this build is the next ----
 CUR="$(sed -n 's/.*android:versionCode="\([0-9][0-9]*\)".*/\1/p' AndroidManifest.xml | head -1)"

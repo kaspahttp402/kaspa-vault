@@ -1836,15 +1836,15 @@ impl Core {
         let unheld = read_unheld(&ctx.dir);
         let paper = crate::paper::paper_keys(&ctx.dir);
         let Some(v) = ctx.try_load_vault()? else { return Ok(stopped_status(&ctx.network, &ctx.dials()?, &public, &unheld, &paper, safe, vec![])) };
-        let history = || history_json(&v, &ctx.state_path());
+        let history = |v: &Vault| history_json(v, &ctx.state_path());
         if is_stopped(&v) {
-            return Ok(stopped_status(&ctx.network, &v.dials, &public, &unheld, &paper, safe, history()));
+            return Ok(stopped_status(&ctx.network, &v.dials, &public, &unheld, &paper, safe, history(&v)));
         }
         // An account this program cannot compile (rules it does not carry) is shown frozen, in words, not a panic.
         let address = match ctx.try_vault_address(&v.state) {
             Ok(a) => a,
             Err(e) if rules_unreadable(&e) => {
-                let mut s = stopped_status(&ctx.network, &v.dials, &public, &unheld, &paper, safe, history());
+                let mut s = stopped_status(&ctx.network, &v.dials, &public, &unheld, &paper, safe, history(&v));
                 s["stopped"] = json!(false);
                 s["old_rules"] = json!(true);
                 s["notice"] = json!(OLD_RULES);
@@ -1853,12 +1853,26 @@ impl Core {
             Err(e) => return Err(e),
         };
         let coins = ctx.try_utxos(&address).await?;
-        let Some((_, coin)) = coins.into_iter().find(|(_, u)| u.covenant_id == Some(v.covenant_id)) else {
-            let age = std::fs::metadata(ctx.state_path()).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
-            return match age {
-                Some(age) if age.as_secs() > STATE_SETTLE_SECONDS => Ok(stopped_status(&ctx.network, &v.dials, &public, &unheld, &paper, safe, history())),
-                _ => Err("is the last transaction accepted yet".into()),
-            };
+        let held = coins.into_iter().find(|(_, u)| u.covenant_id == Some(v.covenant_id));
+        let (coin, v) = match held {
+            Some((_, coin)) => (coin, v),
+            None => {
+                let written = std::fs::metadata(ctx.state_path()).and_then(|m| m.modified());
+                let age = written.ok().and_then(|t| t.elapsed().ok());
+                if !age.is_some_and(|a| a.as_secs() > STATE_SETTLE_SECONDS) {
+                    return Err("is the last transaction accepted yet".into());
+                }
+                // The coin left its place and the record has settled. A guardian on another device
+                // may have sent the waiting withdrawal back: the account is then open again and the
+                // record follows it (lineage.rs `follow_decline`). Anything else has ended it.
+                match ctx.follow_decline(&v).await? {
+                    Some((coin, open)) => (coin.1, open),
+                    None => {
+                        let (net, d, past) = (&ctx.network, &v.dials, history(&v));
+                        return Ok(stopped_status(net, d, &public, &unheld, &paper, safe, past));
+                    }
+                }
+            }
         };
         let daa = ctx.try_daa().await? as i64;
         let lock_time = daa.saturating_sub(20); // the same value a spend would use now
@@ -1899,7 +1913,7 @@ impl Core {
             "heir_seconds_left": heir_seconds_left,
             "heir_delay_seconds": heir_delay_seconds,
             "heir_warn_share": HEIR_WARN_SHARE,
-            "history": history(),
+            "history": history(&v),
         }))
     }
 
@@ -1926,7 +1940,16 @@ impl Core {
     /// for the next `fund`, and only while no other account is open. Answers {ok, route, steps, fee_kas,
     /// fee_kas_about, dials, words, people, error}; `people` = the waiting guardian/heir fields or null.
     async fn rules_change(&self, args: &Value) -> Value {
-        let fail = |e: &str| json!({"ok": false, "route": null, "steps": [], "fee_kas": null, "fee_kas_about": null, "move_kas": null, "to": null, "kind": null, "now": null, "dials": null, "words": [], "people": null, "error": plain(e)});
+        self.rules_change_by(args, async |v: &Vault| self.ctx.record_ended(v).await).await
+    }
+
+    /// `rules_change` with the chain's answer passed in: `ended` says whether an account whose
+    /// record reads open has ended anyway (a guardian stopped it from another phone). It is asked
+    /// only for a record that reads open; an ended account takes the route "open" like a stopped
+    /// one, and when the chain cannot answer the change refuses with those words.
+    async fn rules_change_by<F>(&self, args: &Value, ended: F) -> Value
+    where F: AsyncFnOnce(&Vault) -> Result<bool, String> {
+        let fail =|e: &str| json!({"ok": false, "route": null, "steps": [], "fee_kas": null, "fee_kas_about": null, "move_kas": null, "to": null, "kind": null, "now": null, "dials": null, "words": [], "people": null, "error": plain(e)});
         let people = match self.people_changes(args) {
             Ok(p) => p,
             Err(e) => return fail(&e),
@@ -1958,7 +1981,11 @@ impl Core {
             return fail(&e);
         }
         let open = match self.ctx.try_load_vault() {
-            Ok(v) => v.is_some_and(|v| !is_stopped(&v)),
+            Ok(Some(v)) if !is_stopped(&v) => match ended(&v).await {
+                Ok(gone) => !gone,
+                Err(e) => return fail(&e),
+            },
+            Ok(_) => false,
             Err(e) => return fail(&e),
         };
         // Route "move" goes through the purse: no safe take-out and no sheets. The contract never lets a payment empty
@@ -2299,7 +2326,9 @@ impl Core {
     /// even while a send is settling, and the covenant decides between a racing spend and
     /// the cancel (the cancel wins on chain or the spend already moved the coin).
     async fn stop(&self) -> Value {
-        no_safe_sheet(&self.ctx.keys).unwrap();
+        if let Err(e) = no_safe_sheet(&self.ctx.keys) {
+            return result(Err(e));
+        }
         let stopped = match self.open_vault() {
             // The phone's emergency stop always fires stop key 1, the one serve loads from the offline folder.
             Ok(_) => self.ctx.do_cancel(1).await,
@@ -2314,7 +2343,9 @@ impl Core {
     /// key 1, the one serve loads from the offline folder. Unlike the stop it takes the money lock:
     /// a decline is a quiet move, and two of this laptop's own moves never overlap.
     async fn decline(&self, parsed: &Value) -> Value {
-        no_safe_sheet(&self.ctx.keys).unwrap();
+        if let Err(e) = no_safe_sheet(&self.ctx.keys) {
+            return result(Err(e));
+        }
         let which = match &parsed["which"] {
             Value::Null => 1,
             w => match w.as_u64() {
@@ -3385,6 +3416,55 @@ mod tests {
         assert_eq!(bad["ok"], json!(false));
         assert!(bad["error"].as_str().unwrap().contains("cap"), "{bad}");
         assert!(read_rules_next(&dir, 1).unwrap().is_none(), "a refused set is not stored");
+    }
+
+    /// rules.change on an account a guardian stopped from another phone (the record still reads
+    /// open, the chain says ended) takes the route "open" and stores the dials, moving nothing. A
+    /// truly open account still takes the route "move"; a chain that cannot answer refuses in its
+    /// own words; a record that reads stopped does not ask the chain at all.
+    #[tokio::test]
+    async fn rules_change_after_a_stop_made_elsewhere_takes_the_open_route() {
+        let net = Network::testnet();
+        let dir = tmp("rules-change-ended");
+        Keys::fresh(&net).save(&dir.join("keys.json"), true).unwrap();
+        let keys = Keys::load_public(&dir.join("keys.json")).unwrap();
+        let (network, dials) = (net.clone(), Dials::testnet());
+        let dir_here = dir.clone();
+        let ctx = Ctx { dir: dir_here, keys, rpc: None, force: false, network, dials, account: 1 };
+        let core = Core::open(ctx).unwrap();
+        let waiting = State { stage: 1, dest_hash: vec![7; 32], amount: KAS as i64, ..locked() };
+        let (covenant_id, history) = (Hash::from_bytes([3u8; 32]), vec!["fund 9 KAS".to_string()]);
+        let pinned = Some(crate::contract::pin_source(&dir).unwrap());
+        let mut v = Vault { covenant_id, state: waiting, pending_to: None, history,
+            contract_sha256: pinned, network: net.name.into(), dials: Dials::testnet() };
+        let state = dir.join("state.json");
+        std::fs::write(&state, serde_json::to_string(&v).unwrap()).unwrap();
+        let args = json!({"cap_kas": 5, "heir_delay": 30000});
+        // Truly open: the move route is taken (it stops here at the withdrawal already waiting).
+        let open = core.rules_change_by(&args, async |_: &Vault| Ok(false)).await;
+        assert_eq!(open["ok"], json!(false), "{open}");
+        assert!(open["error"].as_str().unwrap().contains("already waiting"), "{open}");
+        // The chain cannot answer: refused in its words, nothing guessed.
+        let no_answer = async |_: &Vault| Err("Try again soon.".to_string());
+        let lost = core.rules_change_by(&args, no_answer).await;
+        assert_eq!((&lost["ok"], &lost["error"]), (&json!(false), &json!("Try again soon.")));
+        assert!(read_rules_next(&dir, 1).unwrap().is_none(), "a refused change stores nothing");
+        // Ended from another phone: the route of an account that is not open.
+        let ended = core.rules_change_by(&args, async |_: &Vault| Ok(true)).await;
+        assert_eq!(ended["ok"], json!(true), "{ended}");
+        assert_eq!(ended["route"], "open");
+        assert!(ended["fee_kas"].is_null() && ended["move_kas"].is_null(), "{ended}");
+        assert_eq!(read_rules_next(&dir, 1).unwrap().unwrap().cap, 5 * KAS as i64);
+        assert_eq!(std::fs::read_to_string(&state).unwrap(), serde_json::to_string(&v).unwrap());
+        // A record that reads stopped never asks the chain.
+        v.history.push("cancel".into());
+        assert!(is_stopped(&v), "the test's stop line");
+        std::fs::write(&state, serde_json::to_string(&v).unwrap()).unwrap();
+        let asked = async |_: &Vault| -> Result<bool, String> { panic!("the chain was asked") };
+        let stopped = core.rules_change_by(&args, asked).await;
+        assert_eq!(stopped["ok"], json!(true), "{stopped}");
+        assert_eq!(stopped["route"], "open");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// heir.set rewrites only the heir in keys.json's public block (its code moves with it), writes

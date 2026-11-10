@@ -500,6 +500,233 @@ async fn guardians_and_heirs_on_testnet() {
             fail("11b-follows", &last);
         }
     }
+    // Steps 12 and 13: the helper is a guardian again, then sends a waiting withdrawal back
+    // (watch.decline).
+    drop((owner, helper));
+    let guardian = secrets[..32].to_vec();
+    let (rpc, net, purse) = (rpc.clone(), net.clone(), purse_addr);
+    let r = Run { rpc, net, owner_dir, helper_dir, purse, stop_x, guardian };
+    guardian_again(&r).await;
+    let id = request_waits(&r).await;
+    guardian_sends_back(&r, &id).await;
+    owner_asks_again(&r).await;
+    let (owner, okeys) = open(&r.owner_dir, &r.rpc, &r.net);
     let left = call(&owner, &okeys, "funding", json!({})).await;
     say("end owner purse", &left);
+}
+
+/// What the guardian-decline steps (12, 13) need from the run above.
+struct Run {
+    rpc: kaspa_wrpc_client::KaspaRpcClient,
+    net: Network,
+    owner_dir: PathBuf,
+    helper_dir: PathBuf,
+    purse: String,
+    stop_x: Value,
+    guardian: Vec<u8>,
+}
+
+/// Says the answer; a refusal ends the run with its exact text.
+fn ok_or_fail(step: &str, v: Value) -> Value {
+    say(step, &v);
+    if v["body"]["ok"] != true {
+        fail(step, &v);
+    }
+    v
+}
+
+/// The owner's status of account 1, cut to what the decline proof compares.
+fn slim(st: &Value) -> Value {
+    let b = &st["body"];
+    json!({"code": st["status"], "balance_kas": b["balance_kas"], "pending": b["pending"],
+        "stopped": b["stopped"], "error": b["error"]})
+}
+
+/// Polls the owner's status (at most 18 times, 10 s apart) until a withdrawal waits or none does.
+async fn wait_owner(owner: &Core, okeys: &Keys, want_pending: bool) -> Value {
+    let mut last = json!(null);
+    for _ in 0..18 {
+        last = call(owner, okeys, "status", json!({"account": 1})).await;
+        let b = &last["body"];
+        let settled = last["status"] == 200 && b["stopped"] != true && b["balance_kas"].is_number();
+        if settled && b["pending"].is_null() != want_pending {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+    last
+}
+
+/// Polls the helper's watch.status (at most 18 times, 10 s apart) until it shows `stage`.
+async fn wait_watch(helper: &Core, hkeys: &Keys, id: &str, stage: &str) -> Value {
+    let mut last = json!(null);
+    for _ in 0..18 {
+        last = call(helper, hkeys, "watch.status", json!({"id": id})).await;
+        if last["body"]["stage"] == stage && last["body"]["kas"].as_f64().unwrap_or(0.0) > 1.0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+    last
+}
+
+/// Step 12: the owner puts the helper back as guardian 2 and runs Update now (stop, take-out,
+/// fund), the same route step 9 used to remove it.
+async fn guardian_again(r: &Run) {
+    let (owner, okeys) = open(&r.owner_dir, &r.rpc, &r.net);
+    if done("12a-guardian").is_none() {
+        let args = json!({"account": 1, "guardian_x": r.stop_x, "guardian_which": 2});
+        let ch = ok_or_fail("12a rules.change", call(&owner, &okeys, "rules.change", args).await);
+        mark("12a-guardian", &ch);
+    }
+    if done("12b-stop").is_none() {
+        let s = ok_or_fail("12b stop", call(&owner, &okeys, "stop", json!({"account": 1})).await);
+        mark("12b-stop", &s);
+    }
+    if done("12c-takeout").is_none() {
+        let mut out = json!(null);
+        for _ in 0..12 {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let sheets: Vec<u8> = [okeys.cold.unwrap(), okeys.cold2.unwrap()].concat();
+            let args = json!({"account": 1, "from_stop": true});
+            let sheets = Zeroizing::new(sheets);
+            let (c, b) = owner.call_with_secret("takeout", &args, Slot::Safe, sheets).await;
+            out = json!({"status": c, "body": b});
+            say("12c takeout from_stop", &out);
+            let text = out["body"]["error"].as_str().unwrap_or("");
+            if out["body"]["ok"] == true || !text.ends_with("Trying again in a moment.") {
+                break;
+            }
+        }
+        if out["body"]["ok"] != true {
+            fail("12c-takeout", &out);
+        }
+        mark("12c-takeout", &out);
+    }
+    if done("12d-fund").is_none() {
+        let open_kas = done("12c-takeout").unwrap()["body"]["open_kas"].as_f64().unwrap();
+        for _ in 0..12 {
+            if balance(&r.rpc, &r.net, &r.purse).await as f64 >= open_kas * KAS as f64 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+        let args = json!({"account": 1, "kas": open_kas});
+        let f = ok_or_fail("12d fund", call(&owner, &okeys, "fund", args).await);
+        let (owner2, _) = open(&r.owner_dir, &r.rpc, &r.net);
+        let kp = call(&owner2, &okeys, "keys.public", json!({})).await;
+        let ok = kp["body"]["public"]["cancel2_x"] == r.stop_x;
+        mark("12d-fund", &json!({"ok": ok, "fund": f, "stops": kp["body"]["stops"]}));
+        if !ok {
+            fail("12d-check", &kp["body"]["stops"]);
+        }
+    }
+}
+
+/// Step 13a-b: the helper takes the fresh watch code; the owner asks for more than the limit; both
+/// see it waiting. Answers the watched account's id.
+async fn request_waits(r: &Run) -> String {
+    let (owner, okeys) = open(&r.owner_dir, &r.rpc, &r.net);
+    let (helper, hkeys) = open(&r.helper_dir, &r.rpc, &r.net);
+    if done("13a-watch").is_none() {
+        let ex = call(&owner, &okeys, "guard.export", json!({"name": "Owner"})).await;
+        // A good export answers the watch code itself (no `ok`); a refusal carries `ok: false`.
+        if ex["body"]["ok"] == false || ex["status"] != 200 {
+            fail("13a-export", &ex);
+        }
+        let text = std::fs::read_to_string(r.owner_dir.join(vault_core::core::GUARD_FILE)).unwrap();
+        let imp = call(&helper, &hkeys, "watch.import", json!({"text": text})).await;
+        let id = imp["body"]["id"].as_str().unwrap_or_else(|| fail("13a-import", &imp)).to_string();
+        let ws = wait_watch(&helper, &hkeys, &id, "open").await;
+        let b = &ws["body"];
+        let ok = b["stage"] == "open" && b["roles"]["guardian"] == 2 && b["can_stop"] == true;
+        mark("13a-watch", &json!({"ok": ok, "id": id, "import": imp, "status": b}));
+        if !ok {
+            fail("13a-check", &ws);
+        }
+    }
+    let id = done("13a-watch").unwrap()["id"].as_str().unwrap().to_string();
+    if done("13b-request").is_none() {
+        let before = wait_owner(&owner, &okeys, false).await;
+        let args = json!({"account": 1, "to": r.purse, "kas": 1.5});
+        let s = ok_or_fail("13b send", call(&owner, &okeys, "send", args).await);
+        let ws = wait_watch(&helper, &hkeys, &id, "waiting").await;
+        let own = wait_owner(&owner, &okeys, true).await;
+        let b = &ws["body"];
+        let pending = b["pending"]["kas"].is_number();
+        let ok = b["stage"] == "waiting" && pending && b["can_stop"] == true;
+        let v = json!({"ok": ok, "owner_before": slim(&before), "send": s, "helper_status": b,
+            "owner_waiting": slim(&own)});
+        mark("13b-request", &v);
+        if !ok {
+            fail("13b-check", &ws);
+        }
+    }
+    id
+}
+
+/// Step 13c: the guardian sends the waiting withdrawal back with only its guardian key. After it
+/// lands the helper and the owner both see the account open with nothing waiting, and the
+/// balance fell by the network fee alone.
+async fn guardian_sends_back(r: &Run, id: &str) {
+    let earlier = done("13c-decline");
+    if earlier.as_ref().is_some_and(|v| v["ok"] == true) {
+        return;
+    }
+    let (owner, okeys) = open(&r.owner_dir, &r.rpc, &r.net);
+    let (helper, hkeys) = open(&r.helper_dir, &r.rpc, &r.net);
+    // A run that already sent the decline (its step file holds the tx) only looks again: the
+    // decline is never sent twice.
+    let sent = earlier.filter(|v| v["decline"]["body"]["tx"].is_string());
+    let (d, before) = match sent {
+        Some(v) => (v["decline"].clone(), v["owner_waiting"].clone()),
+        None => {
+            let before = wait_owner(&owner, &okeys, true).await;
+            let secret = Zeroizing::new(r.guardian.clone());
+            let args = json!({"id": id});
+            let (c, b) = helper.call_with_secret("watch.decline", &args, Slot::Guardian, secret).await;
+            let d = ok_or_fail("13c watch.decline", json!({"status": c, "body": b}));
+            (d, slim(&before))
+        }
+    };
+    let ws = wait_watch(&helper, &hkeys, id, "open").await;
+    let own = wait_owner(&owner, &okeys, false).await;
+    let after = slim(&own);
+    let kas_of = |st: &Value| st["balance_kas"].as_f64().unwrap_or(-1.0);
+    let fee = ((kas_of(&before) - kas_of(&after)) * 1e8).round() / 1e8;
+    let helper_open = ws["body"]["stage"] == "open" && ws["body"]["pending"].is_null();
+    let ob = &own["body"];
+    let owner_open = own["status"] == 200 && ob["pending"].is_null() && ob["stopped"] != true;
+    let ok = helper_open && owner_open && fee > 0.0 && fee <= 0.05;
+    let v = json!({"ok": ok, "decline": d, "owner_waiting": before,
+        "owner_after": after, "fee_kas": fee, "helper_status": ws["body"]});
+    mark("13c-decline", &v);
+    if !ok {
+        fail("13c-check", &v);
+    }
+}
+
+/// Step 13d: the account still works: the owner asks again and it waits; the owner then sends it
+/// back with stop key 1 so the run ends on an open account.
+async fn owner_asks_again(r: &Run) {
+    if done("13d-again").is_some() {
+        return;
+    }
+    let (owner, okeys) = open(&r.owner_dir, &r.rpc, &r.net);
+    let seen = call(&owner, &okeys, "status", json!({"account": 1})).await;
+    say("13d owner status", &seen);
+    let args = json!({"account": 1, "to": r.purse, "kas": 1.5});
+    let s = ok_or_fail("13d send", call(&owner, &okeys, "send", args).await);
+    let waiting = wait_owner(&owner, &okeys, true).await;
+    let back = call(&owner, &okeys, "decline", json!({"account": 1})).await;
+    say("13d owner decline", &back);
+    let end = wait_owner(&owner, &okeys, false).await;
+    let waited = !waiting["body"]["pending"].is_null();
+    let ok = waited && back["body"]["ok"] == true && end["body"]["pending"].is_null();
+    let v = json!({"ok": ok, "send": s, "owner_waiting": slim(&waiting), "decline": back,
+        "owner_end": slim(&end)});
+    mark("13d-again", &v);
+    if !ok {
+        fail("13d-check", &v);
+    }
 }

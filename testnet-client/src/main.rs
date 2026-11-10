@@ -297,11 +297,15 @@ async fn main() {
         println!("note: legacy single-key safe (no cold2/cold3 in keys.json); the cold address stays pay-to-pubkey and cold-send signs with the one cold key");
     }
     // Offline commands never touch the network; that is the whole point of them.
+    let mut watch_first = 0;
     let rpc = match &cli.cmd {
         Cmd::SplitKeys { .. } | Cmd::Sign { .. } => None,
         Cmd::Watch { node, .. } => {
             watch::check_nodes(node).unwrap_or_else(|e| refuse(e));
-            Some(connect(node.first().map(String::as_str), &cli.network).await.unwrap_or_else(|e| refuse(e)))
+            // Starts on the first --node that answers, so one node being down does not keep the watcher off.
+            let (rpc, live) = watch::first_live(node, &cli.network).await.unwrap_or_else(|e| refuse(e));
+            watch_first = live;
+            Some(rpc)
         }
         _ => Some(connect(None, &cli.network).await.unwrap_or_else(|e| refuse(e))),
     };
@@ -355,7 +359,7 @@ async fn main() {
         // An absolute <offline> stands; a relative one is placed next to the vault folder's files (PathBuf::join).
         Cmd::SplitKeys { offline } => airgap::split_keys(&cli.dir, &cli.dir.join(&offline)).unwrap_or_else(|e| refuse(e)),
         Cmd::Sign { request, sheets } => {
-            let sheets = sheets.map(|s| s.split(',').map(|x| x.trim().parse::<usize>().expect("--sheets looks like 1,3")).collect::<Vec<_>>());
+            let sheets = sheets.map(|s| s.split(',').map(|x| x.trim().parse::<usize>().unwrap_or_else(|_| refuse("--sheets takes sheet numbers such as 1,3".into()))).collect::<Vec<_>>());
             // Shows the request in bank words, then waits for `y` on stdin; anything else signs nothing (exit 3).
             match airgap::sign(&ctx, &request, sheets, &mut std::io::stdin().lock()) {
                 Ok(true) => {}
@@ -394,6 +398,8 @@ async fn main() {
             let explorer = vault_core::autostop::explorer(ctx.network.name, explorer.as_deref());
             let a = AutoStop { which, cap, window_secs, explorer, end_after_secs };
             let a = auto_stop.then_some(a);
+            let mut node = node;
+            node.rotate_left(watch_first);
             watch::run(&ctx, &node, auto_heir, a).await
         }
     }

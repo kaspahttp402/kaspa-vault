@@ -78,7 +78,7 @@ function fake(c) {
       var r = JSON.stringify(answer('keys.new', {}));
       setTimeout(function () { window[cb](id, 200, r); }, 5);
     },
-    guardOn: function (on) { if (on) guard = true; return !!on; },
+    guardOn: function (on) { guard = !!on; return !!on; },
     guardRunning: function () { return guard; },
     guardOff: function (cb) { setTimeout(function () { guard = false; window[cb]('ok'); }, 5); }
   };
@@ -775,7 +775,7 @@ const MONEY = [
   ['Allow screenshots: On asks a fresh fingerprint, Off does not', shotsOn],
   ['put away during a send on a locked screen: the lock comes next, and only then', lockAfterJob],
   ['Send: a payee chip disarms the slide, and the slide refuses a changed draft', sendSlide],
-  ['the guard switch: Off goes through the phone (guardOff) and shows what runs', guardOff],
+  ['the guard switch: a plain switch both ways that shows what runs', guardOff],
   ['paper stop: one fingerprint, 24 words once, read back, Update now, the code', paperMake],
   ['paper stop with no keys: code, words checked by number, slide, stop', paperUse],
   ['take funds out: code, two vault seeds, full addresses, slide, no fingerprint, boxes emptied',

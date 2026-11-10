@@ -81,7 +81,7 @@ final class Signer {
      * fingerprint per payment). Showing the sheets always takes a fresh fingerprint. The data key stays in process
      * memory for the window, exactly as it did for SIGNER_SECONDS; the Keystore key itself stays one-use.
      */
-    static final int SIGNER_WINDOW_DEFAULT = 300;
+    static final int SIGNER_WINDOW_DEFAULT = 0; // every payment asks, unless Settings widens it
     static final int SIGNER_WINDOW_MAX = 3600;
     /** A real fingerprint within this long is "fresh": the moves that cannot be undone (take-out, sheets, burn, reset, heir)
      *  need one, whatever the window says (a page that set a long window could ride one prompt for an hour). */
@@ -471,7 +471,7 @@ final class Signer {
     }
 
     /**
-     * Review: v1 goes only after v2 opened on a SECOND, later finger prompt than the one that proved
+     * v1 goes only after v2 opened on a SECOND, later finger prompt than the one that proved
      * it, so a v2 that dies on this phone model leaves v1 in place. Under the bridge lock, straight after a finger answer.
      */
     private boolean v2OpenedLater() {
@@ -647,7 +647,7 @@ final class Signer {
                 if (dk2 != null) Arrays.fill(dk2, (byte) 0);
                 if (dk3 != null) Arrays.fill(dk3, (byte) 0);
             }
-            // no dropV1 here: v1 stays until v2 opens again on a LATER finger prompt (review)
+            // no dropV1 here: v1 stays until v2 opens again on a LATER finger prompt (see dropV1)
         }
     }
 

@@ -55,6 +55,7 @@ impl Watcher<'_> {
     async fn race_tick(&mut self) -> bool {
         let rpc = self.ctx.rpc();
         let Ok(info) = rpc.get_block_dag_info().await else { return false };
+        super::RACER_OK.store(unix_now(), Ordering::Relaxed);
         let addr = self.ctx.vault_address(&self.state);
         let Ok((ours, _)) = fetch_coins(rpc, &addr, self.cov).await else { return false };
         let Some(c) = self.coin.clone() else {
@@ -300,10 +301,11 @@ pub(super) async fn race(
     r.auto_stop = Some(a);
     let (on, stage) = (&r.primary, r.state.stage);
     let line = format!("auto-stop racer started: every second on {on} (stage {stage})");
+    super::RACER_OK.store(unix_now(), Ordering::Relaxed);
     r.say(Level::Info, &line);
     loop {
         match AssertUnwindSafe(r.race_tick()).catch_unwind().await {
-            Ok(true) => return,
+            Ok(true) => return super::RACER_OK.store(0, Ordering::Relaxed),
             Ok(false) => {}
             Err(p) => {
                 let raw = format!("AUTO-STOP DOWN: panic: {}", panic_text(&*p));

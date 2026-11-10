@@ -42,7 +42,7 @@
 
   /* ---- settings: phone storage through the bridge, browser storage otherwise ---- */
   /* the guard's "cannot reach the network" comes after every phone sleep or network switch
-     (repetitive): keep only the newest, and none once the guard has heard the
+     and repeats itself: keep only the newest, and none once the guard has heard the
      network since */
   function quietSilence(list, seenAt) {
     var newest = 0;

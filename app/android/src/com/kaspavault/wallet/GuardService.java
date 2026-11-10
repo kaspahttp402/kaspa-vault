@@ -136,14 +136,21 @@ public final class GuardService extends Service {
                     || (error != null && error.toLowerCase().contains("network"));
             if (!started) {
                 if (netDown && retryLater()) return;
+                if (!looping) return; // switched off while still starting: nothing to report
                 String plain = netDown
                         ? "Alerts can't reach the network. Open KaspaVault and try again."
                         : "Alerts could not start. Open KaspaVault and try again.";
                 refuse(error == null || error.isEmpty() ? plain : error);
                 return;
             }
+            if (!looping) { // switched off while the start was reaching the network: end it quietly
+                String stopped = VaultLib.call("guard.stop", "{}");
+                Log.i(TAG, "guard.stop (off during start) -> " + brief(stopped));
+                return;
+            }
             RUNNING = true;
             startTries = 0;
+            lastFresh = System.currentTimeMillis() / 1000;
             notifications.cancel(ID_REFUSED); // an "Alerts off" left by an earlier refusal is over
             notifications.notify(ID_GUARD, guardNotification("Alerts on. Reaching the network..."));
             guardThread.execute(this::waitLoop);
@@ -154,20 +161,29 @@ public final class GuardService extends Service {
     }
 
     /** The start is tried again this often, this many times, while the network is away (a reboot
-     *  or an app update restarts the guard before wifi is back; it used to give up at once). */
-    private static final int RETRY_MS = 15000, RETRY_MAX = 40;
+     *  or an app update restarts the guard before wifi is back; it must not give up at once). */
+    private static final int RETRY_MS = 15000, RETRY_QUICK = 40, RETRY_SLOW_MS = 120000,
+            RETRY_MAX = 5000;
     private int startTries = 0;
+    /** The guard's connections do not come back by themselves once the network has dropped
+     *  (Home then says "alerts have stopped" for hours while the switch is on). Nothing heard
+     *  for this many seconds and the guard is started again on fresh connections. */
+    private static final long DEAF_S = 100;
+    private long lastFresh = 0; // unix seconds of the last start
 
     /** No network for guard.start: another try in a while, the notification saying so; false once
      *  out of tries. */
     private boolean retryLater() {
         if (!looping || ++startTries > RETRY_MAX) return false;
+        // quick tries first, then a slow pace for about a week: the network being away is never
+        // a reason to switch the alerts off
+        final int wait = startTries <= RETRY_QUICK ? RETRY_MS : RETRY_SLOW_MS;
         Log.i(TAG, "guard.start: no network, try " + startTries + " of " + RETRY_MAX
-                + " in " + RETRY_MS / 1000 + " s");
+                + " in " + wait / 1000 + " s");
         notifications.notify(ID_GUARD,
                 guardNotification("Alerts starting. Waiting for the network..."));
         controlThread.execute(() -> {
-            try { Thread.sleep(RETRY_MS); } catch (InterruptedException e) { return; }
+            try { Thread.sleep(wait); } catch (InterruptedException e) { return; }
             if (looping) startGuard();
         });
         return true;
@@ -180,6 +196,17 @@ public final class GuardService extends Service {
         looping = false;
         notifications.notify(ID_REFUSED, alertNotification("Alerts off", text));
         stopSelf();
+    }
+
+    /** Nothing heard for too long: the guard is stopped and started again on fresh connections
+     *  (the start keeps trying while the network is away); true when it did so. */
+    private boolean restartIfDeaf(long quietFor) {
+        if (quietFor <= DEAF_S) return false;
+        Log.i(TAG, "guard: nothing heard for " + quietFor + " s, starting again");
+        Log.i(TAG, "guard.stop (deaf) -> " + brief(VaultLib.call("guard.stop", "{}")));
+        notifications.notify(ID_GUARD, guardNotification("Alerts on. Reaching the network..."));
+        controlThread.execute(this::startGuard);
+        return true;
     }
 
     /** Sits on guard.wait (30 s or an alert), refreshes the persistent notification, alarms on every alert newer than the last shown. */
@@ -202,6 +229,8 @@ public final class GuardService extends Service {
                 String heard = body.isNull("seen_at") ? "Nothing heard from the network yet."
                         : "Last heard from the network " + Math.max(0, now - body.optLong("seen_at", now)) + " s ago";
                 boolean running = body.optBoolean("running", false);
+                long heardAt = Math.max(body.optLong("seen_at", 0), lastFresh);
+                if (running && restartIfDeaf(now - heardAt)) return;
                 String head = running ? "Alerts on. " : "Alerts stopped. ";
                 notifications.notify(ID_GUARD, guardNotification(head + heard));
 
@@ -212,11 +241,16 @@ public final class GuardService extends Service {
                     if (a == null) continue;
                     long at = a.optLong("at", 0);
                     if (at <= lastShown) continue;
+                    if (at > newest) newest = at;
+                    // the state of the network is not news; alerts are for
+                    // what matters to the money: the network gone, or only part of it answering,
+                    // stays in the app's list and in the line above, and never rings
+                    String kind = a.optString("kind", "");
+                    if ("watcher_silent".equals(kind) || "unchecked".equals(kind)) continue;
                     String text = a.optString("text", "");
                     if (text.isEmpty()) text = "Caught by your alerts. Open KaspaVault.";
                     notifications.notify(ID_ALERT_BASE + (alertCount++ % 50),
                             alertNotification("Caught by your alerts", text));
-                    if (at > newest) newest = at;
                 }
                 if (newest != lastShown) { lastShown = newest; prefs.edit().putLong(LAST_ALERT_PREF, lastShown).apply(); }
                 checkWatched();
@@ -273,7 +307,8 @@ public final class GuardService extends Service {
                     String kas = kasText(pending.opt("kas"));
                     String key = id + "|" + pending.optString("to", "") + "|" + kas;
                     if (!key.equals(prefs.getString(WATCH_PENDING_PREF + id, ""))) {
-                        String text = "A withdrawal of " + kas + " KAS is waiting." + (guardian ? " Open the wallet to stop it." : "");
+                        String text = "A withdrawal of " + kas + " KAS is waiting."
+                                + (guardian ? " Open the app to stop it." : "");
                         notifications.notify(base, alertNotification(name + "'s account", text));
                         prefs.edit().putString(WATCH_PENDING_PREF + id, key).apply();
                     }
@@ -283,7 +318,7 @@ public final class GuardService extends Service {
                 boolean shown = prefs.getBoolean(WATCH_HEIR_PREF + id, false);
                 if (due && !shown) {
                     notifications.notify(base + 1, alertNotification(name + "'s account",
-                            name + "'s account can now be passed to you. Open the wallet to claim it."));
+                            name + "'s account can now be claimed. Open the app to claim it."));
                     prefs.edit().putBoolean(WATCH_HEIR_PREF + id, true).apply();
                 } else if (!due && shown) {
                     prefs.edit().putBoolean(WATCH_HEIR_PREF + id, false).apply();

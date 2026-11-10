@@ -241,8 +241,8 @@ mod tests {
     fn own_link_code_is_refused_on_the_phone_that_made_it() {
         let (dir, other) = (tmp("self"), tmp("self-other"));
         let net = Network::testnet();
-        make_link(&dir, &net, "Owner").unwrap();
-        make_link(&other, &net, "Helper").unwrap();
+        make_link(&dir, &net, "Ada").unwrap();
+        make_link(&other, &net, "Ben").unwrap();
         let own = link_code(&dir, &net).unwrap()["code"].as_str().unwrap().to_string();
         let theirs = link_code(&other, &net).unwrap()["code"].as_str().unwrap().to_string();
         let own = read_link(&net, &own, None).unwrap();

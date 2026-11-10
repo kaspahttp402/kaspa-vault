@@ -314,24 +314,11 @@ final class Bridge {
          * on it asks for notifications (API 33+ runtime permission, answered to
          * window.KV_notifications) and for the battery exemption (so the guard keeps hearing the
          * network through the night); both asks happen once, the phone remembers the answer.
-         * Off is ALWAYS refused here: the guard goes off only through guardOff, behind its own
-         * prompt, so no earlier fingerprint (a payment, an unlock) lets a page script silence it.
+         * Off is a plain switch too: switching alerts off needs no PIN.
          */
         @JavascriptInterface public void guardOn(boolean on) {
-            if (!on) {
-                android.util.Log.i("KaspaVault", "guardOn(false) refused: use guardOff");
-                return;
-            }
-            act.insets.guardOn(true);
-        }
-
-        /**
-         * Turns the guard off behind its OWN prompt (GuardOff: title and subtitle fixed in Java,
-         * never from the page). Answers window[callbackName]("ok" | "cancel" | "refused");
-         * only "ok" means the guard was stopped.
-         */
-        @JavascriptInterface public void guardOff(String callbackName) {
-            new GuardOff(act).ask(callbackName);
+            android.util.Log.i("KaspaVault", "guard switch: " + (on ? "on" : "off"));
+            act.insets.guardOn(on);
         }
 
         /** Whether the guard service is running right now (the engine accepted guard.start). */
@@ -399,7 +386,7 @@ final class Bridge {
          * engine's keyless keys.burned so its marker goes too. keys.reset is keyless; when the engine answers ok, the sealed
          * keys here are dropped (forgetSignerPrefs + forgetSafe) so they never shadow the next set. Every method that reads the store or
          * burns needs a confirmSigner prompt first (else LOCKED, "Unlock first"); each slot is read once and the store shuts
-         * here, before the engine runs, so one fingerprint is one signature. Sheet words are never logged.
+         * here, before the engine runs, so one fingerprint is one signature (unless Settings widens the fingerprint window). Sheet words are never logged.
          */
         @JavascriptInterface public void vault(String callbackName, int id, String method, String argsJson) {
             if (!VaultLib.AVAILABLE) { act.call(callbackName, String.valueOf(id), String.valueOf(ENGINE_MISSING), JSONObject.quote("")); return; }

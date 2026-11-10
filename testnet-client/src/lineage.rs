@@ -29,7 +29,9 @@ use kaspa_consensus_core::tx::{TransactionOutput, UtxoEntry};
 use kaspa_txscript::pay_to_script_hash_script;
 use crate::tx::lock_time_from_payload;
 use silverscript_abi::SilAbiArtifact;
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
@@ -54,6 +56,8 @@ pub const MAX_HOPS: usize = 500;
 pub const LOCK_BUDGET: Duration = Duration::from_secs(20);
 /// The whole walk's time: every question to the source and every lock time search share it.
 pub const WALK_TIME: Duration = Duration::from_secs(180); // a stop may wait; it must not give up
+/// The time a status answer gives the history service to show a decline made elsewhere.
+pub const FOLLOW_TIME: Duration = Duration::from_secs(20);
 /// Questions one walk may ask its source (a hop asks one or two).
 pub const WALK_CALLS: usize = 2 * MAX_HOPS + 4;
 /// The walk ran out of its time or questions before it reached the live coin.
@@ -172,6 +176,65 @@ impl crate::tx::Ctx {
         }
         Err(failed.unwrap_or_else(|| "spent_by: the node holds no copy of the ending spend".into()))
     }
+
+    /// A waiting withdrawal a guardian sent back from another device. This device's record still
+    /// says waiting while its coin is gone, so it looks for the account's Locked-again coin on
+    /// our node first (none: nothing to follow, the history service is not asked), then has the
+    /// history show the decline that made it (`declined_elsewhere`, checked against the rules),
+    /// and keeps the record only when the two agree (`adopted`). The record is saved Locked with
+    /// nothing waiting; the answer is that record and its coin. Err: a coin of the account sits
+    /// there but the decline could not be shown yet (asked again after `FOLLOW_EVERY`).
+    pub async fn follow_decline(&self, v: &Vault) -> Result<Option<(Coin, Vault)>, String> {
+        if v.state.stage != 1 {
+            return Ok(None);
+        }
+        let open = Vault { state: after_decline(&v.state), pending_to: None, ..v.clone() };
+        let node = match self.try_vault_coin(&open).await {
+            Ok(c) => c,
+            Err(e) if e.starts_with("no vault coin") => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let path = self.state_path();
+        if !follow_due(&path, Instant::now()) {
+            return Err(SETTLING.into());
+        }
+        let history = crate::indexer::Indexer::new(&self.network)?;
+        let public = self.keys.public();
+        let shown = declined_elsewhere(&public, v, &history, Limits::FOLLOW).await?;
+        let Some(d) = shown.filter(|d| adopted(d, &node)) else { return Ok(None) };
+        self.save_anchored(&d.record)?;
+        follow_done(&path);
+        Ok(Some((node, d.record)))
+    }
+}
+
+/// How long a look for a decline made elsewhere that did not succeed is not repeated, per
+/// account: the status is asked every few seconds and the history service is not ours.
+const FOLLOW_EVERY: Duration = Duration::from_secs(60);
+/// Accounts whose last look is remembered (the map is emptied past this).
+const MAX_LOOKS: usize = 64;
+
+fn looks() -> &'static Mutex<HashMap<PathBuf, Instant>> {
+    static LOOKS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+    LOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Whether the account at `path` may ask the history service now; a yes is remembered.
+fn follow_due(path: &Path, now: Instant) -> bool {
+    let mut map = looks().lock().unwrap_or_else(|p| p.into_inner());
+    if map.get(path).is_some_and(|at| now.saturating_duration_since(*at) < FOLLOW_EVERY) {
+        return false;
+    }
+    if map.len() >= MAX_LOOKS {
+        map.clear();
+    }
+    map.insert(path.to_path_buf(), now);
+    true
+}
+
+/// The look succeeded: the next one (another decline, later) need not wait.
+fn follow_done(path: &Path) {
+    looks().lock().unwrap_or_else(|p| p.into_inner()).remove(path);
 }
 
 /// Whether a block our node sent holds `txid` (matched on the node's own id) and, if so, whether
@@ -286,6 +349,8 @@ pub struct Limits {
 
 impl Limits {
     pub const WALK: Limits = Limits { max_hops: MAX_HOPS, time: WALK_TIME, calls: WALK_CALLS };
+    /// One move after the record's coin, inside a status answer (`declined_elsewhere`).
+    pub const FOLLOW: Limits = Limits { max_hops: 1, time: FOLLOW_TIME, calls: 2 };
 }
 
 /// Whether a walk error means it ran out of its limits (paper.rs answers MOVED).
@@ -345,6 +410,68 @@ pub async fn walk_to_live(
     let rules = Arc::new(Rules::new(public, record)?);
     let mut budget = Budget::new(limits);
     walk(&rules, record, printed.clone(), source, (limits.max_hops, &mut budget)).await
+}
+
+/// A waiting withdrawal sent back from another device, as the history shows it.
+#[derive(Debug)]
+pub struct Declined {
+    /// Sompi the waiting coin held.
+    pub was: u64,
+    /// The Locked-again coin the decline made. The history's word: `adopted` holds it against
+    /// our node's coin.
+    pub coin: Coin,
+    /// The record after the decline: Locked, nothing waiting, the decline's line added.
+    pub record: Vault,
+}
+
+/// The move after a waiting record's coin, when that move is a decline (a stop key on another
+/// device sent the withdrawal back). `source` shows the newest waiting coin of the record's
+/// state and the transaction that spent it; the hop is checked like every walk hop (the input
+/// runs the account's own rules, the continuation carries the covenant id and is exactly the
+/// Locked-again script). None: the record is not waiting, the coin is unknown or unspent, or the
+/// move is not a decline (a stop, a finish, an heir's claim).
+pub async fn declined_elsewhere(
+    public: &Public,
+    record: &Vault,
+    source: &dyn SpenderSource,
+    limits: Limits,
+) -> Result<Option<Declined>, String> {
+    if record.state.stage != 1 {
+        return Ok(None);
+    }
+    let rules = Arc::new(Rules::new(public, record)?);
+    let mut budget = Budget::new(limits);
+    let spk = rules.spk(record, &record.state);
+    let address = rules.network.address_of(&spk).ok_or_else(|| CHECK_FAILED.to_string())?;
+    let found = budget.ask(source.first_coin(&address, record.covenant_id)).await?;
+    let Some(waiting) = found else { return Ok(None) };
+    let Some(spend) = budget.ask(source.spender(&waiting.0)).await? else { return Ok(None) };
+    let step = checked_hop(&rules, record, &waiting, spend, budget.deadline).await?;
+    Ok(decline_step(record, &waiting, step))
+}
+
+/// A checked hop kept only when it is a decline of `record`'s waiting withdrawal: one new
+/// history line, a decline's, and the state `after_decline` gives.
+fn decline_step(record: &Vault, waiting: &Coin, step: Step) -> Option<Declined> {
+    let coin = step.next?;
+    let one_more = step.record.history.len() == record.history.len() + 1;
+    let line = step.record.history.last().filter(|_| one_more)?;
+    let locked_again = step.record.state == after_decline(&record.state);
+    let declined = line.starts_with("decline (") && locked_again;
+    declined.then(|| Declined { was: waiting.1.amount, coin, record: step.record })
+}
+
+/// Whether our node's coin is the one the shown decline made: the same outpoint, covenant id and
+/// script (never the address alone), holding what the waiting coin held less a network fee
+/// within the account's fee allowance.
+pub fn adopted(d: &Declined, node: &Coin) -> bool {
+    let same = node.0 == d.coin.0
+        && node.1.covenant_id == Some(d.record.covenant_id)
+        && node.1.covenant_id == d.coin.1.covenant_id
+        && node.1.script_public_key == d.coin.1.script_public_key;
+    let allowance = u64::try_from(d.record.dials.max_fee).unwrap_or(0);
+    let fee = d.was.checked_sub(node.1.amount);
+    same && node.1.amount == d.coin.1.amount && fee.is_some_and(|f| f <= allowance)
 }
 
 async fn walk(
@@ -1089,6 +1216,119 @@ mod tests {
         assert_eq!(v.history.len(), 3, "{:?}", v.history);
         assert!(v.history[1].starts_with("request 2 KAS"), "{:?}", v.history);
         assert!(v.history[2].starts_with("finish 2 KAS"), "{:?}", v.history);
+    }
+
+    impl Chain {
+        /// A stop key sends the waiting withdrawal back: one continuation, Locked again.
+        fn decline(&mut self, fee: u64) -> Transaction {
+            self.daa += LATER;
+            let n = after_decline(&self.v.state);
+            let outs = vec![self.cont(self.coin.1.amount - fee, &n)];
+            self.spend_by("decline", vec![vec![0u8; 65], vec![]], outs, 0, Some(n))
+        }
+
+        /// The owner's record while its withdrawal waits, the waiting coin, and the history
+        /// service's view (the newest waiting coin, every spend so far).
+        fn waiting(&mut self) -> (Vault, Coin, Fake) {
+            self.request(2 * KAS);
+            let line = "request 2 KAS to x, fee 0.001 KAS, tx aa".to_string();
+            let (pending_to, history) = (Some("x".to_string()), vec![line]);
+            let record = Vault { pending_to, history, ..self.v.clone() };
+            let at = self.ctx.network.address_of(&self.coin.1.script_public_key).unwrap();
+            let fake = Fake { first: Some((at, self.coin.clone())), ..Fake::default() };
+            (record, self.coin.clone(), fake)
+        }
+
+        async fn declined(&self, record: &Vault, fake: Fake) -> Result<Option<Declined>, String> {
+            let fake = Fake { txs: self.txs.clone(), ..fake };
+            declined_elsewhere(&self.ctx.keys.public(), record, &fake, Limits::FOLLOW).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_decline_by_another_key_is_followed() {
+        let mut c = chain("decline-elsewhere");
+        let (record, waiting, fake) = c.waiting();
+        assert!(c.declined(&record, Fake::default()).await.unwrap().is_none(), "no coin");
+        let at = fake.first.clone();
+        assert!(c.declined(&record, fake).await.unwrap().is_none(), "the coin is not spent");
+        let tx = c.decline(FEE);
+        let d = c.declined(&record, Fake { first: at, ..Fake::default() }).await.unwrap().unwrap();
+        assert_eq!(d.coin.0, TransactionOutpoint::new(tx.id(), 0));
+        assert_eq!((d.was, d.coin.1.amount), (waiting.1.amount, waiting.1.amount - FEE));
+        assert_eq!((&d.record.state, &d.record.pending_to), (&c.v.state, &None));
+        assert_eq!(d.record.state.stage, 0, "Locked again");
+        assert_eq!(d.record.history.len(), 2, "{:?}", d.record.history);
+        assert!(d.record.history[1].starts_with("decline (stop key 1)"), "{:?}", d.record.history);
+        assert!(!contract::is_stopped(&d.record), "the account is open");
+        assert!(adopted(&d, &c.coin), "our node holds the very coin the decline made");
+        // a record that is not waiting asks nothing
+        let locked = Vault { state: locked(), ..record.clone() };
+        let down = Fake { fail: true, ..Fake::default() };
+        assert!(c.declined(&locked, down).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_real_stop_is_not_followed_as_a_decline() {
+        let mut c = chain("stop-not-decline");
+        let (record, _, fake) = c.waiting();
+        c.cancel();
+        assert!(c.declined(&record, fake).await.unwrap().is_none(), "a stop ended the account");
+        // a withdrawal finished elsewhere leaves a Locked coin too: not a decline either
+        let mut c = chain("finish-not-decline");
+        let (record, _, fake) = c.waiting();
+        c.finish();
+        assert!(c.declined(&record, fake).await.unwrap().is_none(), "a finish paid out");
+        // a history that shows a move the rules do not make is refused, never followed
+        let mut c = chain("forged-decline");
+        let (record, _, fake) = c.waiting();
+        c.decline(FEE);
+        let waiting_script = c.ctx.vault_spk(&record.state);
+        c.txs.last_mut().unwrap().1.tx.outputs[0].script_public_key = waiting_script;
+        assert_eq!(c.declined(&record, fake).await.unwrap_err(), CHECK_FAILED);
+    }
+
+    #[tokio::test]
+    async fn a_same_address_decoy_is_not_adopted() {
+        let mut c = chain("decoy");
+        let (record, _, fake) = c.waiting();
+        c.decline(FEE);
+        let d = c.declined(&record, fake).await.unwrap().unwrap();
+        let real = c.coin.clone();
+        assert!(adopted(&d, &real));
+        // the same address and amount, another transaction and no covenant id
+        let other = TransactionOutpoint::new(Hash::from_bytes([3u8; 32]), 0);
+        let (amount, spk, daa) = (real.1.amount, real.1.script_public_key.clone(), c.daa);
+        let decoy = (other, UtxoEntry::new(amount, spk.clone(), daa, false, None));
+        assert!(!adopted(&d, &decoy), "no covenant id");
+        // the right outpoint is not enough without the covenant id, nor is another account's id
+        let bare = (real.0, UtxoEntry::new(amount, spk.clone(), daa, false, None));
+        let alien = Some(Hash::from_bytes([8u8; 32]));
+        let sibling = (real.0, UtxoEntry::new(amount, spk.clone(), daa, false, alien));
+        assert!(!adopted(&d, &bare) && !adopted(&d, &sibling));
+        // the covenant id at the same address in another transaction (a later move) is not it
+        let cov = Some(record.covenant_id);
+        let later = (other, UtxoEntry::new(amount, spk.clone(), daa, false, cov));
+        assert!(!adopted(&d, &later), "another outpoint");
+        // more gone than the fee allowance, or more held than before
+        let over = contract::MAX_FEE as u64 + 1;
+        let thin = (real.0, UtxoEntry::new(d.was - over, spk.clone(), daa, false, cov));
+        let fat = (real.0, UtxoEntry::new(d.was + 1, spk, daa, false, cov));
+        assert!(!adopted(&d, &thin) && !adopted(&d, &fat));
+        let costly = Declined { was: d.was + over, coin: d.coin.clone(), record: d.record.clone() };
+        assert!(!adopted(&costly, &real), "the fee is above the account's allowance");
+    }
+
+    #[test]
+    fn a_failed_look_for_a_decline_waits_before_the_next() {
+        let path = std::env::temp_dir().join(format!("kv-look-{}.json", std::process::id()));
+        let t0 = Instant::now();
+        assert!(follow_due(&path, t0));
+        assert!(!follow_due(&path, t0 + FOLLOW_EVERY - Duration::from_secs(1)));
+        assert!(follow_due(&path, t0 + FOLLOW_EVERY));
+        follow_done(&path);
+        assert!(follow_due(&path, t0 + FOLLOW_EVERY), "a good look clears the wait");
+        follow_done(&path);
     }
 
     #[tokio::test]

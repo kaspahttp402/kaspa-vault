@@ -531,7 +531,7 @@
   /* The glow: the lines are drawn small, blurred at three widths, the tiers added up in one 1/3-size canvas and that laid once over the sharp frame.
      The two wide tiers change slowly, so they are reblurred only every second frame (level 2: everything half as often). */
   function halate(amount) {
-    var r = [2, 3, 4],
+    var r = [4, 5, 6] /* wide enough that no tier's coarse grid shows through as blotches */,
       weight = [0.9, 0.8, 0.9],
       slow = level >= 2 ? 2 : 1;
     for (var n = 1; n < bloom.length; n++) {
@@ -1275,8 +1275,16 @@
       var a = u < edge - eb ? faint : u > edge + eb ? bright : faint + ((bright - faint) * (u - edge + eb)) / (2 * eb);
       return 'rgba(' + Math.round(rgb[0]) + ',' + Math.round(rgb[1]) + ',' + Math.round(rgb[2]) + ',' + Math.min(1, a) + ')';
     }
+    /* a stopped account pulls the ribbon's two ends into one point; a gradient of no length
+       paints nothing, so after some seconds the red triangles vanished. The ramp's ends are
+       kept at least 1 px apart. */
+    var rx0 = pts[0][0],
+      ry0 = pts[0][1],
+      rx1 = pts[S][0],
+      ry1 = pts[S][1];
+    if (Math.abs(rx1 - rx0) + Math.abs(ry1 - ry0) < 1) rx1 = rx0 - 1;
     function ramp(base) {
-      var G = g.createLinearGradient(pts[0][0], pts[0][1], pts[S][0], pts[S][1]);
+      var G = g.createLinearGradient(rx0, ry0, rx1, ry1);
       [0, edge - eb, edge + eb, 1]
         .map(clamp)
         .sort(function (a, b) {
@@ -1359,7 +1367,8 @@
         A = fine
           ? F.a * (1 - m) * (1 - m) * arr
           : 1 + (ringLife(j) - 1) * eC + (sealLife(j) - 1) * eB + (noteLife() - 1) * eN + ((j === 0 ? 1 : 0) - 1) * eP;
-      if (fine && A < 0.01) continue;
+      /* the soft share of the fine tendrils is left out: a glow with no line read as a smear */
+      if (fine && (A < 0.01 || F.r < JELLY.soft)) continue;
       /* heir: the other lines dissolve at HEIR.at (closer the more silence); the heir line skips a small gap there and goes on */
       var heir = j === HEIR.line,
         end = heir ? 9 : 1.5 - (1.5 - HEIR.at) * eH,
@@ -1651,7 +1660,8 @@
     peopleBursts(lines, eK).forEach(function (b) {
       shapeL.push(b);
     });
-    /* small copy for the glow: everything, the out-of-focus tendrils only here */
+    mark(1);
+    /* small copy for the glow: every line drawn on the frame */
     var S0 = bloom[0],
       B = S0.g,
       bs = 1 / S0.n;
@@ -1719,7 +1729,9 @@
     });
     B.globalAlpha = 1;
     var breath = 1 + JELLY.breath * Math.sin((TAU * clock) / 11);
+    mark(2);
     halate(GLOW_ALL * JELLY.halation * (1 + 1.2 * charge) * (1 + glow / 16) * breath);
+    mark(3);
     if (touchA > 0.01 && FINGER.glow > 0) {
       /* and a smooth one on the frame itself, so the finger reads at once */
       var tr2 = 55 * scale * FINGER.glow,
@@ -1742,7 +1754,7 @@
     });
     if (charge > 0.01) {
       /* the slide: a front of light moves along the main lines with the thumb, white at the front */
-      var CG = g.createLinearGradient(pts[0][0], pts[0][1], pts[S][0], pts[S][1]),
+      var CG = g.createLinearGradient(rx0, ry0, rx1, ry1),
         cf = clamp(charge);
       CG.addColorStop(0, 'rgba(' + tint + ',0.7)');
       CG.addColorStop(Math.max(0.001, cf - 0.05), 'rgba(' + tint + ',0.7)');
@@ -1852,15 +1864,19 @@
     }
     coinCode(g);
     g.globalCompositeOperation = 'source-over';
-    if (K > 0.9) {
+    var dotA = (K - 0.9) * 10 * (1 - ease(mixT)); /* no dot beside a shape (the stop triangles) */
+    if (dotA > 0.01) {
       g.beginPath();
       g.arc(0.16 * W, 0.47 * H, 3, 0, TAU);
-      g.fillStyle = 'rgba(255,245,238,' + (K - 0.9) * 10 + ')';
+      g.fillStyle = 'rgba(255,245,238,' + dotA + ')';
       g.fill();
     }
   }
   /* slow phone: one-way steps down in sharpness, never a visible flicker back up */
   function pace(ms, work) {
+    if (ms > 250) return; /* a pause (a prompt, another app in front), not a slow frame */
+    if (ms > fMax) fMax = ms;
+    if (ms > 25) fSlow++;
     fN++;
     fT += ms;
     fW += work;
@@ -1868,6 +1884,12 @@
     var avg = fT / fN;
     lastMs = avg;
     lastWork = fW / fN;
+    var parts = pT.map(function (v) {
+      return (v / fN).toFixed(1);
+    });
+    parts = parts.join('/') + ' max ' + fMax.toFixed(0) + ' slow ' + fSlow;
+    pT = [0, 0, 0, 0, 0];
+    fMax = fSlow = 0;
     fN = 0;
     fT = 0;
     fW = 0;
@@ -1878,6 +1900,8 @@
         level +
         ' work ms ' +
         lastWork.toFixed(1) +
+        ' step/build/copy/glow/paint ' +
+        parts +
         ' shown ' +
         shown +
         ' want ' +
@@ -1919,7 +1943,10 @@
     }
     for (var s = 0; s < 3; s++) step(dt / 3);
     fNo++;
+    markAt = t0;
+    mark(0);
     draw();
+    mark(4);
     var work = performance.now() - t0;
     if (prev) pace(now - prev, work);
     prev = lastRaf = now;
@@ -1930,6 +1957,16 @@
   }
   var restUntil = 0,
     lastRaf = 0;
+  /* where a frame's time goes, summed per stretch between marks: step, build, glow copy, glow, paint */
+  var pT = [0, 0, 0, 0, 0],
+    markAt = 0,
+    fMax = 0,
+    fSlow = 0;
+  function mark(i) {
+    var n = performance.now();
+    pT[i] += n - markAt;
+    markAt = n;
+  }
 
   window.KVScene = {
     init: function (el) {

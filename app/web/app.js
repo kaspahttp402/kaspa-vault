@@ -1508,6 +1508,12 @@
       rulesReviewSheet(ch.lines, r || {});
     });
   }
+  /* shown before any button whose move the phone's sealed vault seeds approve */
+  var NEED_FACE = 'Needs your fingerprint or face. The PIN does not open the vault.';
+  /* an instant update left half done: finishing it passes through the vault */
+  function rulesNow() {
+    return !!JSON.parse(D.getSetting('rules_move') || '{}').now;
+  }
   /* the review sheet after rules.change (dials, guardians, heir): the slide that moves the money, or Update now */
   function rulesReviewSheet(lines, r, paper) {
     openSheet(reviewSheetHtml(lines, r));
@@ -1574,7 +1580,7 @@
   function rulesLine() {
     var p = D.rulesPending();
     if (p && p.secondsLeft > 0) return 'Your new rules start in ' + dur(p.secondsLeft) + '.';
-    if (D.rulesReady()) return 'Your new rules are ready.';
+    if (D.rulesReady()) return 'Your new rules are ready.' + (rulesNow() ? ' ' + NEED_FACE : '');
     return 'Your new rules are saved. Update my rules to apply them.';
   }
   function reviewSheetHtml(lines, r) {
@@ -1601,6 +1607,7 @@
     var when = r.route === 'open' || r.kind === 'now' ? 'Takes effect now.' : later;
     var face = now
       ? '<div class="line">Update now: takes effect now.</div>' +
+        '<div class="sub">' + NEED_FACE + '</div>' +
         fee(now.fee_kas_about) +
         '<div class="line">Update with notice: ' +
         later.charAt(0).toLowerCase() +
@@ -1894,7 +1901,7 @@
     return (w && w.name ? w.name : 'Someone') + '’s account';
   }
   /* Home's rows for the accounts this phone helps: folded to the name, the role and one line
-     (read more only if you want); a tap opens the whole status and its button. A row with
+     (the rest is there for whoever wants it); a tap opens the whole status and its button. A row with
      something waiting (a withdrawal, a claim) is always open */
   function watchedRowsHtml(onlyHot) {
     ui.wOpen = ui.wOpen || {};
@@ -1936,6 +1943,7 @@
       menuBtn() +
       '</div><div class="treegap short"></div>' +
       '<div class="label mt20">Your guardians and heir</div><div data-helpfold></div><div class="list" data-helpers></div>' +
+      '<div class="err" data-e></div>' +
       '<button class="door" data-addhelper>+ Add a guardian or heir</button>' +
       '<button class="ghost" data-go="watchcode">Share watch code</button>' +
       '<div class="label mt20">People you protect</div><div data-protfold></div><div class="list" data-helped></div>' +
@@ -2004,6 +2012,7 @@
     setHtml(el, '[data-helped]', w.length ? watchedShortHtml(!ow) : '<div class="sub">None yet.</div>');
     el.querySelector('[data-addwatch]').hidden = !ow;
     setHtml(el, '[data-heirpurse]', heirPurseRowHtml());
+    setText(el, '[data-e]', ui.peopleErr || '');
   }
   function scanSays(title, err) {
     openSheet('<div class="label">' + esc(title) + '</div><div class="err mt8">' + esc(err) + '</div><button class="ghost" data-no>Close</button>');
@@ -2110,9 +2119,19 @@
   }
   /* a guardian or heir lives in the rules: rules.change stores it, then the usual review sheet and Update now */
   function peopleChange(lines, args) {
+    ui.peopleErr = '';
     D.changeRules(args).then(function (r) {
-      rulesReviewSheet(lines, r || {});
+      if (r && r.ok) return rulesReviewSheet(lines, r);
+      peopleSays((r && r.error) || 'The rules could not be changed. Nothing has moved.');
     });
+  }
+  /* a refused guardian or heir change (D.changeRules has passed the engine's words through
+     plain()): no sheet to lose; it stays on People, under the list, until the next try */
+  function peopleSays(err) {
+    if (ui.closeSheet) ui.closeSheet();
+    ui.guide = null;
+    ui.peopleErr = err;
+    refresh();
   }
   /* the helper scans an owner's watch code (watch.import) */
   function scanWatch() {
@@ -2185,9 +2204,13 @@
   function watchedButtons(w) {
     var st = (w && w.st) || {},
       b = '';
-    if (st.can_stop && st.stage === 'waiting') b += '<button class="pill" data-wd>Send the withdrawal back</button>';
-    if (st.can_stop) b += '<button class="pill danger" data-ws>Stop their account</button>';
-    if (st.can_claim) b += '<button class="pill" data-wc>Claim it</button>';
+    if (st.can_stop && st.stage === 'waiting')
+      b += '<button class="pill" data-wd data-slide-film="slide-back">' +
+        'Send the withdrawal back</button>';
+    if (st.can_stop)
+      b += '<button class="pill danger" data-ws data-film="stop-button">' +
+        'Stop their account</button>';
+    if (st.can_claim) b += '<button class="pill" data-wc data-film="heir-claim">Claim it</button>';
     return b;
   }
   function watchedMove(el, btn, w, kind) {
@@ -3593,7 +3616,7 @@
     return (
       '<div class="pips' +
       (g && g.stopped ? ' stopped' : '') +
-      '" aria-label="The covenant on this money">' +
+      '" data-film="rules" aria-label="The covenant on this money">' +
       pips
         .map(function (p) {
           return (
@@ -4116,6 +4139,8 @@
       s.setAttribute('aria-valuenow', '0');
       s.innerHTML = '<i tabindex="0"></i><span>' + esc(label) + '</span>';
       s.kvBtn = btn;
+      var film = btn.getAttribute('data-slide-film'); /* a stable name for screen recording */
+      if (film) s.setAttribute('data-film', film);
       btn.parentNode.replaceChild(s, btn);
       /* Live has no confirm step: the address stands above the slide */
       if (to && D.isLive()) slideNote(s, to, what);
@@ -4230,35 +4255,27 @@
       return false;
     });
   }
-  /* The guard switch: on is free; off is the phone's own prompt (guardOff), answered through
-     __kvGuardOff with 'ok' (stopped), 'cancel' or 'refused'. The switch shows what is running. */
+  /* The guard switch is a plain switch both ways. Starting takes the phone a while
+     to reach the network, so the switch shows what was asked for at once and settles on what is
+     running (60 looks at most). */
+  var guardAsk = 0;
   function guardSwitch(on, paint) {
-    var later = function () {
-      paint(!!bridge.guardRunning());
-      setTimeout(function () {
-        paint(!!bridge.guardRunning());
-      }, 900);
-    };
-    if (on) {
-      bridge.guardOn(true);
-      haptic();
-      return later();
-    }
-    if (!bridge.guardOff) {
-      paint(!!bridge.guardRunning());
-      return refuse('Update the app to turn alerts off.');
-    }
-    window.__kvGuardOff = function (st) {
-      window.__kvGuardOff = null;
-      if (st === 'ok') haptic();
-      later();
-    };
-    bridge.guardOff('__kvGuardOff');
+    var mine = ++guardAsk,
+      looks = on ? 60 : 3;
+    bridge.guardOn(on);
+    haptic();
+    paint(on);
+    (function settle() {
+      if (mine !== guardAsk) return; /* a newer tap owns the switch */
+      var running = !!bridge.guardRunning();
+      if (running === on || --looks <= 0) return paint(running);
+      setTimeout(settle, 1000);
+    })();
   }
   /* Settings save. A wider signer window is stored by the phone only right after a fresh signer
      prompt, so that change asks first and is read back; the same or a narrower one is free. */
   function signerWin(x) {
-    return x === '' || x == null ? 300 : parseInt(x, 10) || 0;
+    return x === '' || x == null ? 0 : parseInt(x, 10) || 0;
   }
   function saveSettings(v) {
     var was = signerWin(D.getSetting('signer_window')),
@@ -4810,10 +4827,11 @@
     var to = q.to || 'an address your alerts saw',
       seen = q.amount == null && !q.to; /* a withdrawal only the guard saw */
     body =
-      (q.amount == null ? '' : '<div class="big">' + bigKas(q.amount) + '</div>') +
-      '<div class="sub">To ' +
+      (q.amount == null ? '' :
+        '<div class="big" data-film="waiting-amount">' + bigKas(q.amount) + '</div>') +
+      '<div class="sub">To <span data-film="waiting-to">' +
       esc(to.length > 30 ? to.slice(0, 28) + '…' : to) +
-      ', asked by ' +
+      '</span>, asked by ' +
       esc(q.who || 'not known') +
       '</div>' +
       (seen ?
@@ -4832,7 +4850,8 @@
       (q.secondsLeft > 0 || seen || !D.isLive() ? '' :
         '<button class="pill" data-finish>Finish</button>') +
       '<div class="twobtn"><button class="pill" data-decline>Decline it</button><button class="pill" data-let>Approve</button></div>' +
-      '<button class="pill danger" data-stop>Stop everything</button>' /* the stop itself, not a way to the stop screen; its own row so the slide has room */ +
+      /* the stop itself, not a way to the stop screen; its own row so the slide has room */
+      '<button class="pill danger" data-stop data-slide-film="slide-stop">Stop everything</button>' +
       '<div class="sub">The emergency stop moves all funds, including this withdrawal, into your vault. Only your vault seeds can release them.</div>' +
       (D.isLive() ? '' : '<button class="ghost" data-skip>Skip ahead</button>');
     return [body, acts];
@@ -5235,7 +5254,8 @@
     if (r.route) return rulesReviewSheet(lines, r, true);
     openSheet(
       '<div class="label">Change the rules</div><div class="line mt8">' + esc(lines[0]) + '</div>' +
-        '<div class="line">Update now: takes effect now.</div><div class="err" data-serr></div>' +
+        '<div class="line">Update now: takes effect now.</div><div class="sub">' + NEED_FACE +
+        '</div><div class="err" data-serr></div>' +
         '<button class="pill" data-now>Update now</button><button class="ghost" data-no>Not now</button>'
     );
     var nw = sheet.querySelector('[data-now]');
@@ -6217,7 +6237,8 @@
           'class="notice quiet" data-notice></button><button class="notice amber" data-heir></button>' +
           '<button class="notice" data-paper hidden></button>' +
           '<div class="err" data-e></div><div class="push"></div>' +
-          '<div class="big" data-bal></div><button class="denom" data-swap aria-label="Show in the other unit">' +
+          '<div class="big" data-bal data-film="balance"></div>' +
+          '<button class="denom" data-swap data-film="kas" aria-label="Show in the other unit">' +
           '<span data-usd></span><svg viewBox="0 0 16 16" aria-hidden="true">' +
           '<path d="M5 2v10M2 9l3 3 3-3M11 14V4M8 7l3-3 3 3"/></svg></button>' +
           '<div class="line lines" data-limit></div><button class="notice quiet" data-purse-line></button>' +
@@ -6229,7 +6250,7 @@
           '<button class="ghost" data-go="people">Add a guardian</button></div>' +
           '<button class="pill" data-rulesfin hidden>Finish updating my rules</button>' +
           '<div class="list" data-watched></div>' /* accounts this phone helps */ +
-          '<div class="log" data-log></div>' +
+          '<div class="log" data-log data-film="returned"></div>' +
           '<div class="row" data-row></div>'
         );
       },
@@ -6961,6 +6982,7 @@
             c = document.createElement('div');
             c.className = 'line';
             c.setAttribute('data-cd', '');
+            c.setAttribute('data-film', 'countdown');
             b.appendChild(c);
           }
           c.textContent =
@@ -7090,8 +7112,9 @@
         return { mode: 'stopped', k: 1, slow: true };
       },
       html: function () {
-        return '<div class="label">Stopped</div><div class="push"></div><div class="big" data-b>' +
-          '</div><div class="sub">In your vault</div><div class="line">No phone can spend these ' +
+        return '<div class="label">Stopped</div><div class="push"></div>' +
+          '<div class="big" data-b data-film="vault-amount"></div>' +
+          '<div class="sub" data-film="vault-label">In your vault</div><div class="line">No phone can spend these ' +
           'funds. Only your vault seeds can release them.</div><button class="pill" ' +
           'data-go="safe">Open your vault</button><button class="ghost" data-home>Home</button>';
       },
@@ -7116,12 +7139,13 @@
       html: function () {
         return (
           topbar() +
-          '<div class="label">Vault</div><div class="push"></div><div class="big" data-b></div><div class="sub" data-usd></div>' +
-          '<div class="line mt8">Three vault seeds; any two of them open it.</div>' +
+          '<div class="label">Vault</div><div class="push"></div>' +
+          '<div class="big" data-b data-film="vault-amount"></div><div class="sub" data-usd data-film="vault-usd"></div>' +
+          '<div class="line mt8" data-film="vault-open">Three vault seeds; any two of them open it.</div>' +
           (D.isLocal() ? '<button class="ghost" data-go="showsheets">Show my seeds</button>' : '') +
           '<div class="list" data-stops></div><div class="push"></div>' +
           '<button class="pill danger" data-go="stop" data-vstop hidden>Emergency stop</button>' +
-          '<button class="pill" data-go="takeout">Take money out</button>'
+          '<button class="pill" data-go="takeout" data-film="vault-open-button">Take money out</button>'
         );
       },
       live: function (el) {
@@ -7213,8 +7237,12 @@
       },
       html: function () {
         if (D.isLocal()) {
+          var how = NEED_FACE; /* the sealed vault seeds on this phone open it */
+          if (!D.state.sheetsOnPhone) how =
+            'Your vault opens with any two of your three vault seeds, typed from paper. ' +
+            'Nothing on this phone can open it alone.';
           var body =
-            '<div class="line">Your vault opens with any two of your three vault seeds, typed from paper. Nothing on this phone can open it alone.</div>' +
+            '<div class="line">' + how + '</div>' +
             '<div class="sub">In your vault: ' +
             fmt(D.state.safe) +
             ' KAS.</div>' +
@@ -7544,7 +7572,8 @@
       html: function () {
         return (
           topbar() +
-          '<div class="label" data-wn></div><h1 class="head" data-wk></h1><p class="line lines" data-wl></p><p class="sub role" data-wr></p>' +
+          '<div class="label" data-wn></div><h1 class="head" data-wk data-film="watched-balance"></h1>' +
+          '<p class="line lines" data-wl data-film="watched-pending heir-line"></p><p class="sub role" data-wr></p>' +
           '<div class="err" data-e></div><div class="push"></div><div data-wb></div>' +
           '<div class="qrbox" data-wqbox hidden><div class="qr big" data-wq></div></div>' +
           '<button class="pill" data-wcopy hidden>Copy the code</button>' +
@@ -7942,7 +7971,7 @@
             title +
             '</span>' +
             (who ? '<span class="d" ' + who + '></span>' : '') +
-            '</span><span class="r">' +
+            '</span><span class="r" data-film="rule-' + key + '">' +
             esc(right) +
             '</span></button>'
           );
@@ -8240,7 +8269,7 @@
             ['3600', '1 hour'],
           ]
             .map(function (o) {
-              var cur = D.getSetting('signer_window') === '' ? '300' : String(parseInt(D.getSetting('signer_window'), 10) || 0);
+              var cur = D.getSetting('signer_window') === '' ? '0' : String(parseInt(D.getSetting('signer_window'), 10) || 0);
               return '<button data-v="' + o[0] + '"' + (cur === o[0] ? ' class="on"' : '') + '>' + o[1] + '</button>';
             })
             .join('') +
@@ -8750,7 +8779,7 @@
               return (
                 '<div class="label mt20">Vault seed ' +
                 (k + 1) +
-                '</div><div class="words">' +
+                '</div><div class="words" data-film="seed-' + (k + 1) + '">' +
                 sh
                   .map(function (w, i) {
                     return '<div><i>' + (i + 1) + '</i>' + esc(w) + '</div>';

@@ -463,7 +463,12 @@ impl Ctx {
         }
         let Ok(address) = self.try_vault_address(&v.state) else { return Ok(false) };
         let held: u64 = self.try_utxos(&address).await?.into_iter().filter(|(_, u)| u.covenant_id == Some(v.covenant_id)).map(|(_, u)| u.amount).sum();
-        Ok(record_is_ended(false, age, held))
+        if !record_is_ended(false, age, held) {
+            return Ok(false);
+        }
+        // A waiting withdrawal a guardian sent back from another phone left the account open at
+        // its locked place: the record follows it (lineage.rs `follow_decline`) and has not ended.
+        Ok(self.follow_decline(v).await?.is_none())
     }
 
     /// `pay`: plain payment from the funding key to any address (used to fund a cold safe).

@@ -36,7 +36,7 @@ use silverscript_abi::SilAbiArtifact;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::panic::AssertUnwindSafe;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::Notify;
@@ -70,6 +70,16 @@ const SCAN_PAGES_MAX: usize = 400;
 const ACCEPT_CONFIRMATIONS: Option<u64> = None;
 /// No good answer from any node for this long is "the guard cannot reach the network".
 const SILENT: Duration = Duration::from_secs(90);
+/// One node quiet while another still answers is an alert only after this long: nodes drop
+/// and return with every phone sleep and network switch, and that is not news.
+const UNCHECKED: Duration = Duration::from_secs(3600);
+/// The CLI watchdog: no good answer for this long (guard or racer) and the process exits with
+/// RESTART_CODE so its restart loop starts it again on fresh connections.
+const STALE: u64 = 90;
+const RESTART_CODE: i32 = 4;
+/// Unix seconds of the last good answer: the guard's, and the racer's (0 = no racer running).
+static GUARD_OK: AtomicU64 = AtomicU64::new(0);
+pub(super) static RACER_OK: AtomicU64 = AtomicU64::new(0);
 /// Alerts kept in alerts.json (the phone shows the newest first).
 const ALERTS_KEPT: usize = 10;
 /// Empty ticks before "the guard cannot find the savings coin" when nothing is in view.
@@ -235,6 +245,9 @@ enum Kind {
     WithdrawalCompleted,
     LineageMismatch,
     WatcherSilent,
+    /// One node has been quiet for UNCHECKED while another answers: nothing to check the
+    /// lone node's word against. The phone rings for this one; it never rings for WatcherSilent.
+    Unchecked,
     Unwatched,
     Stopped,
     /// v5: a stop key sent a waiting withdrawal back to Locked; the account goes on.
@@ -255,6 +268,7 @@ impl Kind {
             Kind::WithdrawalCompleted => "withdrawal_completed",
             Kind::LineageMismatch => "lineage_mismatch",
             Kind::WatcherSilent => "watcher_silent",
+            Kind::Unchecked => "unchecked",
             Kind::Unwatched => "unwatched",
             Kind::Stopped => "stopped",
             Kind::WithdrawalDeclined => "withdrawal_declined",
@@ -331,11 +345,17 @@ impl AlertFile {
 struct Liveness {
     last_good: Duration,
     silent: bool,
+    /// How long without a good answer counts as silence.
+    after: Duration,
 }
 
 impl Liveness {
     fn new() -> Self {
-        Liveness { last_good: Duration::ZERO, silent: false }
+        Liveness::after(SILENT)
+    }
+
+    fn after(after: Duration) -> Self {
+        Liveness { last_good: Duration::ZERO, silent: false, after }
     }
 
     /// A good answer; when it ends a silence, how long the silence lasted.
@@ -347,7 +367,7 @@ impl Liveness {
 
     /// A failed answer; true the moment the silence becomes an alert.
     fn bad(&mut self, now: Duration) -> bool {
-        if !self.silent && now.saturating_sub(self.last_good) >= SILENT {
+        if !self.silent && now.saturating_sub(self.last_good) >= self.after {
             self.silent = true;
             return true;
         }
@@ -357,7 +377,7 @@ impl Liveness {
 
 /// Every node is a witness. With two or more, one that stops answering while another still
 /// does leaves the guard following a lone node's word with nothing to check it against, so
-/// each node keeps its own SILENT clock. `down[i]` = node i failed a question this tick.
+/// each node keeps its own UNCHECKED clock. `down[i]` = node i failed a question this tick.
 /// Answers (nodes whose silence just became an alert, nodes that just came back with the gap).
 fn quiet_witnesses(
     live: &mut [Liveness],
@@ -563,7 +583,7 @@ struct Watcher<'a> {
     started: Instant,
     alerts: AlertFile,
     live: Liveness,
-    /// One SILENT clock per node, in `nodes()` order (quiet_witnesses).
+    /// One UNCHECKED clock per node, in `nodes()` order (quiet_witnesses).
     witness: Vec<Liveness>,
     /// v5 `--auto-heir`: send the inheritOpen once the silence has passed.
     auto_heir: bool,
@@ -712,7 +732,7 @@ fn next_states(s: &State) -> Vec<(&'static str, State)> {
 impl<'a> Watcher<'a> {
     fn new(ctx: &'a Ctx, cov: Hash, state: State, primary: String, others: Vec<(String, KaspaRpcClient)>) -> Self {
         let now = Instant::now();
-        let witness = (0..=others.len()).map(|_| Liveness::new()).collect();
+        let witness = (0..=others.len()).map(|_| Liveness::after(UNCHECKED)).collect();
         Watcher {
             ctx,
             dials: ctx.dials().unwrap_or_else(|e| panic!("{e}")),
@@ -883,7 +903,7 @@ impl<'a> Watcher<'a> {
         answers
     }
 
-    /// After a tick where at least one node answered: a node that has been quiet for SILENT is
+    /// After a tick where at least one node answered: a node quiet for UNCHECKED is
     /// an alert (once per silence), and its return is a log line.
     fn witness_check(&mut self, down: &[bool]) {
         let now = self.started.elapsed();
@@ -895,7 +915,7 @@ impl<'a> Watcher<'a> {
                 "{} has not answered for {s} s while another node still does; no cross-check until it is back",
                 names[i]
             );
-            self.alert(Kind::WatcherSilent, ONE_QUIET, &raw);
+            self.alert(Kind::Unchecked, ONE_QUIET, &raw);
         }
         for (i, gap) in back {
             let s = gap.as_secs();
@@ -919,6 +939,7 @@ impl<'a> Watcher<'a> {
             self.say(Level::Info, &format!("the network answers again after {} s of silence; resuming", gap.as_secs()));
         }
         self.alerts.seen_at = Some(unix_now());
+        GUARD_OK.store(unix_now(), Ordering::Relaxed);
         self.alerts.save(&self.ctx.dir);
         self.woke.notify_waiters();
         self.sinks.push_back(sink);
@@ -1816,11 +1837,54 @@ pub async fn run(ctx: &Ctx, nodes: &[String], auto_heir: bool, auto_stop: Option
     let poll = Arc::new(AtomicU64::new(POLL.as_secs()));
     let (_stop_tx, stop) = tokio::sync::watch::channel(false);
     let woke = Arc::new(Notify::new());
+    GUARD_OK.store(unix_now(), Ordering::Relaxed);
+    watchdog(ctx.dir.clone());
     let guard = run_guard_with(ctx.clone(), nodes.to_vec(), auto_heir, poll, stop, woke, auto_stop);
     if let Err(e) = guard.await {
         eprintln!("Refused: {e}");
         std::process::exit(2);
     }
+}
+
+/// The first of `nodes` that connects, and its index; every failure is said. All down is an error.
+pub async fn first_live(nodes: &[String], net: &crate::network::Network) -> Result<(KaspaRpcClient, usize), String> {
+    let mut last = String::from("no --node given");
+    for (i, url) in nodes.iter().enumerate() {
+        match connect(Some(url), net).await {
+            Ok(rpc) => return Ok((rpc, i)),
+            Err(e) => {
+                println!("{} node {url} did not answer: {e}", stamp());
+                last = e;
+            }
+        }
+    }
+    Err(last)
+}
+
+/// Which part has gone quiet past STALE at `now`, if any. A racer stamp of 0 is no racer.
+fn stale_part(now: u64, guard: u64, racer: u64) -> Option<&'static str> {
+    if now.saturating_sub(guard) >= STALE {
+        return Some("guard");
+    }
+    (racer != 0 && now.saturating_sub(racer) >= STALE).then_some("auto-stop racer")
+}
+
+/// A plain thread (it runs even when the async side hangs) that checks the stamps every 15 s and
+/// ends the process when one is stale; capped at about 30 days of checks.
+fn watchdog(dir: PathBuf) {
+    std::thread::spawn(move || {
+        for _ in 0..(30 * 24 * 240) {
+            std::thread::sleep(Duration::from_secs(15));
+            let (g, r) = (GUARD_OK.load(Ordering::Relaxed), RACER_OK.load(Ordering::Relaxed));
+            if let Some(part) = stale_part(unix_now(), g, r) {
+                let why = format!("no good answer to the {part} for {STALE} s");
+                let line = format!("{} ALERT WATCHER RESTART: {why}; exiting so it restarts", stamp());
+                println!("{line}");
+                log_line(&dir, &line);
+                std::process::exit(RESTART_CODE);
+            }
+        }
+    });
 }
 
 /// The guard went down: the alerts.log line, the WatcherSilent alert in alerts.json and the push.
@@ -1876,8 +1940,17 @@ pub async fn run_guard_with(
     ctx.dials()?;
     let mut others = vec![];
     for url in nodes.iter().skip(1) {
-        // A node on another network is lying or set up wrong; the guard does not start with it.
-        others.push((url.clone(), connect(Some(url), &ctx.network).await?));
+        // A node that does not answer now is left out (the guard runs on the ones that do); the restart
+        // loop brings it back. A node on another network is still refused outright.
+        match connect(Some(url), &ctx.network).await {
+            Ok(rpc) => others.push((url.clone(), rpc)),
+            Err(e) if e.contains("It is lying or set up wrong") => return Err(e),
+            Err(e) => {
+                let line = format!("{} ALERT witness {url} left out for now: {e}", stamp());
+                println!("{line}");
+                log_line(&ctx.dir, &line);
+            }
+        }
     }
     // Watched-follow mode follows on the wallet's own connection; alarms come from the phone polling watch.status.
     let follow = ctx.dir.join(crate::watched::WATCHED_FILE).exists();
@@ -1992,6 +2065,15 @@ mod tests {
     use kaspa_txscript::script_builder::ScriptBuilder;
 
     #[test]
+    fn watchdog_trips_on_a_quiet_guard_or_racer_only() {
+        assert_eq!(stale_part(1000, 950, 0), None, "fresh guard, no racer");
+        assert_eq!(stale_part(1000, 905, 0), Some("guard"));
+        assert_eq!(stale_part(1000, 950, 950), None);
+        assert_eq!(stale_part(1000, 950, 900), Some("auto-stop racer"));
+        assert_eq!(stale_part(5, 10, 10), None, "a stamp ahead of the clock is not stale");
+    }
+
+    #[test]
     fn check_nodes_wants_two_different_witnesses() {
         let one = vec!["ws://a:1".to_string()];
         let same = vec!["ws://a:1".to_string(), "ws://a:1 ".to_string()];
@@ -2087,7 +2169,11 @@ mod tests {
         assert_eq!(v["seen_at"], 1_700_000_000);
         let alerts = v["alerts"].as_array().unwrap();
         assert_eq!(alerts.len(), 10);
-        let kinds = ["withdrawal_pending", "withdrawal_completed", "lineage_mismatch", "watcher_silent", "unwatched", "stopped", "withdrawal_declined", "heir_clock", "spend", "spend_stranger"];
+        let kinds = [
+            "withdrawal_pending", "withdrawal_completed", "lineage_mismatch", "watcher_silent",
+            "unchecked", "unwatched", "stopped", "withdrawal_declined", "heir_clock", "spend",
+            "spend_stranger",
+        ];
         for a in alerts {
             assert_eq!(a.as_object().unwrap().len(), 3, "{a}");
             assert!(a["at"].is_u64() && a["text"].is_string(), "{a}");
@@ -2096,7 +2182,12 @@ mod tests {
         assert_eq!(alerts[0]["kind"], "withdrawal_pending");
         assert_eq!(AlertFile::load(&dir), f, "reload keeps the list as written");
         assert!(!dir.join("alerts.json.tmp").exists(), "the temp file is renamed away");
-        for k in [Kind::WithdrawalPending, Kind::WithdrawalCompleted, Kind::LineageMismatch, Kind::WatcherSilent, Kind::Unwatched, Kind::Stopped, Kind::WithdrawalDeclined, Kind::HeirClock, Kind::Spend, Kind::SpendStranger] {
+        let all = [
+            Kind::WithdrawalPending, Kind::WithdrawalCompleted, Kind::LineageMismatch,
+            Kind::WatcherSilent, Kind::Unchecked, Kind::Unwatched, Kind::Stopped,
+            Kind::WithdrawalDeclined, Kind::HeirClock, Kind::Spend, Kind::SpendStranger,
+        ];
+        for k in all {
             assert!(kinds.contains(&k.as_str()));
         }
         std::fs::remove_dir_all(&dir).ok();
@@ -2117,21 +2208,21 @@ mod tests {
         assert!(l.bad(s(1293)), "90 s since the last good answer: a new silence");
     }
 
-    /// Audit: with two nodes, one going quiet while the other answers is an alert after
-    /// 90 s, once, and its return is reported; a lone node is left to the all-nodes rule.
+    /// With two nodes, one going quiet while the other answers is an alert after
+    /// an hour, once, and its return is reported; a lone node is left to the all-nodes rule.
     #[test]
     fn one_quiet_witness_alerts_once_and_recovers() {
         let s = Duration::from_secs;
-        let mut two = vec![Liveness::new(), Liveness::new()];
+        let mut two = vec![Liveness::after(UNCHECKED), Liveness::after(UNCHECKED)];
         let none: (Vec<usize>, Vec<(usize, Duration)>) = (vec![], vec![]);
         assert_eq!(quiet_witnesses(&mut two, &[false, false], s(10)), none);
-        assert_eq!(quiet_witnesses(&mut two, &[false, true], s(60)), none, "50 s: not yet");
-        assert_eq!(quiet_witnesses(&mut two, &[false, true], s(100)).0, vec![1], "90 s: the alert");
-        assert_eq!(quiet_witnesses(&mut two, &[false, true], s(500)), none, "said once");
-        assert_eq!(quiet_witnesses(&mut two, &[false, false], s(600)).1, vec![(1, s(590))]);
-        assert_eq!(quiet_witnesses(&mut two, &[true, false], s(700)).0, vec![0], "either node");
-        let mut one = vec![Liveness::new()];
-        assert_eq!(quiet_witnesses(&mut one, &[true], s(500)), none, "a lone node: the old rule");
+        assert_eq!(quiet_witnesses(&mut two, &[false, true], s(1800)), none, "half an hour");
+        assert_eq!(quiet_witnesses(&mut two, &[false, true], s(3700)).0, vec![1], "an hour");
+        assert_eq!(quiet_witnesses(&mut two, &[false, true], s(9000)), none, "said once");
+        assert_eq!(quiet_witnesses(&mut two, &[false, false], s(9100)).1, vec![(1, s(9090))]);
+        assert_eq!(quiet_witnesses(&mut two, &[true, false], s(13000)).0, vec![0], "either node");
+        let mut one = vec![Liveness::after(UNCHECKED)];
+        assert_eq!(quiet_witnesses(&mut one, &[true], s(50000)), none, "a lone node: the old rule");
     }
 
     /// Pass 8: watch.json round-trips what a restart needs.
