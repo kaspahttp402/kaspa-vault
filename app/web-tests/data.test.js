@@ -179,6 +179,10 @@ test('pay from the purse sends the address and leaves the amount out for everyth
   const h = load({ engine: okEngine() });
   await h.open();
   await h.D.pursePay('kaspa:qdestdestdestdestdestdestdest0', 0);
+  assert.match(h.prompts[h.prompts.length - 1].why, /^Pay everything /);
+  await h.D.pursePay('kaspa:qdestdestdestdestdestdestdest0', 1.5);
+  assert.match(h.prompts[h.prompts.length - 1].why, /^Pay 1\.5 KAS /, 'the prompt names the sum');
+  assert.equal(h.callsOf('purse.pay')[1].args.kas, '1.5');
   const p = h.callsOf('purse.pay')[0];
   assert.equal(p.args.to, 'kaspa:qdestdestdestdestdestdestdest0');
   assert.equal('kas' in p.args, false);
@@ -348,6 +352,7 @@ test('paying from the heir purse asks one fingerprint and names no account', asy
   assert.equal(r.ok, true);
   assert.equal(h.prompts.length - before, 1);
   assert.deepEqual(h.callsOf('heir.pay')[0].args, { to: 'kaspa:qto', kas: '2' });
+  assert.match(h.prompts[h.prompts.length - 1].why, /^Send 2 KAS /, 'the prompt names the sum');
 });
 
 test('paying all of the heir purse sends no amount, so the engine takes the fee off the top',

@@ -863,6 +863,32 @@ async function heirPayBox(ev, bad) {
       ' not refused: ' + JSON.stringify(err) + (slid ? ' (slide opened)' : ''));
     if (!refused && /Enter an amount/.test(err)) bad.push('heir pay ' + amt + ' refused');
   }
+  await heirPaySums(ev, bad);
+}
+/* the typed sum is what the slide names, never "all of it" (the case holds 12.5); Max alone means
+   everything, with the sum shown; an edit after arming puts the slide back to its button */
+async function heirPaySums(ev, bad) {
+  const note = "(function () { var s = document.querySelector('[data-armed]'); return s && " +
+    "s.previousSibling ? s.previousSibling.textContent : ''; })()";
+  const type = (v) => ev("(function () { var a = document.querySelector('[data-amt]'); a.value = " +
+    JSON.stringify(v) + "; a.dispatchEvent(new Event('input')); })()");
+  const arm = async () => {
+    await ev("document.querySelector('[data-ok]').click()"); await sleep(400);
+    return ev(note);
+  };
+  let n = await ev(note);
+  if (!/Send 2\.5 KAS\. To /.test(n)) bad.push('heir slide does not name 2.5 KAS: ' +
+    JSON.stringify(n));
+  await type('12.5'); await sleep(200);
+  if (await ev("!!document.querySelector('[data-armed]')")) bad.push('heir slide stayed armed ' +
+    'after the amount was edited');
+  n = await arm();
+  if (!/Send 12\.5 KAS\. To /.test(n) || /all of it/.test(n)) bad.push('heir pay: a typed 12.5 ' +
+    'became everything: ' + JSON.stringify(n));
+  await type('1'); await ev("document.querySelector('[data-max]').click()"); await sleep(200);
+  n = await arm();
+  if (!/Send all of it, 12\.5 KAS\. To /.test(n)) bad.push('heir pay: Max does not name the sum: ' +
+    JSON.stringify(n));
 }
 async function run() {
   const list = await (await fetch('http://127.0.0.1:' + port + '/json')).json();

@@ -270,6 +270,8 @@ const STOP_HINT: &str = "Press the emergency stop if you did not start this.";
 const TWO_ANSWERS: &str = "The network gave two different answers. Press the emergency stop if you did not start this.";
 const NO_COIN: &str = "The guard cannot find the savings coin. Check the wallet device.";
 const NO_NET: &str = "The guard cannot reach the network.";
+const ONE_QUIET: &str =
+    "The guard can reach only part of the network and cannot cross-check what it sees.";
 const RULES_BROKEN: &str = "The savings moved in a way the rules do not allow. Check by hand. Press the emergency stop if you did not start this.";
 const STRANGER_HINT: &str = "The wallet device has never paid that address. Press the emergency stop if you did not start this.";
 
@@ -351,6 +353,31 @@ impl Liveness {
         }
         false
     }
+}
+
+/// Every node is a witness. With two or more, one that stops answering while another still
+/// does leaves the guard following a lone node's word with nothing to check it against, so
+/// each node keeps its own SILENT clock. `down[i]` = node i failed a question this tick.
+/// Answers (nodes whose silence just became an alert, nodes that just came back with the gap).
+fn quiet_witnesses(
+    live: &mut [Liveness],
+    down: &[bool],
+    now: Duration,
+) -> (Vec<usize>, Vec<(usize, Duration)>) {
+    let (mut quiet, mut back) = (vec![], vec![]);
+    if live.len() < 2 {
+        return (quiet, back); // a lone node's silence is the all-nodes rule above
+    }
+    for (i, l) in live.iter_mut().enumerate() {
+        if down.get(i).copied().unwrap_or(true) {
+            if l.bad(now) {
+                quiet.push(i);
+            }
+        } else if let Some(gap) = l.good(now) {
+            back.push((i, gap));
+        }
+    }
+    (quiet, back)
 }
 
 /// `<dir>/watch.json`: what the watcher believes, written after every good tick so a restart
@@ -536,6 +563,8 @@ struct Watcher<'a> {
     started: Instant,
     alerts: AlertFile,
     live: Liveness,
+    /// One SILENT clock per node, in `nodes()` order (quiet_witnesses).
+    witness: Vec<Liveness>,
     /// v5 `--auto-heir`: send the inheritOpen once the silence has passed.
     auto_heir: bool,
     /// The inheritOpen this watcher sent: txid and when.
@@ -683,6 +712,7 @@ fn next_states(s: &State) -> Vec<(&'static str, State)> {
 impl<'a> Watcher<'a> {
     fn new(ctx: &'a Ctx, cov: Hash, state: State, primary: String, others: Vec<(String, KaspaRpcClient)>) -> Self {
         let now = Instant::now();
+        let witness = (0..=others.len()).map(|_| Liveness::new()).collect();
         Watcher {
             ctx,
             dials: ctx.dials().unwrap_or_else(|e| panic!("{e}")),
@@ -710,6 +740,7 @@ impl<'a> Watcher<'a> {
             started: now,
             alerts: AlertFile::load(&ctx.dir),
             live: Liveness::new(),
+            witness,
             auto_heir: false,
             open_sent: None,
             heir_warned: false,
@@ -820,6 +851,57 @@ impl<'a> Watcher<'a> {
         self.alerts.add(kind, bank);
         self.alerts.save(&self.ctx.dir);
         self.woke.notify_waiters();
+    }
+
+    /// Every node's view of the chain tip; a node that fails is marked in `down`.
+    async fn ask_infos(&self, down: &mut [bool]) -> Vec<(String, u64, Hash)> {
+        let mut infos = vec![];
+        for (i, (name, rpc)) in self.nodes().into_iter().enumerate() {
+            match rpc.get_block_dag_info().await {
+                Ok(info) => infos.push((name.to_string(), info.virtual_daa_score, info.sink)),
+                Err(e) => {
+                    down[i] = true;
+                    println!("{} info  {name} unreachable: {e}", stamp());
+                }
+            }
+        }
+        infos
+    }
+
+    /// Every node's coins at the account address; a node that fails is marked in `down`.
+    async fn ask_coins(&self, addr: &Address, down: &mut [bool]) -> Vec<NodeCoins> {
+        let mut answers = vec![];
+        for (i, (name, rpc)) in self.nodes().into_iter().enumerate() {
+            match fetch_coins(rpc, addr, self.cov).await {
+                Ok(c) => answers.push((name.to_string(), c)),
+                Err(e) => {
+                    down[i] = true;
+                    println!("{} info  utxo query on {name} failed: {e}", stamp());
+                }
+            }
+        }
+        answers
+    }
+
+    /// After a tick where at least one node answered: a node that has been quiet for SILENT is
+    /// an alert (once per silence), and its return is a log line.
+    fn witness_check(&mut self, down: &[bool]) {
+        let now = self.started.elapsed();
+        let names: Vec<String> = self.nodes().iter().map(|(n, _)| n.to_string()).collect();
+        let (quiet, back) = quiet_witnesses(&mut self.witness, down, now);
+        for i in quiet {
+            let s = now.saturating_sub(self.witness[i].last_good).as_secs();
+            let raw = format!(
+                "{} has not answered for {s} s while another node still does; no cross-check until it is back",
+                names[i]
+            );
+            self.alert(Kind::WatcherSilent, ONE_QUIET, &raw);
+        }
+        for (i, gap) in back {
+            let s = gap.as_secs();
+            let text = format!("{} answers again after {s} s; cross-check restored", names[i]);
+            self.say(Level::Info, &text);
+        }
     }
 
     /// A tick with no good answer from any node.
@@ -1520,13 +1602,8 @@ impl<'a> Watcher<'a> {
 
     async fn tick(&mut self) -> Tick {
         // Every node is asked; any answer counts for the liveness rule, and the answers must agree.
-        let mut infos: Vec<(String, u64, Hash)> = vec![];
-        for (name, rpc) in self.nodes() {
-            match rpc.get_block_dag_info().await {
-                Ok(i) => infos.push((name.to_string(), i.virtual_daa_score, i.sink)),
-                Err(e) => println!("{} info  {name} unreachable: {e}", stamp()),
-            }
-        }
+        let mut down = vec![false; self.node_count()];
+        let infos = self.ask_infos(&mut down).await;
         let Some(&(_, daa, sink)) = infos.first() else {
             self.silence();
             return Tick::Go;
@@ -1547,17 +1624,12 @@ impl<'a> Watcher<'a> {
             return Tick::Done(self.closed.clone().unwrap_or_else(|| "vault closed".into()));
         }
         let addr = self.ctx.vault_address(&self.state);
-        let mut answers: Vec<NodeCoins> = vec![];
-        for (name, rpc) in self.nodes() {
-            match fetch_coins(rpc, &addr, self.cov).await {
-                Ok(c) => answers.push((name.to_string(), c)),
-                Err(e) => println!("{} info  utxo query on {name} failed: {e}", stamp()),
-            }
-        }
+        let mut answers = self.ask_coins(&addr, &mut down).await;
         if answers.is_empty() {
             self.silence();
             return Tick::Go;
         }
+        self.witness_check(&down);
         self.good_answer(daa, sink);
         let sets: Vec<Vec<TransactionOutpoint>> = answers.iter().map(|(_, (ours, _))| ours.iter().map(|c| c.0).collect()).collect();
         if sets.windows(2).all(|w| w[0] == w[1]) {
@@ -2043,6 +2115,23 @@ mod tests {
         assert_eq!(l.good(s(1203)), None, "a good answer in good times says nothing");
         assert!(!l.bad(s(1290)), "87 s since the last good answer");
         assert!(l.bad(s(1293)), "90 s since the last good answer: a new silence");
+    }
+
+    /// Audit: with two nodes, one going quiet while the other answers is an alert after
+    /// 90 s, once, and its return is reported; a lone node is left to the all-nodes rule.
+    #[test]
+    fn one_quiet_witness_alerts_once_and_recovers() {
+        let s = Duration::from_secs;
+        let mut two = vec![Liveness::new(), Liveness::new()];
+        let none: (Vec<usize>, Vec<(usize, Duration)>) = (vec![], vec![]);
+        assert_eq!(quiet_witnesses(&mut two, &[false, false], s(10)), none);
+        assert_eq!(quiet_witnesses(&mut two, &[false, true], s(60)), none, "50 s: not yet");
+        assert_eq!(quiet_witnesses(&mut two, &[false, true], s(100)).0, vec![1], "90 s: the alert");
+        assert_eq!(quiet_witnesses(&mut two, &[false, true], s(500)), none, "said once");
+        assert_eq!(quiet_witnesses(&mut two, &[false, false], s(600)).1, vec![(1, s(590))]);
+        assert_eq!(quiet_witnesses(&mut two, &[true, false], s(700)).0, vec![0], "either node");
+        let mut one = vec![Liveness::new()];
+        assert_eq!(quiet_witnesses(&mut one, &[true], s(500)), none, "a lone node: the old rule");
     }
 
     /// Pass 8: watch.json round-trips what a restart needs.

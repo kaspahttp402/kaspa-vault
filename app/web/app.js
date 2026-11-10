@@ -246,6 +246,52 @@
       if (onOk) onOk(r);
     });
   }
+  /* Purse and heir payments: the typed sum is what leaves, never more. Everything goes only
+     when the field is empty or Max was tapped, and then only the sum that was shown when the
+     slide was armed.
+     Answers the sum (0 = everything) or the refusal to show. */
+  function purseSum(n, have, all, lead) {
+    var known = typeof have === 'number';
+    if (known && n > have) return lead + ' ' + fmt(have) + ' KAS.';
+    if (!all && n > 0) return n;
+    return known ? 0 : 'The amount held has not been read yet. Try again in a moment.';
+  }
+  function sumText(sum, have, allWords) {
+    return sum > 0 ? fmt(sum) + ' KAS' : allWords + ', ' + fmt(have) + ' KAS';
+  }
+  /* "everything" was armed against one sum: if more (or less) is there now, the slide refuses */
+  function purseMoved(el, was, now) {
+    if (was === now) return false;
+    resetSlide(el);
+    setText(el, '[data-e]', 'The amount held changed. Check it and slide again.');
+    return true;
+  }
+  /* Max marks the field as "everything"; typing unmarks it; any edit puts the slide back to
+     its button */
+  function wirePurseFields(el, amt, toEl, have) {
+    el.querySelector('[data-max]').onclick = function () {
+      if (have() == null) return;
+      amt.value = String(Math.floor(have() * 100) / 100);
+      amt.kvAll = true;
+      disarm(el);
+    };
+    amt.oninput = function () {
+      amt.kvAll = false;
+      disarm(el);
+    };
+    toEl.oninput = function () {
+      disarm(el);
+    };
+  }
+  /* after the slide: a typed sum pays at once; "everything" reads the sum again first */
+  function payChecked(el, amt, sum, was, read, seen, pay) {
+    if (sum > 0) return pay();
+    read().then(function (r) {
+      if (!purseMoved(el, was, r.ok ? r.kas : null)) return pay();
+      amt.kvAll = false;
+      if (r.ok) seen(r);
+    });
+  }
   /* a .seg row of buttons: the tapped one lights, its siblings dim, then the screen's own follow-up */
   function wireSeg(el, sel, onPick) {
     [].forEach.call(el.querySelectorAll(sel + ' button'), function (b) {
@@ -4047,17 +4093,17 @@
      Sample: the plain confirm first. The slide charges the background; when it completes, one pulse runs. ---- */
   /* a slide that pays an address: the whole address shows in groups of 4 (Sample: in the confirm
      step too) */
-  function armToSlide(to, btn, title, text, danger, label, kind, action) {
-    armSlide(btn, title, text, danger, label, kind, action, to);
+  function armToSlide(to, btn, title, text, danger, label, kind, action, what) {
+    armSlide(btn, title, text, danger, label, kind, action, to, what);
   }
-  function slideNote(s, to) {
+  function slideNote(s, to, what) {
     var n = document.createElement('div');
     n.className = 'sub mt8';
-    n.textContent = 'To ' + addrGroups(to);
+    n.textContent = (what ? what + '. ' : '') + 'To ' + addrGroups(to);
     s.parentNode.insertBefore(n, s);
     s.kvNote = n;
   }
-  function armSlide(btn, title, text, danger, label, kind, action, to) {
+  function armSlide(btn, title, text, danger, label, kind, action, to, what) {
     (D.isLive() ? Promise.resolve(true) : confirmAction(title, text, danger)).then(function (yes) {
       if (!yes || !btn.parentNode) return;
       var s = document.createElement('div');
@@ -4072,7 +4118,7 @@
       s.kvBtn = btn;
       btn.parentNode.replaceChild(s, btn);
       /* Live has no confirm step: the address stands above the slide */
-      if (to && D.isLive()) slideNote(s, to);
+      if (to && D.isLive()) slideNote(s, to, what);
       ui.drag = 0;
       applyScene();
       slider(
@@ -4532,6 +4578,7 @@
       v = Math.floor(v * 100) / 100;
       amt.value = v > 0 ? plainNum(v) : ''; /* under 0.01: empty = everything */
       amt.oninput();
+      d.all = d.src === 'purse';
     }
   }
   /* Send's payee chips: a chip fills To and disarms the slide */
@@ -4626,23 +4673,25 @@
       setText(el, '[data-e]', 'That is not a Kaspa address.');
       return;
     }
-    if (typeof have === 'number' && n > 0 && n >= Math.floor(have * 100) / 100) n = 0; /* Max or more = everything */
-    if (typeof have === 'number' && n > have) {
-      setText(el, '[data-e]', 'Your purse holds ' + fmt(have) + ' KAS.');
+    var sum = purseSum(n, have, d.all, 'Your purse holds');
+    if (typeof sum === 'string') {
+      setText(el, '[data-e]', sum);
       return;
     }
+    var what = 'Send ' + sumText(sum, have, 'everything in your purse') + ' to ' + pwho;
     armToSlide(
       pto,
       pself,
-      'Send ' + (n > 0 ? fmt(n) + ' KAS' : 'everything in your purse') + ' to ' + pwho,
+      what,
       'To ' + addrGroups(pto) + '. From your purse. Goes now, no notice period.',
       false,
       'Slide to send',
       'send',
       function () {
         if (draftMoved(el, pto, n)) return;
+        if (sum === 0 && purseMoved(el, have, D.state.purse)) return;
         pself.disabled = true; /* [data-ok] is gone once the slide replaced it; the captured button stays */
-        D.pursePay(pto, n).then(function (r) {
+        D.pursePay(pto, sum).then(function (r) {
           pself.disabled = false;
           if (!r.ok) {
             resetSlide(el);
@@ -4650,11 +4699,12 @@
             return;
           }
           haptic();
-          var sentKas = n > 0 ? n : have;
+          var sentKas = sum > 0 ? sum : have;
           d.to = d.label = d.amt = d.note = d.err = '';
           go('sent', { kas: sentKas, to: pwho, kind: 'purse' }, { replace: true });
         });
-      }
+      },
+      what
     );
   }
   function sendWarn(waits, qd, og, st0) {
@@ -6569,6 +6619,7 @@
         };
         amt.oninput = function () {
           disarm(el);
+          d.all = false;
           amt.value = amt.value.replace(/[^0-9.]/g, '').replace(/(\..*)\./g, '$1');
           d.amt = amt.value;
           d.err = '';
@@ -6585,6 +6636,7 @@
         };
         wireSeg(el, '[data-src]', function (b) {
           disarm(el);
+          d.all = false;
           d.src = b.dataset.v;
           d.err = '';
           setText(el, '[data-e]', '');
@@ -8777,42 +8829,37 @@
       after: function (el) {
         var ok = el.querySelector('[data-ok]'),
           have = null,
-          amt = el.querySelector('[data-amt]');
-        el.querySelector('[data-max]').onclick = function () {
-          if (have != null) amt.value = String(Math.floor(have * 100) / 100);
-        };
-        readPurse(el, function (r) {
+          amt = el.querySelector('[data-amt]'),
+          toEl = el.querySelector('[data-to]');
+        function seen(r) {
           have = r.kas;
+        }
+        wirePurseFields(el, amt, toEl, function () {
+          return have;
         });
+        readPurse(el, seen);
         ok.onclick = function () {
-          var to = el.querySelector('[data-to]').value.trim().toLowerCase(),
-            n = amountOf(el.querySelector('[data-amt]').value);
-          if (!isKaspaAddress(to)) {
-            setText(el, '[data-e]', 'That is not a Kaspa address.');
-            return;
+          var to = toEl.value.trim().toLowerCase(),
+            n = amountOf(amt.value),
+            sum = isNaN(n) ? AMOUNT_BAD : purseSum(n, have, amt.kvAll, 'The purse holds'),
+            was = have;
+          if (!isKaspaAddress(to)) return setText(el, '[data-e]', 'That is not a Kaspa address.');
+          if (typeof sum === 'string') return setText(el, '[data-e]', sum);
+          var what = 'Pay ' + sumText(sum, have, 'everything in the purse'),
+            line = 'To ' + addrGroups(to) + '. At once, no notice period.';
+          function pay() {
+            ok.disabled = true;
+            D.pursePay(to, sum).then(function (r) {
+              ok.disabled = false;
+              homeOrError(el, r);
+            });
           }
-          if (isNaN(n)) return setText(el, '[data-e]', AMOUNT_BAD);
-          if (have != null && n > 0 && n >= Math.floor(have * 100) / 100) n = 0; /* Max or more = everything, the fee comes off the top */
-          if (have != null && n > have) {
-            setText(el, '[data-e]', 'The purse holds ' + fmt(have) + ' KAS.');
-            return;
+          function again() {
+            readPurse(el, seen);
           }
-          armToSlide(
-            to,
-            this,
-            'Pay ' + (n > 0 ? fmt(n) + ' KAS' : 'everything in the purse'),
-            'To ' + addrGroups(to) + '. At once, no notice period.',
-            false,
-            'Slide to pay',
-            'send',
-            function () {
-              ok.disabled = true;
-              D.pursePay(to, n).then(function (r) {
-                ok.disabled = false;
-                homeOrError(el, r);
-              });
-            }
-          );
+          armToSlide(to, this, what, line, false, 'Slide to pay', 'send', function () {
+            payChecked(el, amt, sum, was, D.funding, again, pay);
+          }, what);
         };
       },
     },
@@ -8837,29 +8884,31 @@
       after: function (el) {
         var ok = el.querySelector('[data-ok]'),
           have = null,
-          amt = el.querySelector('[data-amt]');
-        el.querySelector('[data-max]').onclick = function () {
-          if (have != null) amt.value = String(Math.floor(have * 100) / 100);
-        };
-        D.heirPurse().then(function (r) {
-          if (!r.ok) return setText(el, '[data-purse]', r.error);
+          amt = el.querySelector('[data-amt]'),
+          toEl = el.querySelector('[data-to]');
+        function seen(r) {
           have = r.kas;
           setText(el, '[data-purse]', 'You hold ' + fmt(r.kas) + ' KAS received as heir.');
+        }
+        wirePurseFields(el, amt, toEl, function () {
+          return have;
+        });
+        D.heirPurse().then(function (r) {
+          if (!r.ok) return setText(el, '[data-purse]', r.error);
+          seen(r);
         });
         ok.onclick = function () {
-          var to = el.querySelector('[data-to]').value.trim().toLowerCase(),
-            n = amountOf(amt.value);
+          var to = toEl.value.trim().toLowerCase(),
+            n = amountOf(amt.value),
+            sum = isNaN(n) ? AMOUNT_BAD : purseSum(n, have, amt.kvAll, 'You hold'),
+            was = have;
           if (!isKaspaAddress(to)) return setText(el, '[data-e]', 'That is not a Kaspa address.');
-          if (isNaN(n)) return setText(el, '[data-e]', AMOUNT_BAD);
-          /* Max or more = everything, the fee comes off the top */
-          if (have != null && n > 0 && n >= Math.floor(have * 100) / 100) n = 0;
-          if (have != null && n > have) return setText(el, '[data-e]', 'You hold ' + fmt(have) +
-            ' KAS.');
-          var title = 'Send ' + (n > 0 ? fmt(n) + ' KAS' : 'all of it'),
+          if (typeof sum === 'string') return setText(el, '[data-e]', sum);
+          var what = 'Send ' + sumText(sum, have, 'all of it'),
             line = 'To ' + addrGroups(to) + '. At once; this cannot be undone.';
-          armToSlide(to, this, title, line, false, 'Slide to send', 'send', function () {
+          function pay() {
             ok.disabled = true;
-            D.heirPay(to, n).then(function (r) {
+            D.heirPay(to, sum).then(function (r) {
               ok.disabled = false;
               if (!r.ok) {
                 resetSlide(el);
@@ -8867,11 +8916,14 @@
                   'The payment failed. No funds were sent.');
               }
               haptic();
-              D.addHistory('Sent ' + (n > 0 ? fmt(n) + ' KAS' : 'all funds') + ' received as heir.',
-                'people');
+              D.addHistory('Sent ' + (sum > 0 ? fmt(sum) + ' KAS' : 'all funds') +
+                ' received as heir.', 'people');
               go('people', {}, { root: true });
             });
-          });
+          }
+          armToSlide(to, this, what, line, false, 'Slide to send', 'send', function () {
+            payChecked(el, amt, sum, was, D.heirPurse, seen, pay);
+          }, what);
         };
       },
     },

@@ -1549,12 +1549,16 @@
     heirPay: function (to, kas) {
       var a = { to: to };
       if (kas > 0) a.kas = kasText(kas);
-      return fingerAction('Send your inheritance', '/api/heir.pay', a);
+      var why = kas > 0 ? 'Send ' + kasText(kas) + ' KAS of your inheritance' :
+        'Send all of your inheritance';
+      return fingerAction(why, '/api/heir.pay', a);
     },
     pursePay: function (to, kas) {
       var a = { to: to };
       if (kas > 0) a.kas = kasText(kas);
-      return moneyAction('Pay from your purse', '/api/pursepay', a);
+      var why = kas > 0 ? 'Pay ' + kasText(kas) + ' KAS from your purse' :
+        'Pay everything in your purse';
+      return moneyAction(why, '/api/pursepay', a);
     },
     resetKeys: function (leaveSafe) {
       return moneyAction('Replace your keys', '/api/reset', leaveSafe ? { confirm: true,
