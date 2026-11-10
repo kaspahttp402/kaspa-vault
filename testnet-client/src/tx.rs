@@ -351,7 +351,7 @@ impl Ctx {
 
     /// The contract source this folder is bound to (see contract.rs). An open vault must carry
     /// `contract_sha256`; older state files are told how to pin.
-    fn source(&self) -> Result<String, String> {
+    pub(crate) fn source(&self) -> Result<String, String> {
         let expected = match self.try_load_vault()? {
             Some(Vault { contract_sha256: Some(h), .. }) => Some(h),
             Some(_) => {

@@ -1297,13 +1297,15 @@ impl Core {
         if guard(guard_slot()).as_ref().is_some_and(|h| !h.task.is_finished()) {
             return Err(GUARD_RUNNING.into());
         }
+        // The folder's own answer comes first: a phone with no rule block refuses at once,
+        // before the resolver is asked (up to GUARD_FILL_TOTAL when the network is away).
+        let keys = Keys::load_public(&self.ctx.dir.join("keys.json"))?;
         let (resolver, net) = (secure_resolver(), &self.ctx.network);
         let fill = fill_guard_nodes(given, || resolver_node(&resolver, net));
         let (nodes, filled) = tokio::time::timeout(GUARD_FILL_TOTAL, fill)
             .await
             .map_err(|_| GUARD_NO_SECOND_NODE.to_string())??;
         crate::watch::check_nodes(&nodes)?;
-        let keys = Keys::load_public(&self.ctx.dir.join("keys.json"))?;
         let rpc = connect(Some(&nodes[0]), &self.ctx.network).await?;
         let ctx = Ctx { dir: self.ctx.dir.clone(), keys, rpc: Some(rpc), force: false, network: self.ctx.network.clone(), dials: self.ctx.dials.clone(), account: 1 };
         let poll = Arc::new(AtomicU64::new(poll_seconds));
@@ -1732,15 +1734,19 @@ impl Core {
         (ctx, (coin.0, entry))
     }
 
+    /// The gate every network method passes first. A phone opened with no node link refuses
+    /// here in the network-down words, so nothing behind the gate ever asks for a link it lacks.
     pub(crate) async fn connected(&self) -> Result<(), String> {
-        let rpc = self.ctx.rpc();
+        let Some(rpc) = self.ctx.rpc.as_ref() else {
+            return Err("Can't reach the network right now: no node link".to_string());
+        };
         if rpc.is_connected() {
             return Ok(());
         }
         println!("node connection lost; reconnecting");
         let options = ConnectOptions { block_async_connect: true, strategy: ConnectStrategy::Fallback, ..Default::default() };
         rpc.connect(Some(options)).await.map_err(|e| format!("Can't reach the network right now: {e}"))?;
-        crate::tx::ensure_secure(&rpc, "after a reconnect").await.map(|_| ())
+        crate::tx::ensure_secure(rpc, "after a reconnect").await.map(|_| ())
     }
 
     /// A guardian/heir-only phone (no key set) still needs network time to end its fingerprint-change

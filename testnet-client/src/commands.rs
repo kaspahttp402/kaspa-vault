@@ -287,6 +287,19 @@ impl Ctx {
         contract::save_vault_anchored(&self.state_path(), v, &now)
     }
 
+    /// The record of a move that has already been sent. The funds have moved, so a record that
+    /// cannot be written must not turn the answer into a failure (a failure invites sending
+    /// again): it is printed at alert level and the move still answers as sent. True when saved.
+    pub(crate) fn save_sent(&self, v: &Vault, id: &impl std::fmt::Display) -> bool {
+        match self.save_anchored(v) {
+            Ok(()) => true,
+            Err(e) => {
+                println!("ALERT tx {id} was sent, but its record could not be saved: {e}");
+                false
+            }
+        }
+    }
+
     /// The top-up address: from the funding secret, or from its public half (`funding_x`) on a device
     /// that keeps the secret elsewhere (the phone's signer store).
     pub fn funding_addr(&self) -> Result<Address, String> {
@@ -564,7 +577,7 @@ impl Ctx {
         let id = self.try_submit(&tx, "spend").await?;
         v.state = next_for(fee);
         v.history.push(format!("spend {amount_kas} KAS to {to}, fee {:.5} KAS, tx {id}", kas(fee)));
-        self.save_anchored(&v)?;
+        self.save_sent(&v, &id);
         Ok(id)
     }
 
@@ -608,7 +621,7 @@ impl Ctx {
         v.state = next;
         v.pending_to = Some(to.to_string());
         v.history.push(format!("request {amount_kas} KAS to {to}, fee {:.5} KAS, tx {id}; finish allowed after {} DAA", kas(fee), v.dials.delay));
-        self.save_anchored(&v)?;
+        self.save_sent(&v, &id);
         Ok(id)
     }
 
@@ -664,7 +677,7 @@ impl Ctx {
         v.state = next;
         v.pending_to = None;
         v.history.push(format!("finish {} KAS to {dest}, fee {:.5} KAS, tx {id}", kas(amount), kas(paid)));
-        self.save_anchored(&v)?;
+        self.save_sent(&v, &id);
         if burn {
             println!("vault emptied; remove state.json before funding again");
         }
@@ -704,7 +717,7 @@ impl Ctx {
             ),
             None => format!("cancel (stop key {which}): everything to cold, fee {:.5} KAS, tx {id}", kas(fee)),
         });
-        self.save_anchored(&v)?;
+        self.save_sent(&v, &id);
         println!("vault emptied to cold; remove state.json before funding again");
         Ok(id)
     }
@@ -745,7 +758,7 @@ impl Ctx {
         v.state = next;
         v.pending_to = None;
         v.history.push(format!("decline (stop key {which}): the request for {} KAS to {dest} is withdrawn, the vault is Locked again, fee {:.5} KAS, tx {id}", kas(amount), kas(fee)));
-        self.save_anchored(&v)?;
+        self.save_sent(&v, &id);
         println!("withdrawal declined; the vault is Locked again");
         Ok(id)
     }
@@ -823,7 +836,7 @@ impl Ctx {
         let grown = staged - fee;
         let id = self.try_submit(&tx, "topup").await?;
         v.history.push(format!("topup {amount_kas} (+{:.5} unused reserve) stage tx {stage_id} tx {id}", kas(grown - amount)));
-        self.save_anchored(&v)?;
+        self.save_sent(&v, &id);
         println!("vault now holds {:.4} KAS; state unchanged", kas(coin.1.amount + grown));
         Ok(id)
     }
@@ -916,7 +929,7 @@ impl Ctx {
             )),
             None => v.history.push(format!("{entry}: everything to heir {}{carried}, fee {:.5} KAS, tx {id}", public.heir_address, kas(fee))),
         }
-        self.save_anchored(&v)?;
+        self.save_sent(&v, &id);
         println!("vault emptied to the heir; remove state.json before funding again");
         Ok(id)
     }
@@ -1137,6 +1150,10 @@ mod tests {
         let before = std::fs::read_to_string(dir.join("state.json")).unwrap();
         assert_eq!(other.save_anchored(&v), Err(contract::RULE_BLOCK_CHANGED.to_string()));
         assert_eq!(std::fs::read_to_string(dir.join("state.json")).unwrap(), before);
+        // after a send the same refusal is reported, never returned as a failed send
+        assert!(!other.save_sent(&v, &"sent-tx"));
+        assert_eq!(std::fs::read_to_string(dir.join("state.json")).unwrap(), before);
+        assert!(ctx.save_sent(&v, &"sent-tx"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

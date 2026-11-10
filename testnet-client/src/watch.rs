@@ -70,6 +70,11 @@ const SCAN_PAGES_MAX: usize = 400;
 const ACCEPT_CONFIRMATIONS: Option<u64> = None;
 /// No good answer from any node for this long is "the guard cannot reach the network".
 const SILENT: Duration = Duration::from_secs(90);
+/// A network fault that goes on (a stalled node, two nodes far apart) is said when it starts
+/// and then again only this often.
+const REMIND: Duration = Duration::from_secs(3600);
+/// How long one node call may take: past it the node counts as not answered this tick.
+const NODE_WAIT: Duration = Duration::from_secs(10);
 /// One node quiet while another still answers is an alert only after this long: nodes drop
 /// and return with every phone sleep and network switch, and that is not news.
 const UNCHECKED: Duration = Duration::from_secs(3600);
@@ -208,12 +213,46 @@ fn log_line(dir: &Path, line: &str) {
     }
 }
 
-/// Runs the push hook with the alert text; a failed hook is itself printed at alert level.
+/// How long the push hook may run before it is ended.
+const PUSH_WAIT: Duration = Duration::from_secs(20);
+
+/// Hands the alert text to the push hook on a thread of its own, so a slow or hung hook
+/// never holds the guard's tick.
 fn push(text: &str) {
     if let Ok(cmd) = std::env::var("VAULT_PUSH_CMD") {
-        match std::process::Command::new(&cmd).arg(text).status() {
-            Ok(s) if s.success() => {}
-            other => println!("{} ALERT push hook {cmd} failed: {other:?}", stamp()),
+        let text = text.to_string();
+        std::thread::spawn(move || run_hook(&cmd, &text, PUSH_WAIT));
+    }
+}
+
+/// Runs the hook and waits at most `wait` for it; one still running then is ended. A hook
+/// that fails, or is ended, is itself printed at alert level. True when it succeeded.
+fn run_hook(cmd: &str, text: &str, wait: Duration) -> bool {
+    let mut child = match std::process::Command::new(cmd).arg(text).spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            println!("{} ALERT push hook {cmd} failed: {e}", stamp());
+            return false;
+        }
+    };
+    let began = Instant::now();
+    let ended = loop {
+        match child.try_wait() {
+            Ok(None) if began.elapsed() < wait => std::thread::sleep(Duration::from_millis(100)),
+            other => break other,
+        }
+    };
+    match ended {
+        Ok(Some(status)) if status.success() => true,
+        Ok(Some(status)) => {
+            println!("{} ALERT push hook {cmd} failed: {status}", stamp());
+            false
+        }
+        other => {
+            let _ = child.kill();
+            let _ = child.wait();
+            println!("{} ALERT push hook {cmd} ended after {} s: {other:?}", stamp(), wait.as_secs());
+            false
         }
     }
 }
@@ -279,6 +318,21 @@ impl Kind {
     }
 }
 
+/// Whether an alert kind (as alerts.json names it) reports the state of the network links
+/// and not a move of the funds.
+fn about_network(kind: &str) -> bool {
+    [Kind::LineageMismatch, Kind::WatcherSilent, Kind::Unchecked, Kind::Unwatched].iter().any(|k| k.as_str() == kind)
+}
+
+/// Whether a network fault that is on now should be said: at its start (no sooner than
+/// STALL after the last saying, so a fault that flickers stays quiet), then every REMIND.
+fn say_fault(was_on: bool, since_said: Option<Duration>) -> bool {
+    match since_said {
+        None => true,
+        Some(gone) => gone >= REMIND || (!was_on && gone >= STALL),
+    }
+}
+
 // Bank words the phone shows verbatim.
 const STOP_HINT: &str = "Press the emergency stop if you did not start this.";
 const TWO_ANSWERS: &str = "The network gave two different answers. Press the emergency stop if you did not start this.";
@@ -329,8 +383,14 @@ impl AlertFile {
         read_json(dir, "alerts.json").unwrap_or_default()
     }
 
+    /// Newest first, at most ALERTS_KEPT. When the list is full the oldest alert about the
+    /// network goes first; an alert about the funds leaves only when every kept alert is one.
     fn add(&mut self, kind: Kind, text: &str) {
         self.alerts.insert(0, Alert { at: unix_now(), kind: kind.as_str().into(), text: text.into() });
+        if self.alerts.len() > ALERTS_KEPT {
+            let oldest_network = self.alerts.iter().rposition(|a| about_network(&a.kind));
+            self.alerts.remove(oldest_network.unwrap_or(self.alerts.len() - 1));
+        }
         self.alerts.truncate(ALERTS_KEPT);
     }
 
@@ -549,6 +609,9 @@ struct Unconfirmed {
 }
 
 struct Watcher<'a> {
+    /// The contract source, read once at the start. Every script the guard works out comes
+    /// from this and `dials`, so no tick depends on a file being readable at that moment.
+    source: String,
     ctx: &'a Ctx,
     /// The vault's dials (state.json; the network's preset when the folder holds no vault yet).
     dials: Dials,
@@ -574,6 +637,8 @@ struct Watcher<'a> {
     daa_seen: (u64, Instant),
     stall_said: Option<Instant>,
     gap_said: Option<Instant>,
+    /// Whether the last tick saw two nodes more than NODE_DAA_GAP apart.
+    gap_on: bool,
     disagree: u32,
     /// Looks in a row that one node showed a spender the others did not (Verdict::Waiting).
     waiting: u32,
@@ -609,8 +674,26 @@ struct Watcher<'a> {
     race_end: Option<u64>,
 }
 
+/// One node call capped at `wait`: a node that hangs has failed, and never holds the tick.
+async fn in_time_for<T, E: std::fmt::Display>(
+    wait: Duration,
+    call: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    match tokio::time::timeout(wait, call).await {
+        Ok(answer) => answer.map_err(|e| e.to_string()),
+        Err(_) => Err(format!("no answer in {} s", wait.as_secs())),
+    }
+}
+
+/// One node call capped at NODE_WAIT.
+async fn in_time<T, E: std::fmt::Display>(
+    call: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    in_time_for(NODE_WAIT, call).await
+}
+
 async fn fetch_coins(rpc: &KaspaRpcClient, addr: &Address, cov: Hash) -> Result<(Vec<Coin>, Vec<Coin>), String> {
-    let entries = rpc.get_utxos_by_addresses(vec![addr.clone()]).await.map_err(|e| e.to_string())?;
+    let entries = in_time(rpc.get_utxos_by_addresses(vec![addr.clone()])).await?;
     Ok(entries.into_iter().map(coin_of).partition(|(_, u)| u.covenant_id == Some(cov)))
 }
 
@@ -736,6 +819,7 @@ impl<'a> Watcher<'a> {
         Watcher {
             ctx,
             dials: ctx.dials().unwrap_or_else(|e| panic!("{e}")),
+            source: ctx.source().unwrap_or_else(|e| panic!("{e}")),
             primary,
             others,
             cov,
@@ -753,6 +837,7 @@ impl<'a> Watcher<'a> {
             daa_seen: (0, now),
             stall_said: None,
             gap_said: None,
+            gap_on: false,
             disagree: 0,
             waiting: 0,
             daa_low: u64::MAX,
@@ -799,7 +884,7 @@ impl<'a> Watcher<'a> {
         // Item 9: the first walk after a restart starts where the last run stopped looking.
         self.scan_from = saved.sink;
         if let Some((op, amount, daa)) = saved.coin {
-            let spk = self.ctx.vault_spk(&self.state);
+            let spk = self.spk(&self.state);
             self.coin = Some((op, UtxoEntry::new(amount, spk, daa, false, Some(self.cov))));
         }
         // Item 11: a spend that was only provisional when the watcher stopped is not believed on
@@ -809,7 +894,7 @@ impl<'a> Watcher<'a> {
             self.state = p.prev_state;
             self.closed = None;
             let (op, amount, daa) = p.prev_coin;
-            let spk = self.ctx.vault_spk(&self.state);
+            let spk = self.spk(&self.state);
             self.coin = Some((op, UtxoEntry::new(amount, spk, daa, false, Some(self.cov))));
             if p.low != Hash::default() {
                 self.sinks.clear();
@@ -836,6 +921,19 @@ impl<'a> Watcher<'a> {
             cov: Some(self.cov),
         }
         .save(&self.ctx.dir);
+    }
+
+    /// The contract for a state, from the source and dials read at the start.
+    fn art(&self, s: &State) -> SilAbiArtifact {
+        crate::contract::compile(&self.source, &self.ctx.keys.public(), &self.dials, s)
+    }
+
+    fn spk(&self, s: &State) -> ScriptPublicKey {
+        crate::contract::spk_of(&self.art(s))
+    }
+
+    fn address(&self, s: &State) -> Address {
+        self.ctx.network.address_of(&self.spk(s)).expect("p2sh address")
     }
 
     /// The primary connection and every other `--node`, by name.
@@ -876,8 +974,11 @@ impl<'a> Watcher<'a> {
     /// Every node's view of the chain tip; a node that fails is marked in `down`.
     async fn ask_infos(&self, down: &mut [bool]) -> Vec<(String, u64, Hash)> {
         let mut infos = vec![];
-        for (i, (name, rpc)) in self.nodes().into_iter().enumerate() {
-            match rpc.get_block_dag_info().await {
+        let nodes = self.nodes();
+        let asks = nodes.iter().map(|(_, rpc)| in_time(rpc.get_block_dag_info()));
+        let answers = futures::future::join_all(asks).await;
+        for (i, ((name, _), answer)) in nodes.iter().zip(answers).enumerate() {
+            match answer {
                 Ok(info) => infos.push((name.to_string(), info.virtual_daa_score, info.sink)),
                 Err(e) => {
                     down[i] = true;
@@ -891,8 +992,11 @@ impl<'a> Watcher<'a> {
     /// Every node's coins at the account address; a node that fails is marked in `down`.
     async fn ask_coins(&self, addr: &Address, down: &mut [bool]) -> Vec<NodeCoins> {
         let mut answers = vec![];
-        for (i, (name, rpc)) in self.nodes().into_iter().enumerate() {
-            match fetch_coins(rpc, addr, self.cov).await {
+        let nodes = self.nodes();
+        let asks = nodes.iter().map(|(_, rpc)| fetch_coins(rpc, addr, self.cov));
+        let coins = futures::future::join_all(asks).await;
+        for (i, ((name, _), answer)) in nodes.iter().zip(coins).enumerate() {
+            match answer {
                 Ok(c) => answers.push((name.to_string(), c)),
                 Err(e) => {
                     down[i] = true;
@@ -963,7 +1067,7 @@ impl<'a> Watcher<'a> {
     async fn accepted(&self, rpc: &KaspaRpcClient, name: &str, low: Hash, txid: &str) -> bool {
         let mut start = low;
         for _ in 0..SCAN_PAGES_MAX {
-            match rpc.get_virtual_chain_from_block(start, true, ACCEPT_CONFIRMATIONS).await {
+            match in_time(rpc.get_virtual_chain_from_block(start, true, ACCEPT_CONFIRMATIONS)).await {
                 Ok(r) => {
                     if is_accepted(txid, r.accepted_transaction_ids.iter().flat_map(|a| a.accepted_transaction_ids.iter())) {
                         return true;
@@ -999,7 +1103,7 @@ impl<'a> Watcher<'a> {
             let mut page = low;
             let mut errored = false;
             for n in 1..=SCAN_PAGES_MAX {
-                match rpc.get_blocks(Some(page), true, true).await {
+                match in_time(rpc.get_blocks(Some(page), true, true)).await {
                     Ok(r) => {
                         hits.extend(r.blocks.into_iter().flat_map(|b| b.transactions).filter(|t| spends(t, op)));
                         match step(&r.block_hashes, page, n) {
@@ -1116,7 +1220,7 @@ impl<'a> Watcher<'a> {
         let mut lagging: Vec<String> = vec![];
         let mut failed = 0usize;
         for (name, rpc) in self.nodes() {
-            match rpc.get_mempool_entries_by_addresses(vec![addr.clone()], false, false).await {
+            match in_time(rpc.get_mempool_entries_by_addresses(vec![addr.clone()], false, false)).await {
                 Ok(entries) => match entries.into_iter().flat_map(|e| e.sending).find(|m| spends(&m.transaction, op)) {
                     Some(m) => found.push((name.to_string(), m.transaction)),
                     None => lagging.push(name.to_string()),
@@ -1141,7 +1245,7 @@ impl<'a> Watcher<'a> {
     /// one coin at one of them, the same on every node, is followed with an alert to check by hand.
     async fn probe_next(&mut self, c: &Coin) -> bool {
         for (how, next) in next_states(&self.state) {
-            let addr = self.ctx.vault_address(&next);
+            let addr = self.address(&next);
             let mut sets: Vec<Vec<Coin>> = vec![];
             for (_, rpc) in self.nodes() {
                 if let Ok((ours, _)) = fetch_coins(rpc, &addr, self.cov).await {
@@ -1208,7 +1312,7 @@ impl<'a> Watcher<'a> {
     fn judge(&self, tx: &RpcTransaction, prev: &Coin) -> Outcome {
         let txid = txid_of(tx);
         let bad = |entry: &str, kind: Kind, bank: &str, text: String| Outcome { entry: entry.into(), level: Level::Alert, kind, bank: bank.into(), text, next: None, closed: false, rec: None };
-        let art = self.ctx.compile(&self.state);
+        let art = self.art(&self.state);
         let Some(p) = tx.inputs.first().and_then(|i| pushes(&i.signature_script)) else {
             return bad("?", Kind::LineageMismatch, RULES_BROKEN, format!("vault coin spent by tx {txid} with an unreadable signature script (truncated push or non-push opcode)"));
         };
@@ -1253,7 +1357,7 @@ impl<'a> Watcher<'a> {
         // Verify the continuation against the state we derived: same covenant id (checked
         // above) and exactly the script the contract would demand for that state.
         if let (Some(i), Some(n)) = (cont, &next)
-            && tx.outputs[i].script_public_key != self.ctx.vault_spk(n) {
+            && tx.outputs[i].script_public_key != self.spk(n) {
                 return bad(&entry, Kind::LineageMismatch, RULES_BROKEN, format!("tx {txid} ({entry}) carries the vault's covenant id but its output script does not match the state it should have; lineage check FAILED"));
             }
         let out0 = tx.outputs.first();
@@ -1503,7 +1607,7 @@ impl<'a> Watcher<'a> {
 
     /// Item 11: whether every node (none missing, item 10) shows the coin a provisional spend took, back where it was.
     async fn coin_back(&self, u: &Unconfirmed) -> bool {
-        let addr = self.ctx.vault_address(&u.prev_state);
+        let addr = self.address(&u.prev_state);
         let mut sets: Vec<Vec<TransactionOutpoint>> = vec![];
         for (_, rpc) in self.nodes() {
             if let Ok((ours, _)) = fetch_coins(rpc, &addr, self.cov).await {
@@ -1540,7 +1644,7 @@ impl<'a> Watcher<'a> {
         if daa != self.daa_seen.0 {
             self.daa_seen = (daa, Instant::now());
             self.stall_said = None;
-        } else if self.daa_seen.1.elapsed() >= STALL && self.stall_said.is_none_or(|t| t.elapsed() >= STALL) {
+        } else if self.daa_seen.1.elapsed() >= STALL && self.stall_said.is_none_or(|t| t.elapsed() >= REMIND) {
             let primary = self.primary.clone();
             self.alert(
                 Kind::WatcherSilent,
@@ -1596,8 +1700,8 @@ impl<'a> Watcher<'a> {
 
     /// Whether the primary node's mempool still holds a transaction spending the watched coin.
     async fn open_in_mempool(&self, op: &TransactionOutpoint) -> bool {
-        let addr = self.ctx.vault_address(&self.state);
-        match self.ctx.rpc().get_mempool_entries_by_addresses(vec![addr], false, false).await {
+        let addr = self.address(&self.state);
+        match in_time(self.ctx.rpc().get_mempool_entries_by_addresses(vec![addr], false, false)).await {
             Ok(entries) => entries.into_iter().flat_map(|e| e.sending).any(|m| spends(&m.transaction, op)),
             Err(_) => true,
         }
@@ -1613,7 +1717,7 @@ impl<'a> Watcher<'a> {
         if v.covenant_id != self.cov || v.state != self.state {
             return Err(format!("state.json (stage {}) does not match what the watcher follows (stage {}); not sending", v.state.stage, self.state.stage));
         }
-        let (ours, _) = fetch_coins(self.ctx.rpc(), &self.ctx.vault_address(&self.state), self.cov).await?;
+        let (ours, _) = fetch_coins(self.ctx.rpc(), &self.address(&self.state), self.cov).await?;
         if !ours.iter().any(|(op, _)| *op == c.0) {
             return Err("the coin is gone".into());
         }
@@ -1631,9 +1735,11 @@ impl<'a> Watcher<'a> {
         };
         self.watch_clock(daa);
         self.daa_low = infos.iter().map(|i| i.1).min().unwrap_or(daa);
+        let was_apart = self.gap_on;
+        self.gap_on = infos[1..].iter().any(|i| daa.abs_diff(i.1) > NODE_DAA_GAP);
         for (name, daa2, _) in &infos[1..] {
             let gap = daa.abs_diff(*daa2);
-            if gap > NODE_DAA_GAP && self.gap_said.is_none_or(|t| t.elapsed() >= STALL) {
+            if gap > NODE_DAA_GAP && say_fault(was_apart, self.gap_said.map(|t| t.elapsed())) {
                 self.gap_said = Some(Instant::now());
                 let primary = self.primary.clone();
                 self.alert(Kind::LineageMismatch, TWO_ANSWERS, &format!("NODES DISAGREE: {primary} is at DAA {daa} and {name} at {daa2} ({gap} apart); one is behind or lying"));
@@ -1644,7 +1750,7 @@ impl<'a> Watcher<'a> {
             self.persist(daa);
             return Tick::Done(self.closed.clone().unwrap_or_else(|| "vault closed".into()));
         }
-        let addr = self.ctx.vault_address(&self.state);
+        let addr = self.address(&self.state);
         let mut answers = self.ask_coins(&addr, &mut down).await;
         if answers.is_empty() {
             self.silence();
@@ -1936,8 +2042,9 @@ pub async fn run_guard_with(
         return Err("This vault was set up without the auto-heir dial; nothing to send.".into());
     }
     let v = ctx.try_load_vault()?.ok_or_else(|| format!("state.json is missing from {}: the guard starts from the vault's covenant id and last known state.", ctx.dir.display()))?;
-    // Watcher::new panics on unreadable dials; said here as an error instead.
+    // Watcher::new panics on unreadable dials or contract source; said here as an error instead.
     ctx.dials()?;
+    ctx.source()?;
     let mut others = vec![];
     for url in nodes.iter().skip(1) {
         // A node that does not answer now is left out (the guard runs on the ones that do); the restart
@@ -2064,6 +2171,83 @@ mod tests {
     use kaspa_consensus_core::tx::{CovenantBinding, TransactionInput, TransactionOutput, UtxoEntry};
     use kaspa_txscript::script_builder::ScriptBuilder;
 
+    /// A push hook that cannot start fails at once; one that hangs is ended at the limit.
+    #[test]
+    fn a_hung_push_hook_is_ended() {
+        assert!(!run_hook("kv-no-such-hook-program", "x", Duration::from_secs(5)));
+        #[cfg(windows)]
+        {
+            let began = Instant::now();
+            assert!(!run_hook("powershell", "Start-Sleep 60", Duration::from_secs(2)));
+            assert!(began.elapsed() < Duration::from_secs(30), "the hook was not ended");
+            assert!(run_hook("powershell", "exit 0", Duration::from_secs(30)));
+        }
+    }
+
+    /// A state.json that cannot be read while the guard runs does not stop it: the guard
+    /// still works out the account's script and judges a spend from what it read at the start.
+    #[test]
+    fn an_unreadable_state_file_does_not_stop_a_running_guard() {
+        let ctx = test_ctx("nofile");
+        let cov = Hash::from_bytes([3u8; 32]);
+        let state = locked();
+        let spk = ctx.vault_spk(&state);
+        let prev: Coin = (TransactionOutpoint::new(Hash::from_bytes([5u8; 32]), 0), UtxoEntry::new(2 * KAS, spk.clone(), 1_000, false, Some(cov)));
+        let tx = spend_tx(&ctx, &state, "cancel", vec![vec![0u8; 65], vec![]], &prev, vec![TransactionOutput::new(2 * KAS - 1000, ctx.cold_spk())]);
+        let w = Watcher::new(&ctx, cov, state.clone(), "test".into(), vec![]);
+        std::fs::write(ctx.state_path(), "{ half a file").unwrap();
+        std::fs::remove_file(ctx.dir.join(contract::SOURCE_FILE)).unwrap();
+        assert!(ctx.try_compile(&state).is_err(), "the folder itself can no longer compile");
+        assert_eq!(w.spk(&state), spk);
+        assert!(w.judge(&tx, &prev).closed, "a stop to the vault is still read as one");
+        std::fs::remove_dir_all(&ctx.dir).ok();
+    }
+
+    /// A full list drops its oldest network alert to make room, and a funds alert only when
+    /// nothing else is left to drop.
+    #[test]
+    fn network_alerts_never_push_out_a_funds_alert() {
+        let mut f = AlertFile::default();
+        f.add(Kind::WithdrawalPending, "a withdrawal is waiting");
+        for _ in 0..3 * ALERTS_KEPT {
+            f.add(Kind::LineageMismatch, "two answers");
+        }
+        assert_eq!(f.alerts.len(), ALERTS_KEPT);
+        assert_eq!(f.alerts.last().unwrap().kind, "withdrawal_pending");
+        assert_eq!(f.alerts[0].kind, "lineage_mismatch", "newest first");
+        for _ in 0..ALERTS_KEPT {
+            f.add(Kind::Spend, "paid");
+        }
+        assert_eq!(f.alerts.len(), ALERTS_KEPT);
+        assert!(f.alerts.iter().all(|a| a.kind == "spend"), "only funds alerts left: the oldest goes");
+    }
+
+    /// A lasting network fault is said at its start and then once per REMIND; one that
+    /// comes back within STALL of the last saying stays quiet.
+    #[test]
+    fn a_lasting_fault_is_said_once_then_slowly() {
+        assert!(say_fault(false, None), "the first time");
+        assert!(!say_fault(true, Some(STALL)), "same fault a minute on: quiet");
+        assert!(!say_fault(true, Some(REMIND - Duration::from_secs(1))));
+        assert!(say_fault(true, Some(REMIND)), "the slow reminder");
+        assert!(say_fault(false, Some(STALL)), "a new fault after a quiet minute");
+        assert!(!say_fault(false, Some(STALL - Duration::from_secs(1))), "a flicker");
+    }
+
+    /// A node call that never answers comes back as a failure once the wait is over; an answer
+    /// and a node's own error pass through unchanged.
+    #[tokio::test]
+    async fn a_hung_node_call_fails_in_time() {
+        let wait = Duration::from_millis(50);
+        let began = Instant::now();
+        let hung = in_time_for(wait, std::future::pending::<Result<u8, String>>()).await;
+        assert_eq!(hung, Err("no answer in 0 s".to_string()));
+        assert!(began.elapsed() < Duration::from_secs(5), "the cap did not end the wait");
+        assert_eq!(in_time_for(wait, async { Ok::<u8, String>(7) }).await, Ok(7));
+        let refused = in_time_for(wait, async { Err::<u8, String>("refused".into()) }).await;
+        assert_eq!(refused, Err("refused".to_string()));
+    }
+
     #[test]
     fn watchdog_trips_on_a_quiet_guard_or_racer_only() {
         assert_eq!(stale_part(1000, 950, 0), None, "fresh guard, no racer");
@@ -2163,7 +2347,8 @@ mod tests {
         }
         f.seen_at = Some(1_700_000_000);
         assert_eq!(f.alerts.len(), 10);
-        assert_eq!((f.alerts[0].text.as_str(), f.alerts[9].text.as_str()), ("alert 12", "alert 3"));
+        // the two that left are the oldest network alerts (1 and 3); funds alert 2 stays
+        assert_eq!((f.alerts[0].text.as_str(), f.alerts[9].text.as_str()), ("alert 12", "alert 2"));
         f.save(&dir);
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("alerts.json")).unwrap()).unwrap();
         assert_eq!(v["seen_at"], 1_700_000_000);
