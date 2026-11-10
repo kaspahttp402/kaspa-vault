@@ -29,6 +29,8 @@ pub const LINK_DAMAGED: &str = "That link code is damaged. Ask for the link code
 pub const LINK_ADDRESS: &str = "That link code is damaged: its heir address does not match. Ask for the link code again.";
 pub const LINK_OWN_KEY: &str = "That link code belongs to this account itself. A guardian or heir sends the link code from their own phone.";
 pub const WRONG_HEIR: &str = "This phone is not set up as that account's heir.";
+pub const LINK_THIS_PHONE: &str = "That link code is this phone's own. A guardian or heir shows \
+their link code on their own phone, so that they can step in without this phone.";
 
 /// `link.json`, and (kind `kv-link`) the link code itself. Public only.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -192,6 +194,17 @@ pub fn read_link(net: &Network, text: &str, own: Option<&Public>) -> Result<Link
     Ok(LinkPublic { kind: LINK_KIND.into(), v: LINK_VERSION, network: link.network, name: link.name.trim().into(), stop_x, heir_x, heir_address, already })
 }
 
+/// A link code this very phone made (`<dir>/link.json`) is refused: an owner who scans their own
+/// code makes themselves guardian and heir, and nobody else can step in.
+pub fn not_this_phone(dir: &Path, link: &LinkPublic) -> Result<(), String> {
+    let Ok(mine) = load(dir) else { return Ok(()) };
+    let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    if same(&mine.stop_x, &link.stop_x) || same(&mine.heir_x, &link.heir_x) {
+        return Err(LINK_THIS_PHONE.into());
+    }
+    Ok(())
+}
+
 /// `link.heir_words {}` with the sealed heir secret: `{ok, heir_words: [24 words]}`, only when the secret is the one
 /// `link.json` names. Honest limit: the words go out in the answer, which the caller shows and drops.
 pub fn heir_words(dir: &Path, secret: &[u8; 32]) -> Result<Value, String> {
@@ -222,6 +235,21 @@ mod tests {
         let g: [u8; 32] = block[..32].try_into().unwrap();
         let h: [u8; 32] = block[32..64].try_into().unwrap();
         (g, h, serde_json::from_slice(&block[64..]).unwrap())
+    }
+
+    #[test]
+    fn own_link_code_is_refused_on_the_phone_that_made_it() {
+        let (dir, other) = (tmp("self"), tmp("self-other"));
+        let net = Network::testnet();
+        make_link(&dir, &net, "Owner").unwrap();
+        make_link(&other, &net, "Helper").unwrap();
+        let own = link_code(&dir, &net).unwrap()["code"].as_str().unwrap().to_string();
+        let theirs = link_code(&other, &net).unwrap()["code"].as_str().unwrap().to_string();
+        let own = read_link(&net, &own, None).unwrap();
+        let theirs = read_link(&net, &theirs, None).unwrap();
+        assert_eq!(not_this_phone(&dir, &own).unwrap_err(), LINK_THIS_PHONE);
+        assert_eq!(not_this_phone(&dir, &theirs), Ok(()));
+        assert_eq!(not_this_phone(&tmp("self-none"), &own), Ok(()), "no link of its own: any code");
     }
 
     #[test]

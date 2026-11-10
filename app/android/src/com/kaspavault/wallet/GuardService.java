@@ -130,17 +130,21 @@ public final class GuardService extends Service {
             int status = env.optInt("status", 0);
             JSONObject body = env.optJSONObject("body");
             String error = body == null ? null : body.optString("error", "");
-            if (status == 503) {
-                refuse(error == null || error.isEmpty()
-                        ? "Alerts can't reach the network. Open KaspaVault and try again." : error);
-                return;
-            }
-            if (status != 200 || body == null || !body.optBoolean("ok", false)) {
-                refuse(error == null || error.isEmpty()
-                        ? "Alerts could not start. Open KaspaVault and try again." : error);
+            boolean started = status == 200 && body != null && body.optBoolean("ok", false);
+            // 503, or the engine's own "can't reach the network" words (a node that did not answer)
+            boolean netDown = status == 503
+                    || (error != null && error.toLowerCase().contains("network"));
+            if (!started) {
+                if (netDown && retryLater()) return;
+                String plain = netDown
+                        ? "Alerts can't reach the network. Open KaspaVault and try again."
+                        : "Alerts could not start. Open KaspaVault and try again.";
+                refuse(error == null || error.isEmpty() ? plain : error);
                 return;
             }
             RUNNING = true;
+            startTries = 0;
+            notifications.cancel(ID_REFUSED); // an "Alerts off" left by an earlier refusal is over
             notifications.notify(ID_GUARD, guardNotification("Alerts on. Reaching the network..."));
             guardThread.execute(this::waitLoop);
         } catch (Throwable t) {
@@ -149,7 +153,28 @@ public final class GuardService extends Service {
         }
     }
 
-    /** The engine refused (fewer than two nodes, no network, ...): the words stay as a loud notification, the service ends. */
+    /** The start is tried again this often, this many times, while the network is away (a reboot
+     *  or an app update restarts the guard before wifi is back; it used to give up at once). */
+    private static final int RETRY_MS = 15000, RETRY_MAX = 40;
+    private int startTries = 0;
+
+    /** No network for guard.start: another try in a while, the notification saying so; false once
+     *  out of tries. */
+    private boolean retryLater() {
+        if (!looping || ++startTries > RETRY_MAX) return false;
+        Log.i(TAG, "guard.start: no network, try " + startTries + " of " + RETRY_MAX
+                + " in " + RETRY_MS / 1000 + " s");
+        notifications.notify(ID_GUARD,
+                guardNotification("Alerts starting. Waiting for the network..."));
+        controlThread.execute(() -> {
+            try { Thread.sleep(RETRY_MS); } catch (InterruptedException e) { return; }
+            if (looping) startGuard();
+        });
+        return true;
+    }
+
+    /** The engine refused (fewer than two nodes, no network, ...): the words stay as a loud
+     *  notification, the service ends. */
     private void refuse(String text) {
         RUNNING = false;
         looping = false;

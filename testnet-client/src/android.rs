@@ -274,7 +274,10 @@ fn link_without_core(method: &str, args: &str) -> Option<(u16, Value)> {
     let answer = if method == "link.code" {
         crate::link::link_code(dir, net)
     } else {
-        load_keys(dir, net).and_then(|keys| crate::link::read_link(net, args["text"].as_str().unwrap_or(""), keys.public.as_ref()).map(|l| l.answer()))
+        let text = args["text"].as_str().unwrap_or("");
+        load_keys(dir, net)
+            .and_then(|keys| crate::link::read_link(net, text, keys.public.as_ref()))
+            .and_then(|l| crate::link::not_this_phone(dir, &l).map(|_| l.answer()))
     };
     Some((200, answer.unwrap_or_else(|e| crate::core::refusal(&e))))
 }

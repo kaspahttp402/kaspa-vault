@@ -432,6 +432,10 @@
   /* Live mode: a real fingerprint ("ok") is the only yes; lockout, nothing enrolled, sensor error, cancel are all no.
      Sample mode: with no sensor the plain Confirm sheet stands in, so the app can be browsed on any phone; the phone
      side (MainActivity.confirmWithBiometric) answers "unavailable" only in Sample mode, never in Live. */
+  /* a focus() made by script does not always raise the phone's keyboard: the phone is asked too */
+  function keyboardUp() {
+    if (bridge && bridge.showKeyboard) bridge.showKeyboard();
+  }
   function confirmAction(title, text, danger) {
     if (!bridge) return onScreenConfirm(title, text, danger);
     ui.bio = true; /* the phone's prompt may pause the page: no lock while it is up */
@@ -5998,6 +6002,7 @@
             el.querySelector('[data-pinbox]').hidden = false;
             pinBtn.hidden = true;
             pinIn.focus();
+            keyboardUp(); /* the phone raises the keyboard: a script focus alone may not */
           };
         if (pinIn) pinIn.oninput = lockPin(el, pinIn);
         el.querySelector('[data-ok]').onclick = function () {

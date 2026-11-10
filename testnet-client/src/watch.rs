@@ -369,6 +369,19 @@ struct Saved {
     /// Item 11: a spend seen but not yet accepted, with the state and coin to fall back to if it vanishes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provisional: Option<Provisional>,
+    /// The covenant id this file follows: a reopened account has a new one, and its guard must not
+    /// resume the old account's record (it would end at once, "the account is closed").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cov: Option<Hash>,
+}
+
+/// Whether watch.json belongs to the account on disk. Files from before `cov` was kept fall back
+/// to the stage: a closed record while the account on disk is open is the old account's.
+fn same_account(s: &Saved, v: &Vault) -> bool {
+    match s.cov {
+        Some(c) => c == v.covenant_id,
+        None => !(s.state.stage == 9 && v.state.stage != 9),
+    }
 }
 
 /// The rollback of a provisional spend, as watch.json keeps it: the state and coin before it.
@@ -769,6 +782,7 @@ impl<'a> Watcher<'a> {
                 prev_coin: (u.prev.0, u.prev.1.amount, u.prev.1.block_daa_score),
                 low: u.low,
             }),
+            cov: Some(self.cov),
         }
         .save(&self.ctx.dir);
     }
@@ -1825,7 +1839,7 @@ pub async fn run_guard_with(
     let racing = |a| race::race(ctx.clone(), cov, state, primary, a, stop.clone());
     let racer = auto_stop.map(|a| tokio::spawn(racing(a)));
     let mut racer_said = false;
-    let resumed = Saved::load(&ctx.dir).map(|s| {
+    let resumed = Saved::load(&ctx.dir).filter(|s| same_account(s, &v)).map(|s| {
         let coin = s.coin.map(|(op, amount, _)| format!("coin {op} ({:.4} KAS)", kas(amount))).unwrap_or_else(|| "no coin in view".into());
         let line = format!("resuming from watch.json: stage {}, {coin}, block scan from {}", s.state.stage, s.sink.map(|h| h.to_string()).unwrap_or_else(|| "the first sink seen".into()));
         let line = match &s.provisional {
@@ -2050,10 +2064,20 @@ mod tests {
                 prev_coin: (TransactionOutpoint::new(Hash::from_bytes([2u8; 32]), 0), 4 * KAS, 700),
                 low: Hash::from_bytes([6u8; 32]),
             }),
+            cov: Some(Hash::from_bytes([5u8; 32])),
         };
         s.save(&dir);
-        assert_eq!(Saved::load(&dir), Some(s));
+        assert_eq!(Saved::load(&dir), Some(s.clone()));
         std::fs::remove_dir_all(&dir).ok();
+        // A reopened account (new covenant id) does not resume the old account's record.
+        let open = |cov: u8, stage: i64| Vault { covenant_id: Hash::from_bytes([cov; 32]),
+            state: State { stage, ..s.state.clone() }, pending_to: None, history: vec![],
+            contract_sha256: None, network: String::new(), dials: Dials::testnet() };
+        assert!(same_account(&s, &open(5, 1)));
+        assert!(!same_account(&s, &open(6, 0)));
+        let old = Saved { cov: None, state: State { stage: 9, ..s.state.clone() }, ..s.clone() };
+        assert!(!same_account(&old, &open(6, 0)), "old closed record, open account: not resumed");
+        assert!(same_account(&old, &open(6, 9)));
     }
 
     /// a `cancel` paying a stranger is an alert about the rules, never

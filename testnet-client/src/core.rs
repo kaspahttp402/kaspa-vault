@@ -1111,7 +1111,10 @@ impl Core {
             let answer = if method == "link.code" {
                 crate::link::link_code(&self.ctx.dir, &self.ctx.network)
             } else {
-                crate::link::read_link(&self.ctx.network, args["text"].as_str().unwrap_or(""), self.ctx.keys.public.as_ref()).map(|l| l.answer())
+                let text = args["text"].as_str().unwrap_or("");
+                crate::link::read_link(&self.ctx.network, text, self.ctx.keys.public.as_ref())
+                    .and_then(|l| crate::link::not_this_phone(&self.ctx.dir, &l)
+                        .map(|_| l.answer()))
             };
             return (200, answer.unwrap_or_else(|e| refusal(&e)));
         }
@@ -3142,7 +3145,11 @@ mod tests {
         let code = core.call("link.code", &json!({})).await;
         assert_eq!((code.0, &code.1["heir_x"]), (200, &json!(link.heir_x)));
         let read = core.call("link.read", &json!({"text": code.1["code"]})).await;
-        assert_eq!((read.0, &read.1["stop_x"], &read.1["name"]), (200, &json!(link.stop_x), &json!("Helper")));
+        assert_eq!(read, (200, refusal(crate::link::LINK_THIS_PHONE)), "this phone's own code");
+        let other = dir.join("other"); std::fs::create_dir_all(&other).unwrap(); // another phone
+        crate::link::make_link(&other, &net, "Helper").unwrap();
+        let code = crate::link::link_code(&other, &net).unwrap()["code"].clone();
+        assert_eq!(core.call("link.read", &json!({"text": code})).await.1["ok"], json!(true));
         let words = core.call_with_secret("link.heir_words", &json!({}), Slot::Heir, Zeroizing::new(secrets[32..64].to_vec())).await;
         assert_eq!((words.0, words.1["heir_words"].as_array().map(|w| w.len())), (200, Some(24)));
         assert_eq!(core.call_with_secret("link.heir_words", &json!({}), Slot::Heir, Zeroizing::new(secrets[..32].to_vec())).await, (200, refusal(crate::link::WRONG_HEIR)));

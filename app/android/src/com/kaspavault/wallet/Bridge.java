@@ -20,6 +20,7 @@ import android.security.keystore.KeyProperties;
 import android.util.Base64;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
+import android.view.inputmethod.InputMethodManager;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.webkit.ConsoleMessage;
@@ -338,6 +339,19 @@ final class Bridge {
 
         @JavascriptInterface public void haptic() {
             act.main.post(() -> act.web.performHapticFeedback(HapticFeedbackConstants.CONFIRM));
+        }
+
+        /**
+         * Raises the keyboard for the field the page just focused. A WebView does not always show
+         * the keyboard for a focus() made by script (the lock screen's PIN box).
+         */
+        @JavascriptInterface public void showKeyboard() {
+            act.main.post(() -> {
+                act.web.requestFocus();
+                InputMethodManager imm =
+                        (InputMethodManager) act.getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (imm != null) imm.showSoftInput(act.web, InputMethodManager.SHOW_IMPLICIT);
+            });
         }
 
         @JavascriptInterface public void confirmWithBiometric(String callbackName) {

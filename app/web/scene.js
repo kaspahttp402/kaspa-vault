@@ -314,7 +314,7 @@
      carries a comet,
      at random: about one every `every` s, each taking `run` s to cross */
   var SPARK = { every: 1.4, run: 1.9, size: 1.1, bright: 0.85 };
-  var GLOW_ALL = 0.85; /* every glow 15% lower (the owner's call: a little too bright) */
+  var GLOW_ALL = 0.72; /* every glow lower, twice by 15% (the owner's call: the peaks blew out) */
   /* coin: size px, y; period s for one stamp (press, hold, lift); drop = start height (of H) */
   var COIN = { size: 70, x: 0.5, y: 0.2, period: 3.4, drop: 0.12 };
   /* beat: the heartbeat line; amp px, beats across, speed = beats per s, spread px between lines */
