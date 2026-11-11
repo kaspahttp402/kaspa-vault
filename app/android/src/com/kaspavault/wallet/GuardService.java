@@ -30,7 +30,8 @@ import java.util.concurrent.Executors;
  * it as a notification. It calls the engine itself (init is idempotent; START_STICKY may restart this process with no
  * Activity), asks the engine to start the guard with the second node from the "guard_nodes" dial, then its own thread sits
  * on guard.wait and turns every new alert into a loud notification. The persistent notification reads
- * "Guard on. Last heard from the network N s ago". Tapping either opens the app. Without the engine library the service
+ * "Alerts on" on a minimum-importance channel (no status bar icon). Tapping either opens the app.
+ * Without the engine library the service
  * stops itself at once. Nothing here opens a secret: the guard only reads the chain.
  */
 public final class GuardService extends Service {
@@ -38,7 +39,8 @@ public final class GuardService extends Service {
     /** Set while the guard runs (the engine accepted guard.start); the page reads it through Bridge.guardRunning(). */
     static volatile boolean RUNNING = false;
 
-    private static final String CH_GUARD = "guard", CH_ALERTS = "guard_alarms_private";
+    private String guardText = "";
+    private static final String CH_GUARD = "guard_min", CH_ALERTS = "guard_alarms_private";
     private static final int ID_GUARD = 1, ID_REFUSED = 2, ID_ALERT_BASE = 100;
     private static final int WAIT_MS = 30000;
     private static final int POLL_AWAKE = 3, POLL_BATTERY = 15;
@@ -74,7 +76,7 @@ public final class GuardService extends Service {
         prefs = getSharedPreferences("kaspavault", Context.MODE_PRIVATE);
         notifications = getSystemService(NotificationManager.class);
         NotificationChannel quiet = new NotificationChannel(CH_GUARD, "Alerts on this phone",
-                NotificationManager.IMPORTANCE_LOW);
+                NotificationManager.IMPORTANCE_MIN);
         quiet.setDescription("Shows that this phone is watching your account.");
         NotificationChannel loud = new NotificationChannel(CH_ALERTS, "Alerts",
                 NotificationManager.IMPORTANCE_HIGH);
@@ -87,6 +89,7 @@ public final class GuardService extends Service {
         notifications.createNotificationChannel(loud);
         // Android never updates an existing channel: the old public one is replaced by the private one above.
         notifications.deleteNotificationChannel("guard_alerts");
+        notifications.deleteNotificationChannel("guard");
         IntentFilter f = new IntentFilter();
         f.addAction(Intent.ACTION_POWER_CONNECTED);
         f.addAction(Intent.ACTION_POWER_DISCONNECTED);
@@ -98,7 +101,7 @@ public final class GuardService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (!VaultLib.AVAILABLE) { Log.w(TAG, "guard: no wallet engine in this build, stopping"); stopSelf(); return START_NOT_STICKY; }
         // The foreground promise comes first (Android's deadline), then the engine work on our own threads.
-        Notification first = guardNotification("Alerts starting. Reaching the network...");
+        Notification first = guardNotification("Alerts starting");
         if (Build.VERSION.SDK_INT >= 34) startForeground(ID_GUARD, first, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else startForeground(ID_GUARD, first); // API 33 has no specialUse type: the manifest's type applies
         if (!looping) {
@@ -152,7 +155,7 @@ public final class GuardService extends Service {
             startTries = 0;
             lastFresh = System.currentTimeMillis() / 1000;
             notifications.cancel(ID_REFUSED); // an "Alerts off" left by an earlier refusal is over
-            notifications.notify(ID_GUARD, guardNotification("Alerts on. Reaching the network..."));
+            guardText = ""; showGuard("Alerts on");
             guardThread.execute(this::waitLoop);
         } catch (Throwable t) {
             Log.w(TAG, "guard.start failed: " + t);
@@ -181,7 +184,7 @@ public final class GuardService extends Service {
         Log.i(TAG, "guard.start: no network, try " + startTries + " of " + RETRY_MAX
                 + " in " + wait / 1000 + " s");
         notifications.notify(ID_GUARD,
-                guardNotification("Alerts starting. Waiting for the network..."));
+                guardNotification("Alerts starting"));
         controlThread.execute(() -> {
             try { Thread.sleep(wait); } catch (InterruptedException e) { return; }
             if (looping) startGuard();
@@ -204,7 +207,7 @@ public final class GuardService extends Service {
         if (quietFor <= DEAF_S) return false;
         Log.i(TAG, "guard: nothing heard for " + quietFor + " s, starting again");
         Log.i(TAG, "guard.stop (deaf) -> " + brief(VaultLib.call("guard.stop", "{}")));
-        notifications.notify(ID_GUARD, guardNotification("Alerts on. Reaching the network..."));
+        guardText = ""; showGuard("Alerts on");
         controlThread.execute(this::startGuard);
         return true;
     }
@@ -220,19 +223,14 @@ public final class GuardService extends Service {
                 int status = env.optInt("status", 0);
                 JSONObject body = env.optJSONObject("body");
                 if (status == 503 || body == null) {
-                    notifications.notify(ID_GUARD,
-                            guardNotification("Alerts on. Waiting for the network..."));
                     Thread.sleep(3000);
                     continue;
                 }
                 long now = System.currentTimeMillis() / 1000;
-                String heard = body.isNull("seen_at") ? "Nothing heard from the network yet."
-                        : "Last heard from the network " + Math.max(0, now - body.optLong("seen_at", now)) + " s ago";
                 boolean running = body.optBoolean("running", false);
                 long heardAt = Math.max(body.optLong("seen_at", 0), lastFresh);
                 if (running && restartIfDeaf(now - heardAt)) return;
-                String head = running ? "Alerts on. " : "Alerts stopped. ";
-                notifications.notify(ID_GUARD, guardNotification(head + heard));
+                showGuard(running ? "Alerts on" : "Alerts stopped. Open KaspaVault.");
 
                 JSONArray alerts = body.optJSONArray("alerts");
                 long newest = lastShown;
@@ -379,6 +377,13 @@ public final class GuardService extends Service {
     private PendingIntent openApp() {
         Intent open = new Intent(this, MainActivity.class).setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         return PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    /** The steady notice changes only when its words change (no re-post every wait). */
+    private void showGuard(String text) {
+        if (text.equals(guardText)) return;
+        guardText = text;
+        notifications.notify(ID_GUARD, guardNotification(text));
     }
 
     private Notification guardNotification(String text) {
