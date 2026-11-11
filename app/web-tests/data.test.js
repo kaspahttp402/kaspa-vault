@@ -647,10 +647,39 @@ test('the paper stop asks to be printed again only after the watch code changed'
   const { h } = await opened(paperEngine({ code: () => code }));
   assert.equal(await h.D.paperDue(), true);
   h.D.paperShown('code-1');
-  assert.match(h.settings.paper_shown, /^[0-9a-f]{8}$/);
+  assert.match(h.settings.paper_shown, /^r[0-9a-f]{8}$/);
   assert.equal(await h.D.paperDue(), false);
   code = 'code-2';
   assert.equal(await h.D.paperDue(), true);
+});
+
+test('a payment does not put the paper stop out of date; a rules change does', async () => {
+  const watch = (id, spent) => JSON.stringify({ kind: 'kaspavault.watch', public_sha256: 'p1',
+    contract_sha256: 'c1', vault: { covenant_id: id, state: { stage: spent ? 1 : 0, spent } } });
+  let code = watch('aa', 0);
+  const { h } = await opened(paperEngine({ code: () => code }));
+  h.D.paperShown(code);
+  code = watch('aa', 5); /* a payment: the record's state moved, the rules did not */
+  assert.equal(await h.D.paperDue(), false);
+  code = watch('bb', 0); /* Update now: a new account id */
+  assert.equal(await h.D.paperDue(), true);
+});
+
+test('an older-kind paper hash is taken once as the code in use, then compared', async () => {
+  let code = '{"public_sha256":"p1","contract_sha256":"c1","vault":{"covenant_id":"aa"}}';
+  const { h } = await opened(paperEngine({ code: () => code }));
+  h.settings.paper_shown = '0a1b2c3d|s1,s2';
+  assert.equal(await h.D.paperDue(), false);
+  assert.match(h.settings.paper_shown, /^r[0-9a-f]{8}\|s1,s2$/);
+  code = code.replace('"aa"', '"bb"');
+  assert.equal(await h.D.paperDue(), true);
+});
+
+test('the state of the network is never an alert', async () => {
+  const { h } = await opened((method) => method === 'status' ? status({ alerts: [
+    { at: 30, kind: 'watcher_silent', text: 'quiet' }, { at: 20, kind: 'unchecked', text: 'part' },
+    { at: 10, kind: 'stopped', text: 'The account was stopped.' }] }) : { ok: true });
+  assert.deepEqual(h.D.state.alerts.map((a) => a.kind), ['stopped']);
 });
 
 test('without a paper stop there is no reminder and no code is asked for', async () => {

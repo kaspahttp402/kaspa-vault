@@ -961,13 +961,34 @@ fn with_watcher(mut status: Value, file: &Value, now: u64) -> Value {
             Some("withdrawal_pending") if status["pending"].is_null() => {
                 status["pending"] = json!({"to": null, "amount_kas": null, "seconds_left": null, "tx": null, "watcher": true, "text": a["text"]});
             }
-            Some("withdrawal_completed" | "withdrawal_declined" | "stopped") => status["pending"] = Value::Null,
+            // Only an end the guard saw AFTER this withdrawal was asked for ends it. An older
+            // one (the stop inside a rules update, a withdrawal finished last week) is about an
+            // earlier coin, and `status` has just read this one waiting on the chain: it must
+            // show (seen on a phone).
+            Some("withdrawal_completed" | "withdrawal_declined" | "stopped")
+                if ended_after(&status, a) =>
+            {
+                status["pending"] = Value::Null;
+            }
             _ => {}
         }
     }
     status["watcher_seen_at"] = file["seen_at"].clone();
     status["alerts"] = Value::Array(alerts);
     status
+}
+
+/// When the withdrawal waiting in `status` was asked for: the time of its own statement line.
+/// None when nothing waits or the line carries no time (then no alert may end it).
+fn pending_asked_at(status: &Value) -> Option<u64> {
+    let tx = status["pending"]["tx"].as_str()?;
+    status["history"].as_array()?.iter().rev().find(|h| h["tx"] == tx)?.get("at")?.as_u64()
+}
+
+/// True when alert `a` is newer than the asking of the withdrawal waiting in `status`.
+fn ended_after(status: &Value, a: &Value) -> bool {
+    let asked = pending_asked_at(status);
+    asked.is_some_and(|t| a["at"].as_u64().is_some_and(|at| at > t))
 }
 
 fn tx_of(line: &str) -> Option<&str> {
@@ -2885,13 +2906,24 @@ mod tests {
         // the guard went quiet: state.json stands and the phone shows the quiet banner instead
         assert!(with_watcher(json!({"pending": null}), &thief, 5000 + WATCHER_FRESH + 1)["pending"].is_null());
         assert!(with_watcher(json!({"pending": null}), &json!({"seen_at": null, "alerts": thief["alerts"]}), 5010)["pending"].is_null());
-        let mine = json!({"to": "kaspatest:q", "amount_kas": 0.5});
+        let mine = json!({"to": "kaspatest:q", "amount_kas": 0.5, "tx": "t1"});
+        // state.json's withdrawal, asked for at `at` (its statement line carries the time)
+        let held = |at: u64| {
+            let line = json!({"text": "request", "tx": "t1", "at": at});
+            json!({"pending": mine.clone(), "history": [line]})
+        };
+        let seen = |s: Value, file: &Value| with_watcher(s, file, 5010)["pending"].clone();
         let done = json!({"seen_at": 5000, "alerts": [{"at": 4995, "kind": "withdrawal_completed", "text": "done"}, {"at": 4990, "kind": "withdrawal_pending", "text": "x"}]});
-        assert!(with_watcher(json!({"pending": mine.clone()}), &done, 5010)["pending"].is_null(), "the coin is gone: nothing pending");
+        assert!(seen(held(4980), &done).is_null(), "the coin is gone: nothing pending");
         let stopped = json!({"seen_at": 5000, "alerts": [{"at": 4990, "kind": "withdrawal_pending", "text": "x"}, {"at": 4995, "kind": "stopped", "text": "s"}]});
-        assert!(with_watcher(json!({"pending": mine.clone()}), &stopped, 5010)["pending"].is_null(), "sorted by `at`, not file order");
+        assert!(seen(held(4980), &stopped).is_null(), "sorted by `at`, not file order");
+        // Seen on a phone: a stop from before this withdrawal (inside a rules update) hid it.
+        assert_eq!(seen(held(4996), &stopped), mine, "an older stop never hides a withdrawal");
+        assert_eq!(seen(held(4996), &done), mine, "nor does an older completed withdrawal");
+        let undated = json!({"pending": mine.clone()});
+        assert_eq!(seen(undated, &stopped), mine, "no time known: the chain's word stands");
         let declined = json!({"seen_at": 5000, "alerts": [{"at": 4995, "kind": "withdrawal_declined", "text": "d"}, {"at": 4990, "kind": "withdrawal_pending", "text": "x"}]});
-        assert!(with_watcher(json!({"pending": mine.clone()}), &declined, 5010)["pending"].is_null(), "v5: a decline clears a pending the watcher saw");
+        assert!(seen(held(4980), &declined).is_null(), "v5: a decline clears a waiting withdrawal");
         assert_eq!(with_watcher(json!({"pending": mine.clone()}), &thief, 5010)["pending"], mine, "both agree: state.json's detail stays");
     }
 

@@ -161,7 +161,9 @@ impl Watcher<'_> {
             if let Some(t) = txs.find(|t| spends(t, &c.0)) {
                 return Some(t);
             }
-            match step(&r.block_hashes, page, n) {
+            // the race walk keeps its own page cap (RACE_PAGES): no tip rule, no clock
+            let at = Page { n, at_tip: false, spent: Duration::ZERO };
+            match step(&r.block_hashes, page, at) {
                 Step::Next(h) => page = h,
                 _ => return None,
             }

@@ -73,6 +73,7 @@ public class MainActivity extends Activity {
             "only_trusted", "watch_only", "clip_check", "panic_pin", "alert_second", "watch_phone", "send_grace", "colors",
             "live_network", "live_local", "guard_nodes", "signer_window", "lock_after", "last_balances", "toured", "alert_ack_at", "rules_move",
             "chart_ma20", "chart_ma50", "price_saved", "helper_names",
+            "alerts_cleared",
             "paper_shown")); // paper_shown: a reminder flag only (the page compares the code last shown)
     /**
      * The only screens Preferences > Allow screenshots may open to capture: no words, no keys, no

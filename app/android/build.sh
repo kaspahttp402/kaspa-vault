@@ -87,6 +87,34 @@ fi
 sha256sum build/aligned.apk | cut -d' ' -f1 > build/unsigned.sha256
 "$BT/apksigner.bat" sign --ks "$KV_KEYSTORE" --ks-key-alias "$KV_KEY_ALIAS" --ks-pass env:KV_STORE_PASS --key-pass env:KV_KEY_PASS --out build/KaspaVault.apk build/aligned.apk
 CERT="$("$BT/apksigner.bat" verify --print-certs build/KaspaVault.apk | tr -d '\r' | sed -n 's/.*certificate SHA-256 digest: *//p' | head -1)"
+# ---- Play bundle (opt-in): KV_BUNDLE=1 bash build.sh also writes build/KaspaVault.aab, signed with the Play UPLOAD key ----
+# The upload key is not the app's signing key: Play re-signs with the app signing key (docs/store/CHECKLIST.md F3).
+# Its settings live in ~/.kaspavault/upload.properties (keystore=, alias=, storePass=), never in the tree.
+if [ "${KV_BUNDLE:-0}" = 1 ]; then
+  [ -z "$LINK_DEBUG" ] || { echo "KV_BUNDLE=1 with KV_DEBUGGABLE=1: Play refuses debuggable bundles." >&2; exit 1; }
+  UPROPS="${KV_UPLOAD_PROPS:-$HOME/.kaspavault/upload.properties}"
+  [ -f "$UPROPS" ] || { echo "No $UPROPS: the Play upload key is not set up (keystore=, alias=, storePass=)." >&2; exit 1; }
+  uprop() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$UPROPS" | tail -1 | tr -d '\r'; }
+  UP_KS="$(uprop keystore)"; case "$UP_KS" in ~*) UP_KS="$HOME${UP_KS#\~}";; esac
+  UP_ALIAS="$(uprop alias)"; KV_UP_PASS="$(uprop storePass)"; export KV_UP_PASS
+  BTCP="$(cat "$SDK/bundletool.cp")"
+  bundletool() { java -cp "$BTCP" com.android.tools.build.bundletool.BundleToolMain "$@"; }
+  rm -rf build/aab && mkdir -p build/aab/base/manifest build/aab/base/dex
+  "$BT/aapt2.exe" link --proto-format -I "$AJ" --manifest AndroidManifest.xml -o build/aab/proto.zip build/res.zip \
+    --min-sdk-version 33 --target-sdk-version 36
+  (cd build/aab/base && jar xf ../proto.zip && mv AndroidManifest.xml manifest/)
+  cp build/dex/classes.dex build/aab/base/dex/
+  cp -r build/assets build/aab/base/assets
+  if [ -d build/lib ]; then cp -r build/lib build/aab/base/lib; fi
+  # Native libraries stored uncompressed and 16 KB page-aligned (Play's 16 KB rule; POLICY_NOTES 4).
+  printf '{"optimizations":{"uncompressNativeLibraries":{"enabled":true,"alignment":"PAGE_ALIGNMENT_16K"}}}' > build/aab/config.json
+  (cd build/aab/base && jar cMf ../base.zip *)
+  bundletool build-bundle --modules=build/aab/base.zip --config=build/aab/config.json --output=build/KaspaVault.aab --overwrite
+  jarsigner -sigalg SHA256withRSA -digestalg SHA-256 -keystore "$UP_KS" -storepass:env KV_UP_PASS build/KaspaVault.aab "$UP_ALIAS" >/dev/null
+  jarsigner -verify build/KaspaVault.aab | grep -q "jar verified" || { echo "AAB signature did not verify." >&2; exit 1; }
+  bundletool validate --bundle=build/KaspaVault.aab >/dev/null
+  echo "BUNDLE: $(pwd)/build/KaspaVault.aab (upload key $UP_ALIAS, $(stat -c %s build/KaspaVault.aab) bytes)"
+fi
 OK=1
 
 echo "code reader jsqr.js SHA-256: $(grep -E ' \*?\./jsqr\.js$' build/assets.sha256 | cut -d' ' -f1)"

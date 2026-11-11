@@ -41,17 +41,15 @@
     QUIET_AFTER = 180; /* spend kinds */
 
   /* ---- settings: phone storage through the bridge, browser storage otherwise ---- */
-  /* the guard's "cannot reach the network" comes after every phone sleep or network switch
-     and repeats itself: keep only the newest, and none once the guard has heard the
-     network since */
-  function quietSilence(list, seenAt) {
-    var newest = 0;
-    list.forEach(function (a) {
-      if (a.kind === 'watcher_silent' && a.at > newest) newest = a.at;
-    });
+  /* the state of the network is not news (the guard cannot reach it, or only part of it
+     answers): it comes after every phone sleep or network switch, so it is never an alert */
+  var NETWORK_KINDS = { watcher_silent: 1, unchecked: 1 };
+  function networkNotice(a) {
+    return !!a && NETWORK_KINDS[a.kind] === 1;
+  }
+  function dropNetwork(list) {
     return list.filter(function (a) {
-      if (a.kind !== 'watcher_silent') return true;
-      return a.at === newest && !(typeof seenAt === 'number' && seenAt > a.at);
+      return !networkNotice(a);
     });
   }
   function getSetting(k) {
@@ -465,6 +463,21 @@
     var v = String(getSetting('paper_shown') || '').split('|');
     return { hash: v[0] || '', marks: (v[1] || '').split(',').filter(Boolean).slice(0, 16) };
   }
+  /* what a rules change alters in the watch code: the people, the covenant code and the
+     account's own id. A payment changes none of them, and the paper follows the account from
+     the record it was printed with. The mark starts with "r"; a bare hash is the older kind
+     (the whole code, which every payment changed) */
+  function rulesMark(code) {
+    var o = null;
+    try {
+      o = JSON.parse(code);
+    } catch (e) {
+      o = null;
+    }
+    if (!o || typeof o !== 'object') return 'r' + shortHash(String(code));
+    var id = JSON.stringify((o.vault || {}).covenant_id || '');
+    return 'r' + shortHash([o.public_sha256, o.contract_sha256, id].join('|'));
+  }
   function paperSave(hash, marks) {
     setSetting('paper_shown', hash + (marks.length ? '|' + marks.join(',') : ''));
   }
@@ -620,7 +633,7 @@
             return { at: a.at, kind: String(a.kind || ''), text: plain(a.text, 'Something needs your attention.') };
           })
       : [];
-    state.alerts = quietSilence(state.alerts, s.watcher_seen_at);
+    state.alerts = dropNetwork(state.alerts);
     state.watcherSeenAt = 'watcher_seen_at' in s ? s.watcher_seen_at : undefined;
     state.network = typeof s.network === 'string' ? plain(s.network, '') : ''; /* which network the engine is on; the screen shows it */
   }
@@ -1245,18 +1258,24 @@
         return api.paperSheet().then(function (r) {
           var code = String((r && r.ok && r.watch_code) || ''),
             last = paperParts().hash;
+          if (code && last && last.charAt(0) !== 'r') {
+            /* an older-kind hash cannot be compared: taken once as the code now in use */
+            last = rulesMark(code);
+            paperSave(last, paperParts().marks);
+          }
           return { has: true, pub: pub, printed: !!last,
-            due: !!code && shortHash(code) !== last };
+            due: !!code && rulesMark(code) !== last };
         });
       });
     },
+    networkNotice: networkNotice,
     paperDue: function () {
       return this.paperState().then(function (s) {
         return !!s.due;
       });
     },
     paperShown: function (code) {
-      paperSave(shortHash(String(code || '')), paperParts().marks);
+      paperSave(rulesMark(String(code || '')), paperParts().marks);
     },
     /* Your papers: what the person confirmed (s1-s3 vault seeds, h their own heir seed,
        o their heir has an heir seed, p kept in separate places) */

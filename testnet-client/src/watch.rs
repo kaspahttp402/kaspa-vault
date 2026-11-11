@@ -66,6 +66,10 @@ const WAITING_TICKS: u32 = 10;
 const MAX_FOREIGN: usize = 100;
 /// Item 9: pages of blocks (and of the virtual chain) one catch-up walk may take before it stops and says so.
 const SCAN_PAGES_MAX: usize = 400;
+/// One catch-up walk's share of the clock on one node. At ten blocks a second a walk never sees
+/// "a page with nothing new", so the clock ends it (the cursor is kept) long before the phone's
+/// deaf rule or SILENT can call the watcher dead.
+const WALK_BUDGET: Duration = Duration::from_secs(8);
 /// Item 8: confirmations the node must count before a spend is final; None = accepted by the virtual chain once.
 const ACCEPT_CONFIRMATIONS: Option<u64> = None;
 /// No good answer from any node for this long is "the guard cannot reach the network".
@@ -720,12 +724,61 @@ enum Step {
     Capped(Hash),
 }
 
-fn step(hashes: &[Hash], page: Hash, n: usize) -> Step {
+fn step(hashes: &[Hash], page: Hash, p: Page) -> Step {
     match next_page(hashes, page) {
         None => Step::Tip,
-        Some(h) if n < SCAN_PAGES_MAX => Step::Next(h),
+        Some(_) if p.at_tip => Step::Tip,
+        Some(h) if p.n < SCAN_PAGES_MAX && p.spent < WALK_BUDGET => Step::Next(h),
         Some(h) => Step::Capped(h),
     }
+}
+
+/// What a walk knows after a page besides its hashes: the page's number, whether it reached the
+/// height the nodes stood at when the tick began (the tip, as far as this tick goes), and the
+/// time the walk has taken on this node.
+#[derive(Clone, Copy)]
+struct Page {
+    n: usize,
+    at_tip: bool,
+    spent: Duration,
+}
+
+/// One node's walk of the blocks since `low`, page by page, for the spenders of `op`: Ok(what it
+/// found, the page a cap or the clock stopped it at), or Err(the page whose call failed).
+/// `tip_daa` is the height the nodes stood at when the tick began; a page reaching it is the tip.
+async fn walk_blocks(
+    rpc: &KaspaRpcClient,
+    name: &str,
+    low: Hash,
+    op: &TransactionOutpoint,
+    tip_daa: u64,
+) -> Result<(Vec<RpcTransaction>, Option<Hash>), Hash> {
+    let mut hits: Vec<RpcTransaction> = vec![];
+    let mut page = low;
+    let began = Instant::now();
+    for n in 1..=SCAN_PAGES_MAX {
+        let r = match in_time(rpc.get_blocks(Some(page), true, true)).await {
+            Ok(r) => r,
+            Err(e) => {
+                let why = format!("get_blocks from {page} on {name} failed: {e}");
+                println!("{} info  {why}; {name} counts as not answered", stamp());
+                return Err(page);
+            }
+        };
+        let at_tip = r.blocks.iter().any(|b| b.header.daa_score >= tip_daa);
+        hits.extend(r.blocks.into_iter().flat_map(|b| b.transactions).filter(|t| spends(t, op)));
+        let spent = began.elapsed();
+        if let Step::Next(h) = step(&r.block_hashes, page, Page { n, at_tip, spent }) {
+            page = h;
+            continue;
+        }
+        let Step::Capped(h) = step(&r.block_hashes, page, Page { n, at_tip, spent }) else { break };
+        let s = spent.as_secs();
+        let walked = format!("{n} pages of blocks walked from {low} in {s} s, tip not reached");
+        println!("{} info  {name}: {walked}; the next tick continues from {h}", stamp());
+        return Ok((hits, Some(h)));
+    }
+    Ok((hits, None))
 }
 
 /// Item 8: whether the spender `txid` is among the transaction ids the virtual chain accepted.
@@ -1098,40 +1151,26 @@ impl<'a> Watcher<'a> {
         let mut capped: Option<Hash> = None;
         let mut failed = 0usize;
         let mut pruned = 0usize;
+        let tip_daa = self.daa_low;
         for (name, rpc) in self.nodes() {
-            let mut hits: Vec<RpcTransaction> = vec![];
-            let mut page = low;
-            let mut errored = false;
-            for n in 1..=SCAN_PAGES_MAX {
-                match in_time(rpc.get_blocks(Some(page), true, true)).await {
-                    Ok(r) => {
-                        hits.extend(r.blocks.into_iter().flat_map(|b| b.transactions).filter(|t| spends(t, op)));
-                        match step(&r.block_hashes, page, n) {
-                            Step::Next(h) => page = h,
-                            Step::Tip => break,
-                            Step::Capped(h) => {
-                                println!("{} info  {name}: {SCAN_PAGES_MAX} pages of blocks walked from {low} without reaching the tip; the next tick continues from {h}", stamp());
-                                capped.get_or_insert(h);
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        errored = true;
-                        failed += 1;
-                        pruned += usize::from(page == low);
-                        println!("{} info  get_blocks from {page} on {name} failed: {e}; {name} counts as not answered", stamp());
-                        break;
-                    }
+            let hits = match walk_blocks(rpc, name, low, op, tip_daa).await {
+                Ok((hits, cap)) => {
+                    capped = capped.or(cap);
+                    hits
                 }
-            }
-            if errored {
-                lagging.push(name.to_string());
-                continue;
-            }
+                Err(at) => {
+                    failed += 1;
+                    pruned += usize::from(at == low);
+                    lagging.push(name.to_string());
+                    continue;
+                }
+            };
             let mut pick: Option<(RpcTransaction, bool)> = None;
             for t in hits {
-                let ok = self.accepted(rpc, name, low, &txid_of(&t)).await;
+                // the chain walk shares the clock rule: out of time counts as not accepted yet
+                let id = txid_of(&t);
+                let walk = self.accepted(rpc, name, low, &id);
+                let ok = tokio::time::timeout(WALK_BUDGET, walk).await.unwrap_or(false);
                 if ok || pick.is_none() {
                     pick = Some((t, ok));
                 }
@@ -1639,8 +1678,12 @@ impl<'a> Watcher<'a> {
         self.lost = None;
     }
 
-    /// Alerts when the node's clock (its virtual DAA score) stops against wall time.
+    /// A node just answered with its clock (its virtual DAA score): the heartbeat the phone reads
+    /// moves now, before any block walk this tick makes; a clock stopped against wall time alerts.
     fn watch_clock(&mut self, daa: u64) {
+        self.alerts.seen_at = Some(unix_now());
+        self.alerts.save(&self.ctx.dir);
+        self.woke.notify_waiters();
         if daa != self.daa_seen.0 {
             self.daa_seen = (daa, Instant::now());
             self.stall_said = None;
@@ -2679,9 +2722,18 @@ mod tests {
         let low = Hash::from_bytes([1u8; 32]);
         let a = Hash::from_bytes([2u8; 32]);
         let b = Hash::from_bytes([3u8; 32]);
-        assert_eq!(step(&[low, a, b], low, 1), Step::Next(b));
-        assert_eq!(step(&[low, a, b], low, SCAN_PAGES_MAX), Step::Capped(b), "the last page with more to walk remembers where");
-        assert_eq!(step(&[low], low, SCAN_PAGES_MAX), Step::Tip);
+        let pg = |n: usize, at_tip: bool, secs: u64| {
+            let spent = Duration::from_secs(secs);
+            Page { n, at_tip, spent }
+        };
+        assert_eq!(step(&[low, a, b], low, pg(1, false, 0)), Step::Next(b));
+        let last = step(&[low, a, b], low, pg(SCAN_PAGES_MAX, false, 0));
+        assert_eq!(last, Step::Capped(b), "the last page with more to walk remembers where");
+        assert_eq!(step(&[low], low, pg(SCAN_PAGES_MAX, false, 0)), Step::Tip);
+        let late = step(&[low, a, b], low, pg(2, false, WALK_BUDGET.as_secs()));
+        assert_eq!(late, Step::Capped(b), "out of time: stop and remember where");
+        let there = step(&[low, a, b], low, pg(2, true, WALK_BUDGET.as_secs()));
+        assert_eq!(there, Step::Tip, "a page at the tick's own height is the tip");
         assert_eq!(next_walk(Verdict::Nothing, low, Some(b), false), Some(b), "nothing yet: continue from the last page");
         assert_eq!(next_walk(Verdict::Nothing, low, None, false), None, "the tip, every node answered: caught up");
         assert_eq!(next_walk(Verdict::Nothing, low, Some(b), true), Some(low), "a node did not answer: hold at low");

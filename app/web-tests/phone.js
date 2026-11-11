@@ -308,7 +308,7 @@ async function paperPrinted(ev) {
   const ids = await ev("document.querySelector('[data-ids]').textContent");
   if (!/account code 1a2b3c4d\./.test(ids)) bad.push('the account code to write down: ' + ids);
   const kept = await ev('window.__kvSettings.paper_shown');
-  if (!/^[0-9a-f]{8}$/.test(kept)) bad.push('paper_shown not kept: ' + kept);
+  if (!/^r[0-9a-f]{8}$/.test(kept)) bad.push('paper_shown not kept: ' + kept);
   await ev("['s1', 's2', 's3', 'p'].forEach(function (t) { KVData.paperMark(t); });"
     + " KVApp.go('home', {}, { root: true })"); await sleep(900);
   if (!(await ev(PAPER_HIDDEN))) bad.push('Home asks to update a paper stop just printed');

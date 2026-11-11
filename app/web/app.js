@@ -3345,9 +3345,10 @@
      rows in the Alerts list (Home keeps its short log and alarm row); a waiting withdrawal
      stands behind the waiting row above, as in history */
   function alertRows(s) {
+    var upTo = clearedStore().t;
     return (s.alerts || [])
       .filter(function (a) {
-        return !(s.pending && a.kind === 'withdrawal_pending');
+        return a.at > upTo && !(s.pending && a.kind === 'withdrawal_pending');
       })
       .map(function (a) {
         return { text: a.text, sub: alertWhen(a.at), go: '', ref: '' };
@@ -3376,6 +3377,45 @@
   function alertsNew() {
     return alertsTop() > seenStore().t;
   }
+  /* alerts_cleared: "<own alerts cleared up to>|<past watched rows cleared>|<row:first noted>".
+     Only what is over can be cleared; a withdrawal or a claim that waits always shows */
+  function clearedStore() {
+    var v = String(D.getSetting('alerts_cleared') || '').split('|'),
+      noted = {};
+    (v[2] || '').split(',').forEach(function (p) {
+      var kv = p.split(':');
+      if (kv[1]) noted[kv[0]] = Number(kv[1]) || 0;
+    });
+    return { t: Number(v[0]) || 0, marks: (v[1] || '').split(',').filter(Boolean), noted: noted };
+  }
+  function clearedSave(c) {
+    var n = Object.keys(c.noted).slice(-24).map(function (k) {
+      return k + ':' + c.noted[k];
+    });
+    D.setSetting('alerts_cleared', c.t + '|' + c.marks.slice(0, 64).join(',') + '|' + n.join(','));
+  }
+  /* when this phone first noted a fact it has no dated alert for (an account found stopped) */
+  function notedAt(mark) {
+    var c = clearedStore();
+    if (!c.noted[mark]) {
+      c.noted[mark] = Math.floor(Date.now() / 1000);
+      clearedSave(c);
+    }
+    return c.noted[mark];
+  }
+  function clearPast() {
+    var c = clearedStore();
+    c.t = Math.floor(Date.now() / 1000);
+    c.marks = watchedAlertsAll()
+      .filter(function (a) {
+        return a.past;
+      })
+      .map(function (a) {
+        return a.mark;
+      });
+    clearedSave(c);
+    refresh();
+  }
   /* a short mark for one watched alert (FNV-1a, 8 hex) so the seen list stays small */
   function alertMark(k) {
     var h = 0x811c9dc5;
@@ -3386,24 +3426,39 @@
   /* alerts about the accounts this phone watches for others: what each one's status says
      now (a withdrawal waiting, ready to claim, stopped) and the engine's alerts (st.alerts) */
   function watchedAlerts() {
+    var gone = clearedStore().marks;
+    return watchedAlertsAll().filter(function (a) {
+      return !(a.past && gone.indexOf(a.mark) >= 0);
+    });
+  }
+  /* past: over and dated, so it can be cleared; the rest stands while it is true */
+  function watchedAlertsAll() {
     if (!D.isLocal()) return [];
     var out = [];
     watchedList().forEach(function (w) {
       var st = w.st || {},
         nm = watchedName(w);
-      function add(key, text, sub, loud) {
+      function add(key, text, sub, loud, past) {
         var mark = alertMark(w.id + '|' + key);
-        out.push({ mark: mark, text: text, sub: sub, loud: !!loud, id: w.id });
+        out.push({ mark: mark, text: text, sub: sub, loud: !!loud, id: w.id, past: !!past });
       }
+      var news = (st.alerts || []).filter(function (a) {
+        return !D.networkNotice(a);
+      });
+      var dated = news.some(function (a) {
+        return a.kind === 'stopped';
+      });
       if (st.stage === 'waiting' && st.pending)
         add('w' + st.pending.kas + st.pending.to,
           'A withdrawal of ' + fmt(st.pending.kas) + ' KAS is waiting on ' + nm,
           'Goes through in ' + dur(st.pending.ends_in_seconds), st.can_stop);
       if (st.can_claim) add('c', nm + ' can be claimed', 'The inactivity period has run out');
-      if (st.stage === 'stopped') add('s', nm + ' was stopped', 'Emergency stop');
-      (st.alerts || []).slice(0, 10).forEach(function (a) {
+      if (st.stage === 'stopped' && !dated)
+        add('s', nm + ' was stopped', 'Noted ' + alertWhen(notedAt(alertMark(w.id + '|s'))),
+          false, true);
+      news.slice(0, 10).forEach(function (a) {
         var hot = a.kind === 'withdrawal_pending' && st.can_stop;
-        add('a' + a.at + a.text, nm + ': ' + a.text, alertWhen(a.at), hot);
+        add('a' + a.at + a.text, nm + ': ' + a.text, alertWhen(a.at), hot, !hot);
       });
     });
     return out;
@@ -7762,9 +7817,11 @@
     /* 11. Alerts */
     alerts: {
       html: function () {
-        return topbar('<span class="label">Alerts</span>') + '<div class="list" data-l></div>';
+        return topbar('<span class="label">Alerts</span>') + '<div class="list" data-l></div>' +
+          '<button class="ghost" data-clear hidden>Clear past alerts</button>';
       },
       after: function (el) {
+        el.querySelector('[data-clear]').onclick = clearPast;
         el.querySelector('[data-l]').addEventListener('click', function (e) {
           var b = e.target.closest('[data-to]');
           if (b && b.dataset.to) go(b.dataset.to, {});
@@ -7772,6 +7829,10 @@
       },
       live: function (el) {
         setHtml(el, '[data-l]', logHtml(200, true) || '<div class="sub">Nothing yet.</div>');
+        var over = watchedAlerts().some(function (a) {
+          return a.past;
+        });
+        el.querySelector('[data-clear]').hidden = !(over || alertRows(D.state).length);
         alertsMark();
       },
     },
