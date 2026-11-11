@@ -110,7 +110,8 @@
     priceRest = 0 /* no price asks before this time, after a refused one */,
     euroAt = 0 /* when the euro price was last asked for */,
     priceLoaded = false,
-    PRICE_LIVE_MS = 3600000 /* prices younger than this count as current (the dollar view uses them) */,
+    PRICE_LIVE_MS = 3600000 /* prices younger than this count as current */,
+    PRICE_KEEP_MS = 86400000 /* the dollar view uses a price this old, and says its age */,
     PRICE_SAVE_POINTS = 240 /* points per period kept across restarts in setting price_saved */,
     PRICE_DAYS = {
       day: 1,
@@ -174,7 +175,7 @@
       if (PRICE_DAYS[r] && !priceLive[r] && e && Array.isArray(e.p) && typeof e.at === 'number') priceKeep(r, e.p, e.at);
     });
     var d = priceLive.day;
-    if (d && Date.now() - d.at < PRICE_LIVE_MS) state.rate = d.values[d.values.length - 1];
+    if (d && Date.now() - d.at < PRICE_KEEP_MS) state.rate = d.values[d.values.length - 1];
   }
   /* -> the price screen's summary of a period's [time, price] points: now, change, high, low and
      the average of the last 7 days (from the 1-week points when given, else the period's own;
@@ -1024,6 +1025,17 @@
       var l = priceLive[range];
       return !!l && Date.now() - l.at < PRICE_LIVE_MS;
     } /* current prices for the period (younger than PRICE_LIVE_MS) */,
+    priceUsable: function (range) {
+      priceLoad();
+      var l = priceLive[range];
+      return !!l && Date.now() - l.at < PRICE_KEEP_MS;
+    } /* a real price the dollar view may still use (younger than PRICE_KEEP_MS) */,
+    priceAgeText: function (range) {
+      priceLoad();
+      var l = priceLive[range],
+        h = l ? Math.floor((Date.now() - l.at) / 3600000) : 0;
+      return h < 1 ? '' : 'price from ' + h + (h === 1 ? ' hour ago' : ' hours ago');
+    } /* '' for a current price, else its age in words */,
     priceAt: function (range) {
       priceLoad();
       var l = priceLive[range];

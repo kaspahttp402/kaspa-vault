@@ -4416,18 +4416,39 @@
     if (held.test(slotHolder('cancel2_x')) || held.test(slotHolder('cancel3_x'))) return true;
     return !!(pb.heir_x || pb.heir_address);
   }
+  /* Home asks for the price until a current one is in: one refused answer must not leave the
+     dollar view without a price for as long as Home stays open. At most 30 asks, 130 s apart. */
+  function askPrice(n) {
+    if (!(D.isLocal() && D.fetchPrices) || D.priceIsLive('day') || ui.priceAsking) return;
+    ui.priceAsking = true;
+    D.fetchPrices('day').then(function () {
+      var home = ui.cur && ui.cur.name === 'home',
+        live = D.priceIsLive('day');
+      if (live || !home || n >= 30) {
+        ui.priceAsking = false;
+        if (live && home) refresh();
+        return;
+      }
+      setTimeout(function () {
+        ui.priceAsking = false;
+        askPrice(n + 1);
+      }, 130000);
+    });
+  }
   function homeBalance(el, s, main, inPurse, bal, ph) {
-    var rateOk = !D.isLive() || D.priceIsLive('day'),
+    var rateOk = !D.isLive() || D.priceUsable('day'),
+      old = D.isLive() && rateOk ? D.priceAgeText('day') : '',
       inMoney =
         rateOk &&
         D.getSetting('balance_money') ===
           'on'; /* dollars on the phone too, but only from a real price */ /* the balance can show in dollars; a tap swaps */
+    var below = inMoney ? fmt(bal) + ' KAS' + (old ? ', ' + old : '') : rateOk ? under(bal) : '';
     var b = setHtml(el, '[data-bal]', inMoney && bal != null ? money(bal) : bigKas(bal));
     fit(b);
     setText(
       el,
       '[data-usd]',
-      inPurse ? 'KAS in your purse, not yet in the account' : bal == null ? '' : inMoney ? fmt(bal) + ' KAS' : rateOk ? under(bal) : ''
+      inPurse ? 'KAS in your purse, not yet in the account' : bal == null ? '' : below
     );
     setHtml(
       el,
@@ -6311,7 +6332,7 @@
       },
       after: function (el) {
         var swap = function () {
-          if (D.isLive() && !D.priceIsLive('day')) return;
+          if (D.isLive() && !D.priceUsable('day')) return;
           D.setSetting('balance_money', D.getSetting('balance_money') === 'on' ? 'off' : 'on');
           haptic();
           refresh();
@@ -6343,10 +6364,7 @@
           D.setSetting('toured', '1');
           go('howitworks', {});
         };
-        if (D.isLocal() && D.fetchPrices && !D.priceIsLive('day'))
-          D.fetchPrices('day').then(function (v) {
-            if (v && ui.cur && ui.cur.name === 'home') refresh();
-          }); /* the real rate for the dollar view */
+        askPrice(0); /* the real rate for the dollar view */
         el.querySelector('[data-purse-line]').onclick = function () {
           var s = D.state;
           if (D.isLocal() && s.rulesNext) return;
