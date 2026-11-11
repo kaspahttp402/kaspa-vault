@@ -133,3 +133,42 @@ async fn heartbeat_holds_while_a_withdrawal_waits() {
     assert!(end["pending"].is_null() && end["stopped"] != true, "the account did not end open");
     assert!(quiet < DEAF_S && waiting < DEAF_S && after < DEAF_S, "the guard went deaf");
 }
+
+/// Waits (at most 60 s) for the guard to end by itself; answers the engine's word for why.
+async fn ended_with(core: &Core) -> String {
+    for _ in 0..20 {
+        let (_, s) = core.call("guard.status", &json!({})).await;
+        if s["running"] == false && s["exited"].is_string() {
+            return s["exited"].as_str().unwrap().to_string();
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    panic!("the guard with a dead second node was still running after 60 s");
+}
+
+/// What a phone lived through: the second node it was handed is dead. The engine accepts the
+/// start, then the guard ends by itself with words that are not "finished" (the phone starts
+/// it again on those). A dead first node is refused at the start. The next plain start works.
+/// Run: cargo test --test guard_proof a_dead_node -- --ignored --nocapture
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_dead_node_never_leaves_the_guard_off() {
+    let net = Network::testnet();
+    let rpc = tx::connect(None, &net).await.unwrap();
+    let good = rpc.url().expect("the connection has a url");
+    let dead = "wss://127.0.0.1:9/dead".to_string();
+    let (owner, keys) = open(&owner_dir(), &rpc, &net);
+    let second = json!({"nodes": [good.clone(), dead.clone()]});
+    let started = call(&owner, &keys, "guard.start", second).await;
+    assert_eq!(started["body"]["ok"], true, "a dead second node is only found after the start");
+    let why = ended_with(&owner).await;
+    println!("RESULT dead second node: the guard ended with: {why}");
+    assert_ne!(why, "finished", "a dead node must not read as a closed account");
+    call(&owner, &keys, "guard.stop", json!({})).await;
+    let first = call(&owner, &keys, "guard.start", json!({"nodes": [dead, good]})).await;
+    assert_eq!(first["body"]["ok"], false, "a dead first node must refuse the start");
+    println!("RESULT dead first node: refused with {}", first["body"]["error"]);
+    start_guard(&owner, &keys).await;
+    println!("RESULT the next plain start: heartbeat fresh");
+    call(&owner, &keys, "guard.stop", json!({})).await;
+}

@@ -133,12 +133,13 @@ public final class GuardService extends Service {
             int status = env.optInt("status", 0);
             JSONObject body = env.optJSONObject("body");
             String error = body == null ? null : body.optString("error", "");
-            boolean started = status == 200 && body != null && body.optBoolean("ok", false);
+            boolean ok = body != null && body.optBoolean("ok", false);
+            boolean started = GuardRules.started(status, ok, error);
             // 503, or the engine's own "can't reach the network" words (a node that did not answer)
             boolean netDown = status == 503
                     || (error != null && error.toLowerCase().contains("network"));
             if (!started) {
-                if (netDown && retryLater()) return;
+                if (retryLater()) return; // whatever the reason: alerts end only by the switch
                 if (!looping) return; // switched off while still starting: nothing to report
                 String plain = netDown
                         ? "Alerts can't reach the network. Open KaspaVault and try again."
@@ -152,13 +153,14 @@ public final class GuardService extends Service {
                 return;
             }
             RUNNING = true;
-            startTries = 0;
             lastFresh = System.currentTimeMillis() / 1000;
             notifications.cancel(ID_REFUSED); // an "Alerts off" left by an earlier refusal is over
-            guardText = ""; showGuard("Alerts on");
+            // "Alerts on" is said by the wait loop, once the guard has been heard from
+            guardText = ""; showGuard(GuardRules.STARTING);
             guardThread.execute(this::waitLoop);
         } catch (Throwable t) {
             Log.w(TAG, "guard.start failed: " + t);
+            if (retryLater()) return;
             refuse("Alerts could not start. Open KaspaVault and try again.");
         }
     }
@@ -181,10 +183,10 @@ public final class GuardService extends Service {
         // quick tries first, then a slow pace for about a week: the network being away is never
         // a reason to switch the alerts off
         final int wait = startTries <= RETRY_QUICK ? RETRY_MS : RETRY_SLOW_MS;
-        Log.i(TAG, "guard.start: no network, try " + startTries + " of " + RETRY_MAX
+        Log.i(TAG, "guard.start: not started, try " + startTries + " of " + RETRY_MAX
                 + " in " + wait / 1000 + " s");
         notifications.notify(ID_GUARD,
-                guardNotification("Alerts starting"));
+                guardNotification(GuardRules.STARTING));
         controlThread.execute(() -> {
             try { Thread.sleep(wait); } catch (InterruptedException e) { return; }
             if (looping) startGuard();
@@ -197,8 +199,21 @@ public final class GuardService extends Service {
     private void refuse(String text) {
         RUNNING = false;
         looping = false;
-        notifications.notify(ID_REFUSED, alertNotification("Alerts off", text));
+        String shown = GuardRules.plainWords(text, "Alerts stopped. Open KaspaVault.");
+        notifications.notify(ID_REFUSED, alertNotification("Alerts off", shown));
         stopSelf();
+    }
+
+    /** The running guard ended by itself. Only the engine's own "finished" (the account closed)
+     *  is a real stop and is said once; any other ending (a node that would not answer, an
+     *  error) is tried again on fresh nodes and the alerts stay on. */
+    private void guardEnded(JSONObject body) {
+        String exited = body.isNull("exited") ? "" : body.optString("exited", "");
+        Log.i(TAG, "guard: ended by itself: " + exited);
+        RUNNING = false; // nothing is watching until the next start lands
+        if (GuardRules.retryAfterEnd(exited) && retryLater()) return;
+        if (!looping) return;
+        refuse("Alerts stopped. Open KaspaVault to start them again.");
     }
 
     /** Nothing heard for too long: the guard is stopped and started again on fresh connections
@@ -207,7 +222,7 @@ public final class GuardService extends Service {
         if (quietFor <= DEAF_S) return false;
         Log.i(TAG, "guard: nothing heard for " + quietFor + " s, starting again");
         Log.i(TAG, "guard.stop (deaf) -> " + brief(VaultLib.call("guard.stop", "{}")));
-        guardText = ""; showGuard("Alerts on");
+        guardText = ""; showGuard(GuardRules.STARTING);
         controlThread.execute(this::startGuard);
         return true;
     }
@@ -230,7 +245,10 @@ public final class GuardService extends Service {
                 boolean running = body.optBoolean("running", false);
                 long heardAt = Math.max(body.optLong("seen_at", 0), lastFresh);
                 if (running && restartIfDeaf(now - heardAt)) return;
-                showGuard(running ? "Alerts on" : "Alerts stopped. Open KaspaVault.");
+                long seenAt = body.optLong("seen_at", 0);
+                String standing = GuardRules.standing(running, seenAt, lastFresh);
+                if (GuardRules.ON.equals(standing)) startTries = 0;
+                showGuard(standing);
 
                 JSONArray alerts = body.optJSONArray("alerts");
                 long newest = lastShown;
@@ -244,7 +262,7 @@ public final class GuardService extends Service {
                     // what matters to the money: the network gone, or only part of it answering,
                     // stays in the app's list and in the line above, and never rings
                     String kind = a.optString("kind", "");
-                    if ("watcher_silent".equals(kind) || "unchecked".equals(kind)) continue;
+                    if (GuardRules.aboutNetwork(kind)) continue;
                     String text = a.optString("text", "");
                     if (text.isEmpty()) text = "Caught by your alerts. Open KaspaVault.";
                     notifications.notify(ID_ALERT_BASE + (alertCount++ % 50),
@@ -253,12 +271,7 @@ public final class GuardService extends Service {
                 if (newest != lastShown) { lastShown = newest; prefs.edit().putLong(LAST_ALERT_PREF, lastShown).apply(); }
                 checkWatched();
 
-                if (!running) {
-                    String exited = body.isNull("exited") ? "" : body.optString("exited", "");
-                    refuse(exited.isEmpty()
-                            ? "Alerts stopped. Open KaspaVault to start them again." : exited);
-                    return;
-                }
+                if (!running) { guardEnded(body); return; }
             } catch (InterruptedException e) {
                 return;
             } catch (Throwable t) {
