@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360" role="img" aria-label="What happens when a thief takes your unlocked phone">
+<style>
+  .t{font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .card{opacity:.28;animation:lit 16s infinite}
+  @keyframes lit{0%{opacity:.28}3%{opacity:1}22%{opacity:1}26%,100%{opacity:.28}}
+  .bar{transform-origin:0 0;animation:fill 16s linear infinite}
+  @keyframes fill{0%{transform:scaleX(0)}100%{transform:scaleX(1)}}
+  .blink{animation:blink .8s steps(2) infinite}
+  @keyframes blink{50%{opacity:.2}}
+</style>
+<rect width="960" height="360" rx="20" fill="#0b1416"/>
+<text class="t" x="32" y="42" font-size="18" font-weight="800" fill="#e6f4f1">Someone takes your unlocked phone, with the keys on it. Then what?</text>
+<rect x="32" y="60" width="896" height="4" rx="2" fill="#1d3337"/>
+<rect class="bar" style="animation-delay:-1s" x="32" y="60" width="896" height="4" rx="2" fill="#49EACB"/>
+<g class="t">
+  <!-- 1 -->
+  <g class="card" style="animation-delay:-1s">
+    <rect x="32" y="84" width="212" height="250" rx="14" fill="#1a1416" stroke="#ff6b5b"/>
+    <text x="52" y="118" font-size="30">📱</text>
+    <text x="52" y="152" font-size="15" font-weight="800" fill="#ff8a7d">1 · Phone taken</text>
+    <text x="52" y="178" font-size="12.5" fill="#c7b3b0">The thief now holds the</text>
+    <text x="52" y="195" font-size="12.5" fill="#c7b3b0">card (spend key) and one</text>
+    <text x="52" y="212" font-size="12.5" fill="#c7b3b0">stop key.</text>
+    <text x="52" y="248" font-size="12.5" fill="#c7b3b0">On an ordinary address</text>
+    <text x="52" y="265" font-size="12.5" fill="#c7b3b0">that is the end.</text>
+  </g>
+  <!-- 2 -->
+  <g class="card" style="animation-delay:3s">
+    <rect x="260" y="84" width="212" height="250" rx="14" fill="#0f2226" stroke="#49EACB"/>
+    <text x="280" y="118" font-size="30">💸</text>
+    <text x="280" y="152" font-size="15" font-weight="800" fill="#49EACB">2 · Small spend</text>
+    <text x="280" y="178" font-size="12.5" fill="#9fb8b4">They can pay out up to</text>
+    <text x="280" y="195" font-size="12.5" fill="#9fb8b4">what is left of today's</text>
+    <text x="280" y="212" font-size="12.5" fill="#9fb8b4">limit. Anything more and</text>
+    <text x="280" y="229" font-size="12.5" fill="#9fb8b4">the network says no.</text>
+    <text x="280" y="265" font-size="12.5" fill="#9fb8b4">You set the limit as</text>
+    <text x="280" y="282" font-size="12.5" fill="#9fb8b4">"pocket money" size.</text>
+  </g>
+  <!-- 3 -->
+  <g class="card" style="animation-delay:7s">
+    <rect x="488" y="84" width="212" height="250" rx="14" fill="#1f1b10" stroke="#f5b942"/>
+    <text x="508" y="118" font-size="30" class="blink">🚨</text>
+    <text x="508" y="152" font-size="15" font-weight="800" fill="#f5b942">3 · "Send it all"</text>
+    <text x="508" y="178" font-size="12.5" fill="#cbbf9f">A big payment can only be</text>
+    <text x="508" y="195" font-size="12.5" fill="#cbbf9f">requested. It is written</text>
+    <text x="508" y="212" font-size="12.5" fill="#cbbf9f">on chain, nothing leaves,</text>
+    <text x="508" y="229" font-size="12.5" fill="#cbbf9f">and the notice clock starts.</text>
+    <text x="508" y="265" font-size="12.5" fill="#cbbf9f">Your guard and guardians</text>
+    <text x="508" y="282" font-size="12.5" fill="#cbbf9f">get an alarm right away.</text>
+  </g>
+  <!-- 4 -->
+  <g class="card" style="animation-delay:11s">
+    <rect x="716" y="84" width="212" height="250" rx="14" fill="#0f2226" stroke="#f5b942"/>
+    <text x="736" y="118" font-size="30">🛑</text>
+    <text x="736" y="152" font-size="15" font-weight="800" fill="#f5b942">4 · Emergency stop</text>
+    <text x="736" y="178" font-size="12.5" fill="#9fb8b4">You or a guardian press</text>
+    <text x="736" y="195" font-size="12.5" fill="#9fb8b4">stop. Everything moves to</text>
+    <text x="736" y="212" font-size="12.5" fill="#9fb8b4">your vault: 2 of 3 paper</text>
+    <text x="736" y="229" font-size="12.5" fill="#9fb8b4">seeds the thief never saw.</text>
+    <text x="736" y="265" font-size="13" font-weight="800" fill="#49EACB">Thief's total take:</text>
+    <text x="736" y="284" font-size="13" font-weight="800" fill="#49EACB">one daily limit.</text>
+  </g>
+</g>
+</svg>

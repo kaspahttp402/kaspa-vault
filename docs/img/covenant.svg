@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-label="An ordinary address versus a covenant account">
+<style>
+  .t{font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .fly{animation:fly 3s ease-in infinite}
+  @keyframes fly{0%{transform:translate(0,0);opacity:0}10%{opacity:1}80%{transform:translate(212px,0);opacity:1}100%{transform:translate(212px,0);opacity:0}}
+  .hit{animation:hit 3s ease-in infinite}
+  @keyframes hit{0%{transform:translate(0,0);opacity:0}10%{opacity:1}55%{transform:translate(30px,0);opacity:1}70%{transform:translate(12px,0);opacity:0}100%{opacity:0}}
+  .x{animation:x 3s infinite;transform-box:fill-box;transform-origin:center}
+  @keyframes x{0%,50%{opacity:.25;transform:scale(1)}58%{opacity:1;transform:scale(1.3)}75%,100%{opacity:.25;transform:scale(1)}}
+  .dash{stroke-dasharray:6 6;animation:dash 1s linear infinite}
+  @keyframes dash{to{stroke-dashoffset:-12}}
+</style>
+<rect width="960" height="400" rx="20" fill="#0b1416"/>
+<!-- left panel -->
+<rect x="16" y="16" width="452" height="368" rx="16" fill="#1a1416" stroke="#4a2a2a"/>
+<text class="t" x="40" y="52" font-size="16" font-weight="800" fill="#ff8a7d">ORDINARY ADDRESS</text>
+<text class="t" x="40" y="76" font-size="14" fill="#b39a96">The key is the money. Nothing else is asked.</text>
+<g class="t">
+  <circle cx="90" cy="210" r="34" fill="#0b1416" stroke="#ff8a7d" stroke-width="3"/>
+  <text x="90" y="222" font-size="34" font-weight="800" fill="#ff8a7d" text-anchor="middle">K</text>
+  <text x="90" y="268" font-size="12" fill="#b39a96" text-anchor="middle">your coins</text>
+  <rect x="356" y="178" width="92" height="64" rx="10" fill="#ff6b5b"/>
+  <text x="402" y="207" font-size="14" font-weight="800" fill="#1a1416" text-anchor="middle">THIEF</text>
+  <text x="402" y="226" font-size="11" font-weight="700" fill="#1a1416" text-anchor="middle">with your key</text>
+  <path class="dash" d="M128 210H350" stroke="#ff6b5b" stroke-width="2"/>
+  <g class="fly"><circle cx="136" cy="210" r="9" fill="#ff8a7d"/></g>
+  <g class="fly" style="animation-delay:.5s"><circle cx="136" cy="210" r="9" fill="#ff8a7d"/></g>
+  <g class="fly" style="animation-delay:1s"><circle cx="136" cy="210" r="9" fill="#ff8a7d"/></g>
+  <text x="242" y="330" font-size="20" font-weight="800" fill="#ff8a7d" text-anchor="middle">Everything, in one second.</text>
+  <text x="242" y="356" font-size="13" fill="#b39a96" text-anchor="middle">No limit, no delay, no undo.</text>
+</g>
+<!-- right panel -->
+<rect x="492" y="16" width="452" height="368" rx="16" fill="#0f2226" stroke="#2a4a4f"/>
+<text class="t" x="516" y="52" font-size="16" font-weight="800" fill="#49EACB">KASPAVAULT COVENANT</text>
+<text class="t" x="516" y="76" font-size="14" fill="#9fb8b4">The coin carries rules. Every Kaspa node checks them.</text>
+<g class="t">
+  <circle cx="556" cy="226" r="34" fill="#0b1416" stroke="#49EACB" stroke-width="3"/>
+  <text x="556" y="238" font-size="34" font-weight="800" fill="#49EACB" text-anchor="middle">K</text>
+  <text x="556" y="284" font-size="12" fill="#9fb8b4" text-anchor="middle">the account</text>
+  <rect x="612" y="96" width="10" height="268" rx="5" fill="#49EACB" opacity=".85"/>
+  <path d="M590 226L612 118M590 226L612 172M590 226L612 280M590 226L612 334" stroke="#2f5a60" stroke-width="2"/>
+  <path class="dash" d="M622 118H660" stroke="#49EACB" stroke-width="2"/>
+  <path class="dash" d="M622 172H660" stroke="#70C7BA" stroke-width="2"/>
+  <path class="dash" d="M622 280H660" stroke="#f5b942" stroke-width="2"/>
+  <path class="dash" d="M622 334H660" stroke="#c9a7ff" stroke-width="2"/>
+  <text x="668" y="114" font-size="14" font-weight="700" fill="#49EACB">Small payment → anyone</text>
+  <text x="668" y="131" font-size="11.5" fill="#9fb8b4">only up to the daily limit</text>
+  <text x="668" y="168" font-size="14" font-weight="700" fill="#70C7BA">Large payment → wait ⏳</text>
+  <text x="668" y="185" font-size="11.5" fill="#9fb8b4">announced on chain, notice period, alarm</text>
+  <text x="668" y="276" font-size="14" font-weight="700" fill="#f5b942">Emergency stop → your vault only</text>
+  <text x="668" y="293" font-size="11.5" fill="#9fb8b4">2-of-3 paper seeds the thief never had</text>
+  <text x="668" y="330" font-size="14" font-weight="700" fill="#c9a7ff">Heir → after long inactivity</text>
+  <text x="668" y="347" font-size="11.5" fill="#9fb8b4">only if the account goes quiet</text>
+  <!-- the thief attempt bouncing -->
+  <g class="x"><circle cx="760" cy="226" r="17" fill="#ff6b5b"/><path d="M752 218l16 16M768 218l-16 16" stroke="#0b1416" stroke-width="3.5" stroke-linecap="round"/></g>
+  <text x="786" y="222" font-size="13" font-weight="800" fill="#ff8a7d">"All of it, now"</text>
+  <text x="786" y="239" font-size="11.5" fill="#ff8a7d">refused by every node</text>
+  <g class="hit"><path d="M630 226h70" stroke="#ff6b5b" stroke-width="3" stroke-linecap="round"/><path d="M700 218l12 8-12 8z" fill="#ff6b5b"/></g>
+</g>
+</svg>

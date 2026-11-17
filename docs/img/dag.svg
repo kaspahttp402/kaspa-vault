@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-label="A single-file blockchain compared with Kaspa's blockDAG">
+<style>
+  .t{font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .c{fill:#5d6f73;opacity:0;animation:in 10s infinite}
+  .k{fill:#49EACB;opacity:0;animation:in 10s infinite}
+  .l{stroke:#49EACB;stroke-width:1.3;fill:none;opacity:0;animation:inl 10s infinite}
+  .lc{stroke:#5d6f73;stroke-width:2;fill:none;opacity:0;animation:inl 10s infinite}
+  .orph{fill:#5d6f73;opacity:0;animation:orph 10s infinite}
+  @keyframes in{0%{opacity:0;transform:scale(.4)}4%{opacity:1;transform:scale(1)}88%{opacity:1}96%,100%{opacity:0}}
+  @keyframes inl{0%{opacity:0}4%{opacity:.8}88%{opacity:.8}96%,100%{opacity:0}}
+  @keyframes orph{0%{opacity:0}4%{opacity:.9}20%{opacity:.9}30%,100%{opacity:0}}
+  rect{transform-box:fill-box;transform-origin:center}
+</style>
+<rect width="960" height="300" rx="20" fill="#0b1416"/>
+<text class="t" x="32" y="40" font-size="17" font-weight="700" fill="#9fb8b4">ORDINARY BLOCKCHAIN · one block at a time, the rest are thrown away</text>
+<g>
+  <rect class="c" x="40"  y="62" width="34" height="34" rx="6" style="animation-delay:-8.6s"/>
+  <rect class="c" x="180" y="62" width="34" height="34" rx="6" style="animation-delay:-6.2s"/>
+  <rect class="orph" x="180" y="104" width="34" height="34" rx="6" style="animation-delay:-6.1s"/>
+  <rect class="c" x="320" y="62" width="34" height="34" rx="6" style="animation-delay:-3.8s"/>
+  <rect class="c" x="460" y="62" width="34" height="34" rx="6" style="animation-delay:-1.4s"/>
+  <path class="lc" d="M74 79H180" style="animation-delay:-6.2s"/>
+  <path class="lc" d="M214 79H320" style="animation-delay:-3.8s"/>
+  <path class="lc" d="M354 79H460" style="animation-delay:-1.4s"/>
+  <text class="t orph" x="222" y="126" font-size="12" style="fill:#ff6b5b;animation-delay:-6.1s">✕ wasted</text>
+</g>
+<text class="t" x="32" y="172" font-size="17" font-weight="700" fill="#49EACB">KASPA BLOCKDAG · many blocks in parallel, every one kept</text>
+
+<g>
+<rect class="k" x="40" y="188" width="22" height="22" rx="4" style="animation-delay:-8.6s"/>
+<rect class="k" x="40" y="216" width="22" height="22" rx="4" style="animation-delay:-8.55s"/>
+<rect class="k" x="40" y="244" width="22" height="22" rx="4" style="animation-delay:-8.5s"/>
+<path class="l" d="M62 227L96 199" style="animation-delay:-8.15s"/>
+<path class="l" d="M62 199L96 199" style="animation-delay:-8.15s"/>
+<path class="l" d="M62 199L96 227" style="animation-delay:-8.15s"/>
+<path class="l" d="M62 255L96 227" style="animation-delay:-8.15s"/>
+<path class="l" d="M62 227L96 255" style="animation-delay:-8.15s"/>
+<path class="l" d="M62 199L96 255" style="animation-delay:-8.15s"/>
+<rect class="k" x="96" y="188" width="22" height="22" rx="4" style="animation-delay:-8.15s"/>
+<rect class="k" x="96" y="216" width="22" height="22" rx="4" style="animation-delay:-8.1s"/>
+<rect class="k" x="96" y="244" width="22" height="22" rx="4" style="animation-delay:-8.05s"/>
+<path class="l" d="M118 199L152 199" style="animation-delay:-7.7s"/>
+<path class="l" d="M118 255L152 199" style="animation-delay:-7.7s"/>
+<path class="l" d="M118 227L152 227" style="animation-delay:-7.7s"/>
+<path class="l" d="M118 255L152 227" style="animation-delay:-7.7s"/>
+<path class="l" d="M118 199L152 255" style="animation-delay:-7.7s"/>
+<path class="l" d="M118 255L152 255" style="animation-delay:-7.7s"/>
+<rect class="k" x="152" y="188" width="22" height="22" rx="4" style="animation-delay:-7.7s"/>
+<rect class="k" x="152" y="216" width="22" height="22" rx="4" style="animation-delay:-7.65s"/>
+<rect class="k" x="152" y="244" width="22" height="22" rx="4" style="animation-delay:-7.6s"/>
+<path class="l" d="M174 255L208 199" style="animation-delay:-7.25s"/>
+<path class="l" d="M174 227L208 199" style="animation-delay:-7.25s"/>
+<path class="l" d="M174 199L208 227" style="animation-delay:-7.25s"/>
+<path class="l" d="M174 255L208 227" style="animation-delay:-7.25s"/>
+<rect class="k" x="208" y="188" width="22" height="22" rx="4" style="animation-delay:-7.25s"/>
+<rect class="k" x="208" y="216" width="22" height="22" rx="4" style="animation-delay:-7.2s"/>
+<path class="l" d="M230 199L264 199" style="animation-delay:-6.8s"/>
+<path class="l" d="M230 227L264 199" style="animation-delay:-6.8s"/>
+<path class="l" d="M230 199L264 227" style="animation-delay:-6.8s"/>
+<path class="l" d="M230 227L264 227" style="animation-delay:-6.8s"/>
+<path class="l" d="M230 199L264 255" style="animation-delay:-6.8s"/>
+<path class="l" d="M230 227L264 255" style="animation-delay:-6.8s"/>
+<rect class="k" x="264" y="188" width="22" height="22" rx="4" style="animation-delay:-6.8s"/>
+<rect class="k" x="264" y="216" width="22" height="22" rx="4" style="animation-delay:-6.75s"/>
+<rect class="k" x="264" y="244" width="22" height="22" rx="4" style="animation-delay:-6.7s"/>
+<path class="l" d="M286 227L320 199" style="animation-delay:-6.35s"/>
+<path class="l" d="M286 199L320 199" style="animation-delay:-6.35s"/>
+<path class="l" d="M286 255L320 227" style="animation-delay:-6.35s"/>
+<path class="l" d="M286 199L320 227" style="animation-delay:-6.35s"/>
+<path class="l" d="M286 255L320 255" style="animation-delay:-6.35s"/>
+<path class="l" d="M286 227L320 255" style="animation-delay:-6.35s"/>
+<rect class="k" x="320" y="188" width="22" height="22" rx="4" style="animation-delay:-6.35s"/>
+<rect class="k" x="320" y="216" width="22" height="22" rx="4" style="animation-delay:-6.3s"/>
+<rect class="k" x="320" y="244" width="22" height="22" rx="4" style="animation-delay:-6.25s"/>
+<path class="l" d="M342 199L376 199" style="animation-delay:-5.9s"/>
+<path class="l" d="M342 255L376 199" style="animation-delay:-5.9s"/>
+<path class="l" d="M342 227L376 227" style="animation-delay:-5.9s"/>
+<path class="l" d="M342 199L376 227" style="animation-delay:-5.9s"/>
+<path class="l" d="M342 255L376 255" style="animation-delay:-5.9s"/>
+<path class="l" d="M342 199L376 255" style="animation-delay:-5.9s"/>
+<rect class="k" x="376" y="188" width="22" height="22" rx="4" style="animation-delay:-5.9s"/>
+<rect class="k" x="376" y="216" width="22" height="22" rx="4" style="animation-delay:-5.85s"/>
+<rect class="k" x="376" y="244" width="22" height="22" rx="4" style="animation-delay:-5.8s"/>
+<path class="l" d="M398 255L432 199" style="animation-delay:-5.45s"/>
+<path class="l" d="M398 199L432 199" style="animation-delay:-5.45s"/>
+<path class="l" d="M398 227L432 227" style="animation-delay:-5.45s"/>
+<path class="l" d="M398 255L432 227" style="animation-delay:-5.45s"/>
+<rect class="k" x="432" y="188" width="22" height="22" rx="4" style="animation-delay:-5.45s"/>
+<rect class="k" x="432" y="216" width="22" height="22" rx="4" style="animation-delay:-5.4s"/>
+<path class="l" d="M454 227L488 199" style="animation-delay:-5s"/>
+<path class="l" d="M454 199L488 199" style="animation-delay:-5s"/>
+<path class="l" d="M454 227L488 227" style="animation-delay:-5s"/>
+<path class="l" d="M454 199L488 227" style="animation-delay:-5s"/>
+<path class="l" d="M454 199L488 255" style="animation-delay:-5s"/>
+<path class="l" d="M454 227L488 255" style="animation-delay:-5s"/>
+<rect class="k" x="488" y="188" width="22" height="22" rx="4" style="animation-delay:-5s"/>
+<rect class="k" x="488" y="216" width="22" height="22" rx="4" style="animation-delay:-4.95s"/>
+<rect class="k" x="488" y="244" width="22" height="22" rx="4" style="animation-delay:-4.9s"/>
+<path class="l" d="M510 199L544 199" style="animation-delay:-4.55s"/>
+<path class="l" d="M510 227L544 199" style="animation-delay:-4.55s"/>
+<path class="l" d="M510 255L544 227" style="animation-delay:-4.55s"/>
+<path class="l" d="M510 227L544 227" style="animation-delay:-4.55s"/>
+<path class="l" d="M510 227L544 255" style="animation-delay:-4.55s"/>
+<path class="l" d="M510 255L544 255" style="animation-delay:-4.55s"/>
+<rect class="k" x="544" y="188" width="22" height="22" rx="4" style="animation-delay:-4.55s"/>
+<rect class="k" x="544" y="216" width="22" height="22" rx="4" style="animation-delay:-4.5s"/>
+<rect class="k" x="544" y="244" width="22" height="22" rx="4" style="animation-delay:-4.45s"/>
+<path class="l" d="M566 255L600 199" style="animation-delay:-4.1s"/>
+<path class="l" d="M566 199L600 199" style="animation-delay:-4.1s"/>
+<path class="l" d="M566 199L600 227" style="animation-delay:-4.1s"/>
+<path class="l" d="M566 227L600 227" style="animation-delay:-4.1s"/>
+<path class="l" d="M566 199L600 255" style="animation-delay:-4.1s"/>
+<path class="l" d="M566 227L600 255" style="animation-delay:-4.1s"/>
+<rect class="k" x="600" y="188" width="22" height="22" rx="4" style="animation-delay:-4.1s"/>
+<rect class="k" x="600" y="216" width="22" height="22" rx="4" style="animation-delay:-4.05s"/>
+<rect class="k" x="600" y="244" width="22" height="22" rx="4" style="animation-delay:-4s"/>
+<path class="l" d="M622 227L656 199" style="animation-delay:-3.65s"/>
+<path class="l" d="M622 255L656 199" style="animation-delay:-3.65s"/>
+<path class="l" d="M622 199L656 227" style="animation-delay:-3.65s"/>
+<path class="l" d="M622 255L656 227" style="animation-delay:-3.65s"/>
+<path class="l" d="M622 255L656 255" style="animation-delay:-3.65s"/>
+<path class="l" d="M622 227L656 255" style="animation-delay:-3.65s"/>
+<rect class="k" x="656" y="188" width="22" height="22" rx="4" style="animation-delay:-3.65s"/>
+<rect class="k" x="656" y="216" width="22" height="22" rx="4" style="animation-delay:-3.6s"/>
+<rect class="k" x="656" y="244" width="22" height="22" rx="4" style="animation-delay:-3.55s"/>
+<path class="l" d="M678 255L712 199" style="animation-delay:-3.2s"/>
+<path class="l" d="M678 227L712 199" style="animation-delay:-3.2s"/>
+<path class="l" d="M678 255L712 227" style="animation-delay:-3.2s"/>
+<path class="l" d="M678 227L712 227" style="animation-delay:-3.2s"/>
+<path class="l" d="M678 255L712 255" style="animation-delay:-3.2s"/>
+<path class="l" d="M678 227L712 255" style="animation-delay:-3.2s"/>
+<rect class="k" x="712" y="188" width="22" height="22" rx="4" style="animation-delay:-3.2s"/>
+<rect class="k" x="712" y="216" width="22" height="22" rx="4" style="animation-delay:-3.15s"/>
+<rect class="k" x="712" y="244" width="22" height="22" rx="4" style="animation-delay:-3.1s"/>
+<path class="l" d="M734 199L768 199" style="animation-delay:-2.75s"/>
+<path class="l" d="M734 227L768 199" style="animation-delay:-2.75s"/>
+<path class="l" d="M734 227L768 227" style="animation-delay:-2.75s"/>
+<path class="l" d="M734 199L768 227" style="animation-delay:-2.75s"/>
+<rect class="k" x="768" y="188" width="22" height="22" rx="4" style="animation-delay:-2.75s"/>
+<rect class="k" x="768" y="216" width="22" height="22" rx="4" style="animation-delay:-2.7s"/>
+<path class="l" d="M790 227L824 199" style="animation-delay:-2.3s"/>
+<path class="l" d="M790 199L824 199" style="animation-delay:-2.3s"/>
+<path class="l" d="M790 227L824 227" style="animation-delay:-2.3s"/>
+<path class="l" d="M790 199L824 227" style="animation-delay:-2.3s"/>
+<rect class="k" x="824" y="188" width="22" height="22" rx="4" style="animation-delay:-2.3s"/>
+<rect class="k" x="824" y="216" width="22" height="22" rx="4" style="animation-delay:-2.25s"/>
+<path class="l" d="M846 199L880 199" style="animation-delay:-1.85s"/>
+<path class="l" d="M846 227L880 199" style="animation-delay:-1.85s"/>
+<path class="l" d="M846 227L880 227" style="animation-delay:-1.85s"/>
+<path class="l" d="M846 199L880 227" style="animation-delay:-1.85s"/>
+<path class="l" d="M846 199L880 255" style="animation-delay:-1.85s"/>
+<path class="l" d="M846 227L880 255" style="animation-delay:-1.85s"/>
+<rect class="k" x="880" y="188" width="22" height="22" rx="4" style="animation-delay:-1.85s"/>
+<rect class="k" x="880" y="216" width="22" height="22" rx="4" style="animation-delay:-1.8s"/>
+<rect class="k" x="880" y="244" width="22" height="22" rx="4" style="animation-delay:-1.75s"/>
+</g>
+<g class="t">
+  <rect x="660" y="56" width="268" height="84" rx="12" fill="#13262a" stroke="#2a4a4f"/>
+  <text x="680" y="88" font-size="15" fill="#9fb8b4">Kaspa: about</text>
+  <text x="680" y="122" font-size="30" font-weight="800" fill="#49EACB">10 blocks / sec</text>
+</g>
+</svg>
